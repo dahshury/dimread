@@ -129,6 +129,10 @@ pub fn start() {
     if let Some(app) = super::app() {
         windows_impl::start_tracker(app, generation);
     }
+    // The generation guard only drives the Windows environment tracker; the
+    // bump still runs on every platform so the counter stays monotonic.
+    #[cfg(not(windows))]
+    let _ = generation;
     super::emit_state();
 }
 
