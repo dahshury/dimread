@@ -31,7 +31,7 @@ One click, straight to the file — no scrolling through the releases page.
 </p>
 
 <p align="center">
-  <sub><a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead-portable.zip">Windows portable (.zip)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_x64.dmg">macOS (Intel)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_amd64.deb">Debian / Ubuntu (.deb)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead-0.0.1-alpha-1.x86_64.rpm">Fedora / RHEL (.rpm)</a> · <a href="https://github.com/dahshury/dimread/releases/tag/v0.0.1-alpha">All v0.0.1-alpha assets</a></sub>
+  <sub><a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead-portable.zip">Windows portable (.zip)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_x64-x86_64.dmg">macOS (Intel)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_amd64.deb">Debian / Ubuntu (.deb)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead-0.0.1-alpha-1.x86_64.rpm">Fedora / RHEL (.rpm)</a> · <a href="https://github.com/dahshury/dimread/releases/tag/v0.0.1-alpha">All v0.0.1-alpha assets</a></sub>
 </p>
 
 <!-- DOWNLOAD_BADGES:END -->
