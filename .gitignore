@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Rust build output
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Logs
+*.log
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Local env
+.env
+.env.local
+
+# Test / tooling artifacts
+coverage/
+*.tsbuildinfo
+
+# Non-project reference material / local scratch (kept out of the published repo)
+/gw.c
+/hyprctl.cpp
+/pwm.xml
+/swayipc.scd
+/tmp/
+/research/

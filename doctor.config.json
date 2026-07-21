@@ -1,0 +1,20 @@
+{
+  "$schema": "https://react.doctor/schema/config.json",
+  "rules": {},
+  "ignore": {
+    "overrides": [
+      {
+        "files": ["src/bindings.ts"],
+        "rules": ["deslop/unused-file"]
+      },
+      {
+        "files": ["package.json"],
+        "rules": ["deslop/unused-dependency"]
+      },
+      {
+        "files": ["src/shared/ui/data-grid/primitives/popover.tsx"],
+        "rules": ["react-doctor/only-export-components"]
+      }
+    ]
+  }
+}

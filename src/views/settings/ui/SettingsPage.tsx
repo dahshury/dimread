@@ -1,0 +1,324 @@
+import { Button as BaseButton } from "@base-ui/react/button";
+import { Tabs } from "@base-ui/react/tabs";
+import {
+	Cancel01Icon,
+	CenterFocusIcon,
+	InformationCircleIcon,
+	KeyboardIcon,
+	MagicWand01Icon,
+	Moon02Icon,
+	PaintBrush03Icon,
+	Settings01Icon,
+	Sun03Icon,
+	SunriseIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { useTranslations } from "use-intl";
+import { commands } from "@/bindings";
+import {
+	flushPendingSettings,
+	type SettingsHydrationStatus,
+	useSettingsHydrationStore,
+	useSettingsStore,
+} from "@/entities/setting";
+import { cn } from "@/shared/lib/cn";
+import { Elevated, SurfaceProvider } from "@/shared/lib/surface";
+import { useTouchActivation } from "@/shared/lib/use-touch-activation";
+import {
+	useEscapeToClose,
+	useTransparentBody,
+} from "@/shared/lib/window-effects";
+import { ScrollArea } from "@/shared/ui/scroll-area";
+import { useSettingsWindowMotion } from "../model/use-settings-window-motion";
+import { AboutPanel } from "./AboutPanel";
+import { AppearancePanel } from "./AppearancePanel";
+import { GeneralPanel } from "./GeneralPanel";
+import { AutoDarkPanel } from "./panels/AutoDarkPanel";
+import { DayNightPanel } from "./panels/DayNightPanel";
+import { DisplayPanel } from "./panels/DisplayPanel";
+import { FocusPanel } from "./panels/FocusPanel";
+import { HotkeysPanel } from "./panels/HotkeysPanel";
+import { MagicWindowPanel } from "./panels/MagicWindowPanel";
+import { RulesPanel } from "./panels/RulesPanel";
+import { SettingsSidebar, type SidebarLink } from "./SettingsSidebar";
+
+function SettingsPanelContent({ tab }: { tab: string }): ReactNode {
+	switch (tab) {
+		case "general":
+			return <GeneralPanel />;
+		case "hotkeys":
+			return <HotkeysPanel />;
+		case "display":
+			return <DisplayPanel />;
+		case "dayNight":
+			return <DayNightPanel />;
+		case "focus":
+			return <FocusPanel />;
+		case "magicWindow":
+			return <MagicWindowPanel />;
+		case "autoDark":
+			return <AutoDarkPanel />;
+		case "rules":
+			return <RulesPanel />;
+		case "about":
+			return <AboutPanel />;
+		default:
+			return <AppearancePanel />;
+	}
+}
+
+function SettingsHydrationPanel({
+	error,
+	status,
+}: {
+	error: string | null;
+	status: SettingsHydrationStatus;
+}) {
+	const common = useTranslations("common");
+	const settings = useTranslations("settings");
+	const message =
+		status === "error" ? (error ?? common("loading")) : common("loading");
+
+	return (
+		<div
+			aria-live="polite"
+			className="flex min-h-[320px] flex-col items-center justify-center gap-2 px-6 text-center text-foreground-secondary"
+			role={status === "error" ? "alert" : "status"}
+		>
+			<HugeiconsIcon icon={InformationCircleIcon} size={22} />
+			<div className="font-medium text-foreground">{settings("title")}</div>
+			<div className="max-w-md text-sm leading-6">{message}</div>
+		</div>
+	);
+}
+
+/** Sidebar rail links — every configuration surface in the app.
+ *
+ *  The main window is a compact quick-control panel (sliders, preset modes and
+ *  the instant on/off switches); EVERY setting behind them lives here, grouped
+ *  App / Display / Features / Application. Each link carries per-tab search
+ *  keywords (its setting names) so the sidebar search surfaces a tab by its
+ *  contents, which is what keeps a roster this long navigable. */
+function useSettingsSidebarLinks(): SidebarLink[] {
+	const t = useTranslations("settings");
+	const tHotkeys = useTranslations("hotkeys");
+	return [
+		{
+			key: "appearance",
+			label: t("appearance"),
+			icon: PaintBrush03Icon,
+			tooltip: t("appearanceTooltip"),
+			keywords: `${t("appearanceLocale")} ${t("appearanceReducedMotion")}`,
+			groupLabel: t("navApp"),
+		},
+		{
+			key: "general",
+			label: t("general"),
+			icon: Settings01Icon,
+			tooltip: t("generalTooltip"),
+			keywords: `${t("generalAutostart")} ${t("generalMinimizeToTray")}`,
+		},
+		{
+			key: "hotkeys",
+			label: t("hotkeys"),
+			icon: KeyboardIcon,
+			tooltip: t("hotkeysTooltip"),
+			keywords: `${tHotkeys("sectionTitle")} ${tHotkeys("toggleMainLabel")} ${tHotkeys("brightnessUpLabel")} ${tHotkeys("tempUpLabel")} ${tHotkeys("toggleFilterLabel")}`,
+		},
+		{
+			key: "display",
+			label: t("display"),
+			icon: Sun03Icon,
+			tooltip: t("displayTooltip"),
+			keywords: t("displayKeywords"),
+			groupLabel: t("navDisplay"),
+		},
+		{
+			key: "dayNight",
+			label: t("dayNight"),
+			icon: SunriseIcon,
+			tooltip: t("dayNightTooltip"),
+			keywords: t("dayNightKeywords"),
+		},
+		{
+			key: "focus",
+			label: t("focus"),
+			icon: CenterFocusIcon,
+			tooltip: t("focusTooltip"),
+			keywords: t("focusKeywords"),
+			groupLabel: t("navFeatures"),
+		},
+		{
+			key: "magicWindow",
+			label: t("magicWindow"),
+			icon: MagicWand01Icon,
+			tooltip: t("magicWindowTooltip"),
+			keywords: t("magicWindowKeywords"),
+		},
+		{
+			key: "autoDark",
+			label: t("autoDark"),
+			icon: Moon02Icon,
+			tooltip: t("autoDarkTooltip"),
+			keywords: t("autoDarkKeywords"),
+		},
+		{
+			key: "rules",
+			label: t("rules"),
+			icon: Settings01Icon,
+			tooltip: t("rulesTooltip"),
+			keywords: t("rulesKeywords"),
+		},
+		{
+			key: "about",
+			label: t("about"),
+			icon: InformationCircleIcon,
+			tooltip: t("aboutTooltip"),
+			keywords: `${t("aboutVersion")} ${t("aboutLinks")} ${t("aboutCredits")}`,
+			groupLabel: t("navApplication"),
+		},
+	];
+}
+
+function windowCloseSelf(): void {
+	void commands.closeSelfWindow();
+}
+
+/**
+ * The settings window shell: a transparent OS window whose visible "window" is
+ * the CSS card — sidebar rail + elevated content card — animated open/closed as
+ * one unit.
+ *
+ * This window owns EVERY configuration surface in the app. The main window is
+ * deliberately a small quick-control panel (sliders, preset modes, instant
+ * toggles); anything with a number, a hotkey, a schedule or a rule lives here.
+ * Saves flow through the shared debounced, revision-checked settings pipeline
+ * (`entities/setting`) and the `settings:changed` broadcast keeps every window
+ * in sync.
+ */
+export function SettingsPage() {
+	const isLoaded = useSettingsStore((s) => s.isLoaded);
+	const hydrationStatus = useSettingsHydrationStore((s) => s.status);
+	const hydrationError = useSettingsHydrationStore((s) => s.error);
+	const canRenderSettings =
+		isLoaded &&
+		(hydrationStatus === "ready" || hydrationStatus === "unavailable");
+	const t = useTranslations("settings");
+	const [activeTab, setActiveTab] = useState("appearance");
+	const contentViewportRef = useRef<HTMLDivElement>(null);
+	// Reset the shared ScrollArea to the top on each tab switch.
+	useEffect(() => {
+		contentViewportRef.current?.scrollTo({ top: 0 });
+	}, [activeTab]);
+	// The OS window is fully transparent — html/body must be too, or WebView2
+	// paints an opaque page background behind the rounded card.
+	useTransparentBody();
+	// Flush any debounced (unsaved) edits the moment the window hides, so a
+	// quick toggle-then-close never loses its save.
+	useEffect(() => {
+		const onVisibilityChange = () => {
+			if (document.visibilityState === "hidden") {
+				flushPendingSettings();
+			}
+		};
+		document.addEventListener("visibilitychange", onVisibilityChange);
+		return () =>
+			document.removeEventListener("visibilitychange", onVisibilityChange);
+	}, []);
+
+	const contentReady = canRenderSettings || hydrationStatus === "error";
+	const { motionClassName, requestClose, shellRef } = useSettingsWindowMotion(
+		windowCloseSelf,
+		contentReady,
+	);
+	const closeActivation = useTouchActivation(requestClose);
+	useEscapeToClose(requestClose);
+
+	const links = useSettingsSidebarLinks();
+	const contentLink = links.find((l) => l.key === activeTab) ?? links[0];
+
+	return (
+		<SurfaceProvider value={1}>
+			{/* Transparent viewport: the p-5 gutter reserves room for the card's
+			    shadow; the shell card below IS the visible "window". */}
+			<div className="flex h-dvh min-h-dvh p-5">
+				<div
+					className={cn(
+						"t-modal noise-overlay settings-window-shell relative flex min-w-0 flex-1 overflow-hidden rounded-[1.35rem] shadow-settings-window ring-1 ring-divider-strong",
+						motionClassName,
+					)}
+					ref={shellRef}
+				>
+					<Tabs.Root
+						className="flex flex-1 overflow-hidden"
+						onValueChange={(v) => setActiveTab(String(v))}
+						orientation="vertical"
+						value={activeTab}
+					>
+						<SettingsSidebar links={links} />
+						<div className="settings-content-frame relative min-w-0 flex-1 py-2 pe-2">
+							{/* Drag strip — the thin margin above the content card; the
+							    window is frameless, so this gives the content side a grab
+							    handle aligned with the sidebar's top drag strip. */}
+							<div
+								aria-hidden="true"
+								className="titlebar-drag absolute inset-x-0 top-0 z-titlebar h-1.5"
+							/>
+							<Elevated
+								className="settings-content-card relative flex h-full flex-col overflow-hidden rounded-[1.35rem] ring-1 ring-divider-strong"
+								offset={2}
+								shadowLevel={5}
+							>
+								<BaseButton
+									aria-label={t("close")}
+									className="titlebar-no-drag group absolute end-1.5 top-1.5 z-titlebar flex size-7 shrink-0 items-center justify-center rounded-full bg-surface-4 text-foreground-muted outline-none transition-colors duration-150 hover:bg-error/85 hover:text-on-error focus-visible:ring-2 focus-visible:ring-accent"
+									type="button"
+									{...closeActivation}
+								>
+									<HugeiconsIcon
+										className="transition-transform duration-150 ease-out group-hover:scale-110"
+										icon={Cancel01Icon}
+										size={15}
+									/>
+								</BaseButton>
+								<ScrollArea
+									className="min-h-0 flex-1"
+									revealScrollbarOnHover={false}
+									rubberBandOnTouch
+									verticalOnly
+									verticalScrollbarClassName="mb-3 me-1"
+									viewportClassName="settings-scroll-edge-fade px-7 pt-6 pb-5"
+									viewportRef={contentViewportRef}
+								>
+									{canRenderSettings && contentLink ? (
+										<header className="titlebar-drag -mt-6 flex flex-col gap-1.5 pt-6 pb-0">
+											<h2 className="min-w-0 pe-10 font-semibold text-[22px] text-foreground leading-tight tracking-[-0.02em]">
+												{contentLink.label}
+											</h2>
+											{contentLink.tooltip ? (
+												<p className="max-w-xl text-body-sm text-foreground-muted">
+													{contentLink.tooltip}
+												</p>
+											) : null}
+										</header>
+									) : null}
+									<Tabs.Panel className="outline-none" value={activeTab}>
+										{canRenderSettings ? (
+											<SettingsPanelContent tab={activeTab} />
+										) : (
+											<SettingsHydrationPanel
+												error={hydrationError}
+												status={hydrationStatus}
+											/>
+										)}
+									</Tabs.Panel>
+								</ScrollArea>
+							</Elevated>
+						</div>
+					</Tabs.Root>
+				</div>
+			</div>
+		</SurfaceProvider>
+	);
+}

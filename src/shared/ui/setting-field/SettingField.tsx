@@ -1,0 +1,127 @@
+import type { ReactNode } from "react";
+import { useTranslations } from "use-intl";
+import { FormControl } from "@/shared/ui/form-control";
+import { SettingResetButton } from "./SettingResetButton";
+
+export interface SettingFieldProps {
+	/** Optional one-line description rendered beneath the label. */
+	caption?: string;
+	/** The control itself (slider, stepper, select, …). Omit for a label-only row. */
+	children?: ReactNode;
+	/** Extra classes forwarded to the underlying FormControl root. */
+	className?: string;
+	/**
+	 * Schema default for this setting. When provided alongside `onReset`, the
+	 * reset button is disabled while `value` already equals it. Ignored if
+	 * `isDefault` is given.
+	 */
+	defaultValue?: unknown;
+	/** Dim + make the control non-interactive (e.g. gated by a parent toggle). */
+	disabled?: boolean;
+	/**
+	 * Inline validation message rendered beneath the control using the error
+	 * token. Optional and off by default — pass a non-empty string to surface
+	 * a per-field error affordance.
+	 */
+	error?: string | undefined;
+	/**
+	 * Name of the setting this one depends on. When `disabled`, the localized
+	 * `settingsField.disabledReason` message is shown on the control itself.
+	 */
+	disabledReason?: string;
+	/** Exact disabled explanation shown on the setting control itself. */
+	disabledTooltip?: string | undefined;
+	/**
+	 * Explicit "currently at the schema default" flag. Use for derived
+	 * comparisons that `value`/`defaultValue` can't express. Takes precedence
+	 * over `value`/`defaultValue`.
+	 */
+	isDefault?: boolean;
+	label?: string;
+	/** Glyph rendered immediately before the label text (e.g. a brand mark). */
+	labelIcon?: ReactNode;
+	/** Element rendered inline on the trailing edge of the label (e.g. a Toggle). */
+	labelAddon?: ReactNode;
+	/** "stacked" (default, wide control below) or "row" (compact control beside the label). */
+	layout?: "stacked" | "row";
+	/**
+	 * Restore the setting to its default. When set, a per-setting reset button
+	 * is rendered in the label's trailing slot (unless `hideReset`). When
+	 * omitted, no reset button appears.
+	 */
+	onReset?: () => void;
+	/** Suppress the reset button even though `onReset` is set (e.g. gated rows). */
+	hideReset?: boolean;
+	/** Help text shown in the info-icon tooltip next to the label. */
+	tooltip?: string;
+	/** Current value — compared against `defaultValue` to drive the reset button. */
+	value?: unknown;
+}
+
+/**
+ * A single setting row, ported from WinSTT's DRY settings-row system. Wraps
+ * {@link FormControl} and folds in the two pieces of boilerplate every scalar
+ * setting otherwise repeats by hand:
+ *
+ * 1. the per-setting "reset to default" button — wired from `value`/
+ *    `defaultValue` (or an explicit `isDefault`) + `onReset`; and
+ * 2. the disabled-reason tooltip, shown on the setting control itself when
+ *    `disabled` + `disabledReason` are set.
+ *
+ * Everything else (label, caption, tooltip, layout, a `labelAddon` toggle)
+ * passes straight through to FormControl.
+ */
+export function SettingField({
+	caption,
+	children,
+	className,
+	defaultValue,
+	disabled,
+	error,
+	disabledReason,
+	disabledTooltip,
+	isDefault,
+	label,
+	labelIcon,
+	labelAddon,
+	layout,
+	onReset,
+	hideReset,
+	tooltip,
+	value,
+}: SettingFieldProps) {
+	const tf = useTranslations("settingsField");
+
+	const atDefault =
+		isDefault ??
+		(defaultValue === undefined ? true : Object.is(value, defaultValue));
+	const showReset = onReset !== undefined && !hideReset;
+
+	const controlTooltip =
+		disabledTooltip ??
+		(disabled && disabledReason
+			? tf("disabledReason", { name: disabledReason })
+			: undefined);
+
+	return (
+		<FormControl
+			caption={caption}
+			className={className}
+			controlTooltip={controlTooltip}
+			disabled={disabled}
+			error={error}
+			label={label}
+			labelIcon={labelIcon}
+			labelAddon={labelAddon}
+			labelTrailing={
+				showReset ? (
+					<SettingResetButton isDefault={atDefault} onReset={onReset} />
+				) : undefined
+			}
+			layout={layout}
+			tooltip={tooltip}
+		>
+			{children}
+		</FormControl>
+	);
+}

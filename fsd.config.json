@@ -1,0 +1,32 @@
+{
+  "acknowledgedReviews": [
+    {
+      "subject": "widgets/title-bar",
+      "reason": "Window chrome (drag strip + app name + settings/minimize/close) is app-shell identity: kept standalone so the main shell and any frameless window reuse it without touching the page."
+    },
+    {
+      "subject": "features/download-manager",
+      "reason": "Generic download feature (listener + aggregate hooks) kept standalone: currently only the settings window consumes it, but it is a reusable slice the gallery demo and future windows wire independently — not folded into one page."
+    },
+    {
+      "subject": "features/rules",
+      "reason": "Per-app rules feature (pure rule-model, running-window picker, add/edit dialog, i18n labels) kept standalone: the main-window Options tab is its only consumer today, but it is a self-contained slice reusable by any window (e.g. a future settings-window rules pane) and independently unit-tested — not folded into the page."
+    },
+    {
+      "subject": "features/display",
+      "reason": "Display control feature (value/patch logic, settings persistence, live-preview driver, monitor + engine-state hooks) kept standalone: the main-window Display panel is its only consumer today, but it is a reusable slice the tray and hotkey actions drive independently — not folded into the page."
+    },
+    {
+      "subject": "features/hotkey-actions",
+      "reason": "Display hotkey-action catalogue + pure hotkey-patch/validation logic kept standalone: the main-window Options→Hotkeys section is its only frontend consumer today, but the action ids are the shared contract with the Rust registry (armed from settings, fired via hotkey:triggered) and the slice is independently unit-tested — not folded into the page."
+    },
+    {
+      "subject": "features/auto-dark",
+      "reason": "Auto Dark feature (autoDark settings persistence through the shared serialized save coordinator) kept standalone: the main-window MagicX → Auto Dark section is its only consumer today, but it is a reusable slice owning the frontend save path for the magicx::theme backend scheduler (Windows app/system theme + taskbar transparency) — paralleling features/display, not folded into the page."
+    },
+    {
+      "subject": "entities/picker-selection",
+      "reason": "Picker-window selection entity (selection model + IPC api) kept standalone: the detachable picker view is its only consumer today, but it is a self-contained entity wired through the picker window's own IPC seam and independently reusable — not folded into the page."
+    }
+  ]
+}

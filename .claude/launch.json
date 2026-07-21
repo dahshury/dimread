@@ -1,0 +1,17 @@
+{
+	"version": "0.0.1",
+	"configurations": [
+		{
+			"name": "dimread-vite",
+			"runtimeExecutable": "bun",
+			"runtimeArgs": ["run", "dev:vite"],
+			"port": 1430
+		},
+		{
+			"name": "dimread-vite-alt",
+			"runtimeExecutable": "bun",
+			"runtimeArgs": ["run", "dev:vite", "--", "--port", "1440", "--strictPort"],
+			"port": 1440
+		}
+	]
+}

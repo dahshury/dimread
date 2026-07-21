@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+[ "${HUSKY:-1}" = "0" ] && exit 0
+[ "${DIMREAD_SKIP_GIT_HOOKS:-0}" = "1" ] && exit 0
+
+echo "starter pre-push: lockfile, tests, dead code, i18n, react-doctor"
+bun run prepush

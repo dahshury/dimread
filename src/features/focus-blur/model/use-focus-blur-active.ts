@@ -1,0 +1,37 @@
+import { useEffect, useState } from "react";
+import { commands, events } from "@/bindings";
+import { hasNativeRuntime, subscribeNativeEvent } from "@/shared/api";
+
+/**
+ * Whether Focus Blur is currently running, for the panel's Enable switch. Seeds
+ * from `focus_active_state` on mount and follows the `focus:state` broadcast, so
+ * the switch reflects a toggle made here, by the hotkey, or by the boot
+ * auto-start — the single source of truth for the running effect.
+ */
+export function useFocusBlurActive(): boolean {
+	const [active, setActive] = useState(false);
+
+	useEffect(() => {
+		if (!hasNativeRuntime()) {
+			return;
+		}
+		let disposed = false;
+		void commands
+			.focusActiveState()
+			.then((state) => {
+				if (!disposed) {
+					setActive(state.blur);
+				}
+			})
+			.catch(() => undefined);
+		const unsubscribe = subscribeNativeEvent(events.focusState, (event) => {
+			setActive(event.payload.blur);
+		});
+		return () => {
+			disposed = true;
+			unsubscribe();
+		};
+	}, []);
+
+	return active;
+}

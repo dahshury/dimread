@@ -1,0 +1,51 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "useDefineForClassFields": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* Path Aliases — renderer (@/*) + Tauri bindings (@/bindings).
+       No `baseUrl` (removed in TS 7): non-relative `paths` mappings
+       resolve relative to this tsconfig's directory, so the explicit `./`
+       prefixes below are self-anchored. */
+    "paths": {
+      "@/bindings": ["./src/bindings.ts"],
+      "@/*": ["./src/*"],
+      "@test/*": ["./test/*"]
+    },
+
+    /* Strictness — maximum type-soundness gate. */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedSideEffectImports": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false
+  },
+  "include": ["src"],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*test-helpers*",
+    "**/__tests__/**"
+  ]
+}

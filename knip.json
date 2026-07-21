@@ -1,0 +1,31 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "index.html",
+    "windows/*.html",
+    "src/entries/*.{ts,tsx}",
+    "src/**/*.{test,spec}.{ts,tsx}",
+    "tools/**/*.ts",
+    "test/**/*.ts",
+    "src/shared/ui/*/index.ts",
+    "src/shared/lib/*.ts",
+    "src/shared/lib/surface/index.ts",
+    "src/shared/api/index.ts",
+    "src/shared/config/*.ts",
+    "src/shared/config/settings-schema/index.ts",
+    "src/shared/i18n/index.ts",
+    "src/shared/i18n/translation-types.ts",
+    "src/entities/*/index.ts",
+    "src/features/*/index.ts",
+    "src/views/*/index.ts"
+  ],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignoreDependencies": ["@tauri-apps/plugin-autostart", "tailwindcss"],
+  "ignoreExportsUsedInFile": {
+    "interface": true,
+    "type": true
+  },
+  "ignoreIssues": {
+    "src/bindings.ts": ["exports", "types"]
+  }
+}
