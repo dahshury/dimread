@@ -12,12 +12,12 @@ pub(crate) fn install_runtime_plugins(builder: Builder<Wry>) -> Builder<Wry> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(build_log_plugin());
 
-    // Single-instance: a second launch focuses the existing main window
+    // Single-instance: a second launch focuses the existing app window
     // instead of starting another process. Disabled in debug builds so a
     // packaged install can run beside `tauri dev`.
     #[cfg(not(debug_assertions))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        crate::window_state::show_main_window(app);
+        crate::window_state::show_primary_window(app);
     }));
 
     // Updater: opt-in. Registering the plugin requires a `plugins.updater`

@@ -27,22 +27,23 @@ export function FocusOverlayPage() {
 		if (!hasNativeRuntime()) {
 			return;
 		}
-		let disposed = false;
-		void commands
-			.focusActiveState()
-			.then((next) => {
-				if (!disposed) {
+		let receivedEvent = false;
+		// Subscribe before reading the snapshot. If a toggle lands while the
+		// command is in flight, the live event is authoritative and prevents the
+		// older snapshot from overwriting it.
+		return subscribeNativeEvent(
+			events.focusState,
+			(event) => {
+				receivedEvent = true;
+				setState(event.payload);
+			},
+			async (isDisposed) => {
+				const next = await commands.focusActiveState();
+				if (!(isDisposed() || receivedEvent) && next) {
 					setState(next);
 				}
-			})
-			.catch(() => undefined);
-		const unsubscribe = subscribeNativeEvent(events.focusState, (event) => {
-			setState(event.payload);
-		});
-		return () => {
-			disposed = true;
-			unsubscribe();
-		};
+			},
+		);
 	}, []);
 
 	return (

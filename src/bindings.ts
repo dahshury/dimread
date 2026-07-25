@@ -35,9 +35,10 @@ async closeWindow(label: string) : Promise<Result<null, string>> {
 },
 /**
  * `close_self_window` — hide the CALLING window (resolved from its own webview
- * label). Self-closing secondary windows route their close button here instead
- * of a bare webview hide so the settings modal can release the main-window
- * input lock as it closes.
+ * label). Self-closing windows route their close button here instead of a bare
+ * webview hide so each label's real teardown runs — above all the APP window,
+ * whose close is a hide-to-tray or an app quit depending on the user's
+ * `general.minimizeToTray` setting.
  */
 async closeSelfWindow() : Promise<Result<null, string>> {
     try {
@@ -47,12 +48,51 @@ async closeSelfWindow() : Promise<Result<null, string>> {
     else return __commandError__(e);
 }
 },
+async pickerAnchorSnapshot() : Promise<PickerLifecycleSnapshot> {
+    return await TAURI_INVOKE("picker_anchor_snapshot");
+},
 /**
- * `show_main_window` — surface + focus the main window (tray, second-instance
- * launches, and renderer flows all funnel here).
+ * Begin the one-time compositor warmup after the picker renderer mounts.
+ * The renderer waits for real animation-frame callbacks before acknowledging
+ * completion, replacing the old arbitrary 800 ms sleep.
  */
-async showMainWindow() : Promise<void> {
-    await TAURI_INVOKE("show_main_window");
+async pickerCompositorWarmupStart() : Promise<number | null> {
+    return await TAURI_INVOKE("picker_compositor_warmup_start");
+},
+/**
+ * Renderer acknowledgement that the off-screen picker has received actual
+ * animation frames. A real open increments [`PICKER_SEQ`] and therefore owns
+ * the window; a late warmup completion cannot hide it.
+ */
+async pickerCompositorWarmupComplete(sequence: number) : Promise<void> {
+    await TAURI_INVOKE("picker_compositor_warmup_complete", { sequence });
+},
+/**
+ * Renderer acknowledgement that the dropdown's real CSS exit completed.
+ * A new open clears `closing`, so a late callback cannot hide its window.
+ */
+async pickerHideComplete() : Promise<void> {
+    await TAURI_INVOKE("picker_hide_complete");
+},
+/**
+ * `show_app_window` — surface + focus the app's one top-level window (the
+ * settings window). The tray, second-instance launches, and the renderer's
+ * startup reveal all funnel here.
+ */
+async showAppWindow() : Promise<void> {
+    await TAURI_INVOKE("show_app_window");
+},
+/**
+ * `hide_app_window` — dismiss the app window to the tray WITHOUT consulting
+ * `general.minimizeToTray`.
+ *
+ * Distinct from `close_self_window` on purpose. Closing is a decision ("am I
+ * done with this app?") and may quit; the Escape key is a dismissal ("get this
+ * off my screen") and must never take the app down with it — Escape quitting
+ * DimRead would also drop the user's display filters.
+ */
+async hideAppWindow() : Promise<void> {
+    await TAURI_INVOKE("hide_app_window");
 },
 /**
  * `app_quit` — exit the app. The tray flyout's Quit row is the only caller
@@ -221,6 +261,19 @@ async overlayDismiss() : Promise<void> {
     await TAURI_INVOKE("overlay_dismiss");
 },
 /**
+ * Latest notification for a race-free subscribe-then-snapshot handshake.
+ */
+async overlaySnapshot() : Promise<OverlaySnapshot> {
+    return await TAURI_INVOKE("overlay_snapshot");
+},
+/**
+ * Renderer acknowledgement that the CSS exit really completed. A newer
+ * notification keeps the native window alive, making late callbacks harmless.
+ */
+async overlayHideComplete(sequence: number) : Promise<void> {
+    await TAURI_INVOKE("overlay_hide_complete", { sequence });
+},
+/**
  * `display_list_monitors` — every physical monitor the engine can drive.
  */
 async displayListMonitors() : Promise<MonitorInfo[]> {
@@ -234,12 +287,14 @@ async displayCurrent() : Promise<DisplayOutput> {
     return await TAURI_INVOKE("display_current");
 },
 /**
- * `display_preview` — live slider-drag: apply raw Kelvin/brightness to one
- * monitor (or all when `monitor_id` is `None`) without persisting. A `None`
- * axis keeps that axis at each monitor's currently applied value.
+ * `display_preview` — live slider-drag on one monitor (or all when
+ * `monitor_id` is `None`) without persisting. `endpoint_phase` makes supplied
+ * values follow the same schedule interpolation as their eventual commit;
+ * `None` requests a raw off-phase preview. A `None` axis keeps that axis at
+ * each monitor's currently applied value.
  */
-async displayPreview(kelvin: number | null, brightness: number | null, monitorId: string | null) : Promise<void> {
-    await TAURI_INVOKE("display_preview", { kelvin, brightness, monitorId });
+async displayPreview(kelvin: number | null, brightness: number | null, monitorId: string | null, endpointPhase: DisplayPhase | null) : Promise<void> {
+    await TAURI_INVOKE("display_preview", { kelvin, brightness, monitorId, endpointPhase });
 },
 /**
  * `display_preview_end` — end the live preview and revert to the settings
@@ -299,6 +354,13 @@ async focusActiveState() : Promise<FocusState> {
     return await TAURI_INVOKE("focus_active_state");
 },
 /**
+ * Snapshot the latest cached Blur anchor. Renderers call this only after their
+ * `focus:anchor` listener is installed (subscribe-then-snapshot handshake).
+ */
+async focusBlurAnchorSnapshot() : Promise<FocusAnchorEvent | null> {
+    return await TAURI_INVOKE("focus_blur_anchor_snapshot");
+},
+/**
  * `magicx_toggle_effect` — toggle a per-window effect (`"dark"` | `"gray"`) on
  * the current Magic Toolbar target, falling back to the foreground window.
  */
@@ -311,6 +373,20 @@ async magicxToggleEffect(effect: string) : Promise<void> {
  */
 async magicxClearTarget() : Promise<void> {
     await TAURI_INVOKE("magicx_clear_target");
+},
+/**
+ * Renderer subscribe handshake: re-emit the current shown state only after the
+ * webview confirms both toolbar listeners are registered.
+ */
+async magictoolbarRendererReady() : Promise<void> {
+    await TAURI_INVOKE("magictoolbar_renderer_ready");
+},
+/**
+ * Renderer exit-animation callback. The target guard makes a late completion
+ * harmless if the toolbar was shown again before the old exit finished.
+ */
+async magictoolbarHideComplete() : Promise<void> {
+    await TAURI_INVOKE("magictoolbar_hide_complete");
 }
 }
 
@@ -320,6 +396,7 @@ async magicxClearTarget() : Promise<void> {
 export const events = __makeEvents__<{
 autodarkChanged: AutoDarkChangedEvent,
 displayState: DisplayStateEvent,
+displayTopology: DisplayTopologyEvent,
 downloadUpdate: DownloadUpdateEvent,
 focusAnchor: FocusAnchorEvent,
 focusCursor: FocusCursorEvent,
@@ -335,6 +412,7 @@ settingsChanged: SettingsChangedEvent
 }>({
 autodarkChanged: "autodark:changed",
 displayState: "display:state",
+displayTopology: "display:topology",
 downloadUpdate: "download:update",
 focusAnchor: "focus:anchor",
 focusCursor: "focus:cursor",
@@ -451,7 +529,13 @@ monitorId: string | null; value: number }
  * The engine's current output, surfaced to the UI badge, `display_current`, and
  * the `display:state` event. `brightness` is a percentage (0..=100).
  */
-export type DisplayOutput = { kelvin: number; brightness: number; mode: string; phase: string }
+export type DisplayOutput = { kelvin: number; brightness: number; mode: string; phase: string;
+/**
+ * True only when Reading mode's compositor-wide grayscale matrix was
+ * successfully installed. Other Reading-mode adjustments may still be
+ * active when this is false.
+ */
+grayscaleApplied: boolean }
 /**
  * Which day/night endpoint an edit lands on.
  */
@@ -488,7 +572,7 @@ smoothTransition: boolean;
  */
 syncMonitors: boolean;
 /**
- * Per-monitor overrides keyed by GDI device name (`\\.\DISPLAY1`).
+ * Per-monitor overrides keyed by the display backend's durable monitor id.
  */
 monitorOverrides: Partial<{ [key in string]: MonitorOverride }>;
 /**
@@ -501,6 +585,12 @@ modes: Partial<{ [key in string]: ModePreset }> }
  * per-window readout stay live without polling `display_current`.
  */
 export type DisplayStateEvent = DisplayOutput
+/**
+ * `display:topology` — the set of displays changed after a native hot-plug,
+ * disconnect, or display reconfiguration notification. Renderers subscribe to
+ * this instead of periodically re-enumerating monitors.
+ */
+export type DisplayTopologyEvent = MonitorInfo[]
 export type DownloadPhase = "queued" | "downloading" | "paused" | "completed" | "cancelled" | "failed"
 /**
  * One download's renderer-facing state. Emitted as the `download:update`
@@ -549,7 +639,13 @@ concurrency: number }
  * while a switch should glide. Handles comfortably fit a JS `number` — the
  * bindings export `u64` via `BigIntExportBehavior::Number`.
  */
-export type FocusAnchorEvent = { windowId: number; x: number; y: number; width: number; height: number; monitorLeft: number; monitorTop: number; monitorRight: number; monitorBottom: number; taskbar: boolean; monitors: AnchorRect[] }
+export type FocusAnchorEvent = {
+/**
+ * Process-monotonic ordering for the renderer's subscribe-then-snapshot
+ * handshake. The snapshot is applied only when it is newer than every live
+ * event already observed by that renderer.
+ */
+sequence: number; windowId: number; x: number; y: number; width: number; height: number; monitorLeft: number; monitorTop: number; monitorRight: number; monitorBottom: number; taskbar: boolean; monitors: AnchorRect[] }
 /**
  * Focus Blur section (FEATURE-PARITY F8.2) — dim/tint every background window
  * while the active window stays highlighted (Hazeover-style). Owned by the
@@ -628,7 +724,7 @@ export type GeneralSettings = {
  */
 autostart: boolean;
 /**
- * Closing the main window hides to the tray instead of quitting.
+ * Closing the app window hides to the tray instead of quitting.
  */
 minimizeToTray: boolean }
 /**
@@ -656,7 +752,9 @@ accelerator: string }
  */
 export type HotkeysSettings = {
 /**
- * Toggles main-window visibility (show + focus / hide). "" disables it.
+ * Toggles the APP window's visibility (show + focus / hide). "" disables
+ * it. The field name predates the removal of the separate `main` window
+ * and is kept because renaming it would orphan every persisted binding.
  */
 toggleMain: string;
 /**
@@ -755,13 +853,15 @@ export type ModePreset = { kelvinDay: number; kelvinNight: number; brightnessDay
 /**
  * A physical monitor as seen by the display engine.
  *
- * `id` is the GDI device name (`\\.\DISPLAY1`) — the key used everywhere else
- * (gamma DCs, per-monitor override maps, `display_preview`). It is stable
- * across a session and is what `display_list_monitors` returns to the UI.
+ * `id` is a stable, backend-owned identifier — the key used everywhere else
+ * (native gamma handles, per-monitor override maps, `display_preview`). It is
+ * stable across a session and is what `display_list_monitors` returns to the
+ * UI.
  */
 export type MonitorInfo = {
 /**
- * GDI device name, e.g. `\\.\DISPLAY1`. The engine's per-monitor key.
+ * Native backend id, e.g. `\\.\DISPLAY1`, `macos:uuid:…`, or
+ * `x11-output:edid-<hash>:DP-1`.
  */
 id: string;
 /**
@@ -805,25 +905,32 @@ title: string;
  */
 className: string }
 /**
- * `overlay:dismiss` — the overlay is being dismissed early; the renderer
- * plays its exit animation during the native hide grace (see `crate::overlay`).
+ * `overlay:dismiss` — the overlay is being dismissed; the renderer plays its
+ * exit animation and acknowledges its real completion to the backend.
  */
-export type OverlayDismissEvent = Record<string, never>
+export type OverlayDismissEvent = { sequence: number }
 /**
  * The resolved notification broadcast via `overlay:notify`: optional inputs
  * filled with their effective values (tone default, duration clamped).
  */
-export type OverlayNotification = { title?: string | null; message: string; tone: OverlayTone; durationMs: number }
+export type OverlayNotification = {
+/**
+ * Process-monotonic ordering for event/snapshot races.
+ */
+sequence: number; title?: string | null; message: string; tone: OverlayTone; durationMs: number }
 /**
  * `overlay:notify` — show a notification in the overlay pill window. The
- * payload is the RESOLVED notification (tone/duration defaults filled in) so
- * the renderer's exit timer and the Rust hide timer agree on timing.
+ * payload is the RESOLVED notification (tone/duration defaults filled in).
  */
 export type OverlayNotifyEvent = OverlayNotification
 /**
  * `overlay_notify` input: everything but the message is optional.
  */
 export type OverlayNotifyPayload = { title?: string | null; message: string; tone?: OverlayTone | null; durationMs?: number | null }
+/**
+ * Authoritative lifecycle snapshot read only after event listeners are live.
+ */
+export type OverlaySnapshot = { sequence: number; notification?: OverlayNotification | null }
 /**
  * Notification tone → the renderer maps it to status color tokens.
  */
@@ -841,9 +948,13 @@ export type PartialSettings = { appearance?: AppearanceSettings | null; general?
 export type PickerAnchorEvent = { x: number; y: number; width: number; height: number }
 /**
  * `picker:closing` — the close animation is starting; the renderer plays its
- * fade-out during the native hide grace (see `windows::placement`).
+ * fade-out and acknowledges its actual completion (see `windows::placement`).
  */
 export type PickerClosingEvent = Record<string, never>
+/**
+ * Latest panel rect for a race-free subscribe-then-snapshot handshake.
+ */
+export type PickerLifecycleSnapshot = { anchor?: PickerAnchorEvent | null; closing: boolean }
 /**
  * One custom per-app rule: switch to `mode` while a matching window is active.
  */

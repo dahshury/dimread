@@ -15,8 +15,7 @@ Keeps the design language, app shell, and download manager; strips all STT/TTS/L
 ## Window roster (all created programmatically in Rust; `"windows": []` in tauri.conf)
 | Label | HTML | Purpose | Chrome |
 |---|---|---|---|
-| `main` | `index.html` | Compact main window: hero area + footer | 480×180, frameless, opaque, non-resizable, shadow |
-| `settings` | `windows/settings.html` | Settings shell: sidebar tabs, transparent rounded card | 940×680, transparent, frameless, modal child of main, hide-on-close |
+| `settings` | `index.html` (the ROOT entry) | **The app window** — the only top-level surface: sidebar tabs over a transparent rounded card, with the live quick controls at the top of the Display tab | 940×680, transparent, frameless, non-resizable, taskbar-visible, close = hide-to-tray or quit |
 | `picker` | `windows/picker.html` | Detachable generic item picker (anchored panel over full-workarea transparent backdrop) | transparent, hide-on-close, prewarmed |
 | `gallery` | `windows/gallery.html` | Component gallery demoing every shared/ui primitive | 1000×720, resizable, opaque, hide-on-close |
 
@@ -29,11 +28,12 @@ DynamicIsland notification pill. It is backend-owned: `overlay_notify(payload)` 
 `overlay_dismiss()` retracts early via `overlay:dismiss`. New notifies REPLACE the visible one (no queue). New IPC:
 `hotkey_register(id, accelerator)` / `hotkey_unregister(id)` / `hotkey_list()` + `hotkey:triggered` `{ id, accelerator }`,
 backed by a fourth settings section `hotkeys: { toggleMain: string ("" = unbound) }` that is armed at startup and
-hot-swapped on save (`toggleMain` natively toggles main-window visibility).
+hot-swapped on save (`toggleMain` natively toggles the app window's visibility — the id predates the removal of the
+separate `main` window and is kept because it is a persisted settings field).
 
 ## IPC contract (tauri-specta → generated `src/bindings.ts`)
 Commands (snake_case in Rust):
-- `open_window(label, anchor_x?, anchor_y?, anchor_w?, anchor_h?)`, `close_window(label)`, `close_self_window()`, `show_main_window()`
+- `open_window(label, anchor_x?, anchor_y?, anchor_w?, anchor_h?)`, `close_window(label)`, `close_self_window()`, `show_app_window()`
 - `settings_load_snapshot() -> { revision, settings }`
 - `settings_save(patch: PartialSettings, revision) -> { revision, settings }` (optimistic concurrency: error on stale revision)
 - `download_start(id, url, file_name)` (dest = app data downloads dir), `download_pause(id)`, `download_resume(id)`, `download_cancel(id)`, `download_remove(id)` (delete file + entry), `download_list() -> DownloadSnapshot[]`

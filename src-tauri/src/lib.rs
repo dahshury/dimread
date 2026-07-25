@@ -6,14 +6,18 @@
 //!   2. Build the specta command/event registry and register plugins.
 //!   3. `setup`: mount events, initialize the settings store ON THE MAIN
 //!      THREAD (see `settings::store`), manage the download registry, build
-//!      the MAIN window eagerly (programmatically, so portable mode can
+//!      the APP window eagerly (programmatically, so portable mode can
 //!      redirect the WebView2 user-data folder), restore its position, create
-//!      the tray, reconcile autostart, then show the window — which also
-//!      schedules the hidden picker/settings prewarm.
+//!      the tray, reconcile autostart, then let the renderer reveal the window.
+//!      Secondary-window prewarming begins after the page loads.
 //!
-//! There is deliberately NO splash screen: the main window is a small shell
-//! that paints fast. If your app grows a heavy boot phase, WinSTT's splash +
-//! deferred-startup-thread pattern is the reference to port.
+//! The app has ONE top-level window — `windows::PRIMARY_WINDOW`, the settings
+//! window. It carries the live quick controls at the top of its Display tab, so
+//! there is no separate "main" panel and no second taskbar surface.
+//!
+//! There is deliberately NO splash screen: the app window paints fast. If your
+//! app grows a heavy boot phase, WinSTT's splash + deferred-startup-thread
+//! pattern is the reference to port.
 
 mod app_exit;
 mod bootstrap;
@@ -55,6 +59,14 @@ pub fn run() {
     let builder = bootstrap::plugins::install_runtime_plugins(tauri::Builder::default());
 
     let app = match builder
+        .on_page_load(|webview, payload| {
+            focus::blur::on_page_load(webview.label(), payload.event());
+            if webview.label() == windows::PRIMARY_WINDOW
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                windows::on_primary_page_loaded(webview.app_handle());
+            }
+        })
         .setup(move |app| {
             let app_handle = app.handle().clone();
             windows::record_main_thread();
@@ -78,33 +90,14 @@ pub fn run() {
 
             app_handle.manage(downloads::manager::DownloadManager::default());
 
-            // Create the main window programmatically so portable mode can set
-            // `data_directory` (redirects the WebView2 profile to Data/).
-            let mut win_builder = tauri::WebviewWindowBuilder::new(
-                &app_handle,
-                "main",
-                tauri::WebviewUrl::App("/".into()),
-            )
-            .title("DimRead")
-            // Seed height fits the single-monitor content; the renderer then
-            // measures the real content and shrinks/grows the window to match
-            // (`useMainWindowFit`), so multi-monitor (the monitor strip) fits too.
-            // `min_inner_size` height is loose enough not to clamp that auto-fit.
-            .inner_size(960.0, 440.0)
-            .min_inner_size(960.0, 240.0)
-            .resizable(false)
-            .maximizable(false)
-            .decorations(false)
-            .shadow(true)
-            // Opaque dark substrate: kills the white flash before first paint.
-            .background_color(tauri::webview::Color(9, 9, 11, 255))
-            .center()
-            .visible(false);
-            if let Some(data_dir) = portable::data_dir() {
-                win_builder = win_builder.data_directory(data_dir.join("webview"));
-            }
-            let main_window = win_builder.build()?;
-            window_state::restore_main_window_position(&app_handle, &main_window);
+            // Create the app window eagerly, from its `WINDOW_SPECS` entry, so
+            // the one window roster stays in one place. `ensure_window` also
+            // applies portable mode's `data_directory` (which redirects the
+            // WebView2 profile to Data/) — the reason this is programmatic
+            // rather than declared in tauri.conf.json.
+            let app_window = windows::ensure_window(&app_handle, windows::PRIMARY_WINDOW)
+                .map_err(|err| format!("failed to create the app window: {err}"))?;
+            window_state::restore_window_position(&app_handle, &app_window);
 
             tray::init_tray(&app_handle)?;
 
@@ -129,37 +122,27 @@ pub fn run() {
             focus::init(&app_handle);
             magicx::init(&app_handle);
 
-            // Show + focus main; also schedules the picker/settings prewarm.
-            window_state::show_main_window(&app_handle);
+            // Keep the app window hidden until the renderer has hydrated its
+            // settings and painted its first frame. A native fallback prevents
+            // a renderer failure from leaving an invisible process running
+            // indefinitely.
+            window_state::schedule_initial_reveal_fallback(&app_handle);
             Ok(())
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
-                if window.label() == "main" {
-                    // Closing the MAIN window quits the whole app unless the
-                    // user opted into hide-to-tray. Route through `app.exit(0)`
-                    // (graceful shutdown: the store plugin gets its flush)
-                    // rather than letting the bare close leave hidden
-                    // keep-alive windows holding the process open.
-                    let settings = settings::store::read_settings(window.app_handle());
-                    api.prevent_close();
-                    if settings.general.minimize_to_tray {
-                        log::debug!("Main window close requested - hiding to tray.");
-                        // Shared helper, NOT a bare hide: it releases the
-                        // settings modal's input-disable first, so main never
-                        // returns from the tray unclickable.
-                        window_state::hide_main_window(window.app_handle());
-                    } else {
-                        app_exit::request_app_exit(window.app_handle(), "Main window closed");
-                    }
+                api.prevent_close();
+                if window.label() == windows::PRIMARY_WINDOW {
+                    // A native close of the app window (Alt+F4, the taskbar
+                    // context menu) bypasses `close_self_window`, so route it
+                    // through the same helper: hide to tray, or quit through
+                    // `request_app_exit` so the store plugin gets its flush and
+                    // the display filters are restored.
+                    window_state::close_primary_window(window.app_handle());
                     return;
                 }
                 // Secondary windows hide (keep-alive) so re-open preserves
-                // renderer state. A native close of the settings modal
-                // (Alt+F4 etc.) bypasses close_self_window, so route it
-                // through the same teardown path that releases the
-                // main-window input lock.
-                api.prevent_close();
+                // renderer state.
                 if let Err(err) =
                     windows::close_window_internal(window.app_handle(), window.label())
                 {
@@ -167,15 +150,14 @@ pub fn run() {
                 }
             }
             tauri::WindowEvent::Moved(position) => {
-                // Remember where the user drags the main window so it reopens
+                // Remember where the user drags the app window so it reopens
                 // there next run. Skip the (-32000, -32000) sentinel Windows
                 // reports for a minimized window.
-                if window.label() == "main" && position.x > -30000 && position.y > -30000 {
-                    window_state::save_main_window_position(
-                        window.app_handle(),
-                        position.x,
-                        position.y,
-                    );
+                if window.label() == windows::PRIMARY_WINDOW
+                    && position.x > -30000
+                    && position.y > -30000
+                {
+                    window_state::save_window_position(window.app_handle(), position.x, position.y);
                 }
             }
             tauri::WindowEvent::ThemeChanged(theme) => {
@@ -195,7 +177,7 @@ pub fn run() {
     };
 
     app.run(|_app, _event| {
-        // The catch-all chokepoint for shutdown. The tray Quit and the main
+        // The catch-all chokepoint for shutdown. The tray Quit and the app
         // window's close button already route through `request_app_exit`, but
         // everything else reaches the event loop's exit WITHOUT passing through
         // it: `app.exit()` called from a plugin, the last window being
@@ -211,9 +193,23 @@ pub fn run() {
             app_exit::restore_system_state();
         }
 
+        // Tauri exposes these callbacks on every desktop platform. Reconcile
+        // wall-clock schedules when the event loop resumes or any app window
+        // becomes active; the scheduler coalesces duplicate notifications.
+        if matches!(
+            &_event,
+            tauri::RunEvent::Resumed
+                | tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::Focused(true),
+                    ..
+                }
+        ) {
+            display::scheduler::notify_app_activity();
+        }
+
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = &_event {
-            window_state::show_main_window(_app);
+            window_state::show_primary_window(_app);
         }
     });
 }

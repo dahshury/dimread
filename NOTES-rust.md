@@ -10,13 +10,14 @@ src-tauri/
   Cargo.toml               crate dimread, lib dimread_lib (rlib), edition 2024
   build.rs                 tauri_build::build() + Windows /DELAYLOAD list (see below)
   tauri.conf.json          "windows": [], tight CSP, nsis/appimage/deb/rpm targets
-  capabilities/default.json  one shared capability for main/settings/picker/gallery
-  icons/                   PLACEHOLDER icons copied from WinSTT (replace in packaging pass)
-                           + tray-on-dark.png / tray-on-light.png (embedded via include_bytes!)
+  capabilities/default.json  one shared capability for every window in WINDOW_SPECS
+  icons/                   app + installer icons
+                           + tray/<mode>-<day|night>-on-<dark|light>.png — the 8x2x2
+                             tray family, all embedded via include_bytes! (tray.rs)
   src/
     main.rs                thin entry (no CLI parsing — clap dropped)
-    lib.rs                 run(): plugins → setup (store init, main window, tray,
-                           autostart sync, show) → window-event routing; bindings
+    lib.rs                 run(): plugins → setup (store init, app window, tray,
+                           autostart sync, reveal) → window-event routing; bindings
                            export test + TS post-processing (ported from WinSTT)
     commands_registry.rs   make_specta_builder(): ALL commands + events
     events.rs              typed specta events; Event impls are MANUAL so wire
@@ -24,15 +25,19 @@ src-tauri/
                            only kebab-cases the struct name)
     portable.rs            portable-marker data-dir resolution (magic string:
                            "DimRead Portable Mode")
-    window_state.rs        main-window position persist/restore + show_main_window
-    tray.rs                native tray: Show/Settings/Quit menu, left-click=show,
-                           theme-aware icon (Windows SystemUsesLightTheme registry)
+    window_state.rs        app-window position persist/restore + show/hide/close
+                           (close = hide-to-tray or quit, per general.minimizeToTray)
+    tray.rs                tray icon + tooltip + click routing (left=show app window,
+                           right=flyout). The icon is a FAMILY selected by
+                           (display mode x day/night phase x taskbar theme); the
+                           taskbar theme comes from the Windows SystemUsesLightTheme
+                           registry value
     bootstrap/plugins.rs   plugin registration (single-instance release-only) + log plugin
     settings/              mod.rs (schema+merge), store.rs (atomic durable store,
                            revision, write lock), commands.rs (load_snapshot/save)
-    windows/               mod.rs (WINDOW_SPECS, ensure_window, open/close commands,
-                           settings modal, prewarm), placement.rs (work-area math,
-                           picker anchor/close lifecycle)
+    windows/               mod.rs (PRIMARY_WINDOW, WINDOW_SPECS, ensure_window,
+                           open/close commands, prewarm), placement.rs (work-area
+                           math, picker anchor/close lifecycle)
     downloads/             transfer.rs (WinSTT downloads.rs, verbatim*), manager.rs
                            (new ~230-line generic manager), commands.rs, mod.rs (snapshot types)
 ```
@@ -169,15 +174,15 @@ The tray's native context menu was replaced by a transparent webview popup
 
 **Why.** A native tray menu can only host labels and check marks, so brightness
 had to ship as a ten-row quick-set submenu — ten buttons shaped like a slider.
-The popup renders the *same* gradient-variant `Slider`s as the main window, at
-1 % precision with live preview.
+The popup renders the *same* gradient-variant `Slider`s as the app window's
+quick controls, at 1 % precision with live preview.
 
 **Consequences worth knowing:**
 
 - `tray.rs` is now icon + tooltip + click routing only. Everything that used to
   mutate settings from Rust (`apply_display_change`, the mode/brightness/pause
   items) is gone; the popup writes through the renderer's ordinary
-  `display_preview` → `settings_save` seam, so the tray and the main window
+  `display_preview` → `settings_save` seam, so the tray and the app window
   share ONE persistence contract. The "dimming while paused redirects the edit
   into `custom`" rule now comes from `buildSliderCommitPatch` for free.
 - `open_settings_window_internal` was deleted with it. The popup is a renderer,

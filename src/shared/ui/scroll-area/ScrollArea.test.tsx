@@ -18,6 +18,14 @@ function touchEvent(type: string, clientY: number) {
 	return event;
 }
 
+function transitionEvent(type: "transitioncancel" | "transitionend") {
+	const event = new Event(type, { bubbles: true }) as Event & {
+		propertyName: string;
+	};
+	Object.defineProperty(event, "propertyName", { value: "transform" });
+	return event;
+}
+
 function setScrollMetrics(
 	viewport: HTMLElement,
 	metrics: { clientHeight: number; scrollHeight: number; scrollTop: number },
@@ -193,6 +201,40 @@ describe("ScrollArea", () => {
 		});
 
 		expect(contentLayer.style.transform).toContain("0px");
+		expect(contentLayer.style.transition).toContain("transform");
+
+		act(() => {
+			contentLayer.dispatchEvent(transitionEvent("transitionend"));
+		});
+
+		expect(contentLayer.style.transform).toBe("");
+		expect(contentLayer.style.transition).toBe("");
+	});
+
+	test("cleans up an interrupted touch release when the transition is cancelled", () => {
+		render(
+			<ScrollArea rubberBandOnTouch>
+				<div data-testid="content">x</div>
+			</ScrollArea>,
+		);
+		const contentLayer = screen.getByTestId("content")
+			.parentElement as HTMLElement;
+		const viewport = contentLayer.parentElement as HTMLElement;
+		setScrollMetrics(viewport, {
+			clientHeight: 100,
+			scrollHeight: 400,
+			scrollTop: 0,
+		});
+
+		act(() => {
+			viewport.dispatchEvent(touchEvent("touchstart", 100));
+			viewport.dispatchEvent(touchEvent("touchmove", 150));
+			viewport.dispatchEvent(touchEvent("touchend", 150));
+			contentLayer.dispatchEvent(transitionEvent("transitioncancel"));
+		});
+
+		expect(contentLayer.style.transform).toBe("");
+		expect(contentLayer.style.transition).toBe("");
 	});
 
 	test("pulls the content up when a touch drag overscrolls the bottom edge", () => {

@@ -1,7 +1,7 @@
 {
   "name": "dimread",
   "private": true,
-  "version": "0.0.1-alpha",
+  "version": "0.0.2-alpha",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
@@ -22,13 +22,14 @@
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
     "test": "bun test ./src",
     "check:i18n": "bun tools/i18n/check-i18n.ts",
+    "check:cycles": "node tools/check-cycles.mjs src",
     "check:deadcode": "knip",
     "check:fsd": "node .claude/skills/feature-sliced-design/check-fsd.mjs",
     "check:lockfile": "bun install --frozen-lockfile --dry-run --ignore-scripts",
-    "check:react": "react-doctor --no-supply-chain --blocking error",
+    "check:react": "react-doctor --no-supply-chain --blocking error --scope full --yes",
     "hooks:install": "node tools/git-hooks/install.mjs",
     "postinstall": "bun run hooks:install",
-    "precommit": "bun run check:lockfile && bun run lint && bun run typecheck && bun run check:fsd",
+    "precommit": "bun run check:lockfile && bun run lint && bun run typecheck && bun run check:fsd && bun run check:cycles",
     "prepush": "bun run check:lockfile && bun run test && bun run check:deadcode && bun run check:i18n && bun run check:react",
     "doctor": "bunx react-doctor"
   },

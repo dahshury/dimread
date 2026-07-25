@@ -1,4 +1,4 @@
-//! Hotkey action dispatch (Agent D) — the DISPLAY hotkeys' engine effects.
+//! Hotkey action dispatch — the DISPLAY hotkeys' engine effects.
 //!
 //! The hotkey registry ([`super`]) owns the OS-level registration and fires
 //! `hotkey:triggered` on every key-down edge. This module owns the seven display
@@ -77,7 +77,6 @@ fn action_bindings(h: &HotkeysSettings) -> [(&'static str, &str); 10] {
         ("toggleFilter", h.toggle_filter.as_str()),
         ("toggleReading", h.toggle_reading.as_str()),
         ("toggleEditing", h.toggle_editing.as_str()),
-        // focus-blur
         ("focusBlur", h.focus_blur.as_str()),
         // magicx (F9.4) — armed here so a persisted MagicX combo is live from
         // boot, not only after the user re-records it. Effects handled below.
@@ -114,11 +113,9 @@ pub fn handle_action(app: &AppHandle, id: &str) {
         "toggleFilter" => toggle_mode(app, "pause", &FILTER_PREV, "health"),
         "toggleReading" => toggle_mode(app, "reading", &READING_PREV, "pause"),
         "toggleEditing" => toggle_mode(app, "editing", &EDITING_PREV, "pause"),
-        // focus-read
         "focusRead" => {
             crate::focus::read::toggle();
         }
-        // focus-blur
         "focusBlur" => {
             crate::focus::blur::toggle();
         }

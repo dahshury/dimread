@@ -48,7 +48,6 @@ const DEFAULT_ROW_HEIGHT = "short";
 const OVERSCAN = 6;
 const VIEWPORT_OFFSET = 1;
 const HORIZONTAL_PAGE_SIZE = 5;
-const SCROLL_SYNC_RETRY_COUNT = 16;
 const MIN_COLUMN_SIZE = 60;
 const MAX_COLUMN_SIZE = 800;
 const SEARCH_SHORTCUT_KEY = "f";
@@ -108,6 +107,11 @@ interface DataGridStore {
 	) => void;
 	notify: () => void;
 	batch: (fn: () => void) => void;
+}
+
+interface GridCommitWaiter {
+	isReady: () => boolean;
+	resolve: (isReady: boolean) => void;
 }
 
 function useStore<T>(
@@ -182,6 +186,44 @@ function useDataGrid<TData>({
 	});
 
 	const listenersRef = useLazyRef(() => new Set<() => void>());
+	const gridCommitWaitersRef = useLazyRef(() => new Set<GridCommitWaiter>());
+
+	const waitForGridCommit = (isReady: () => boolean): Promise<boolean> => {
+		if (isReady()) {
+			return Promise.resolve(true);
+		}
+
+		return new Promise((resolve) => {
+			const waiter = { isReady, resolve };
+			gridCommitWaitersRef.current.add(waiter);
+
+			// Close the gap between the initial check and subscription. This also
+			// makes the helper safe if a synchronous external-store update committed.
+			if (isReady()) {
+				gridCommitWaitersRef.current.delete(waiter);
+				resolve(true);
+			}
+		});
+	};
+
+	useIsomorphicLayoutEffect(() => {
+		for (const waiter of gridCommitWaitersRef.current) {
+			if (waiter.isReady()) {
+				gridCommitWaitersRef.current.delete(waiter);
+				waiter.resolve(true);
+			}
+		}
+	});
+
+	useIsomorphicLayoutEffect(
+		() => () => {
+			for (const waiter of gridCommitWaitersRef.current) {
+				waiter.resolve(false);
+			}
+			gridCommitWaitersRef.current.clear();
+		},
+		[gridCommitWaitersRef],
+	);
 
 	const stateRef = useLazyRef<DataGridState>(() => ({
 		sorting: initialState?.sorting ?? [],
@@ -832,6 +874,7 @@ function useDataGrid<TData>({
 
 			if (expandRows && rowsNeeded > 0) {
 				const expectedRowCount = rowCount + rowsNeeded;
+				const dataBeforeRowsAdd = propsRef.current.data;
 
 				if (propsRef.current.onRowsAdd) {
 					await propsRef.current.onRowsAdd(rowsNeeded);
@@ -842,20 +885,15 @@ function useDataGrid<TData>({
 					}
 				}
 
-				let attempts = 0;
-				const maxAttempts = 50;
-				let currentTableRowCount =
-					tableRef.current?.getRowModel().rows.length ?? 0;
-
-				while (
-					currentTableRowCount < expectedRowCount &&
-					attempts < maxAttempts
+				if (
+					(tableRef.current?.getRowModel().rows.length ?? 0) < expectedRowCount
 				) {
-					// eslint-disable-next-line react-doctor/async-await-in-loop -- sequential polling: each iteration waits 100ms then re-reads the row count to detect when the async data sync has caught up. Iterations are inherently dependent (poll-until-ready), not parallelizable.
-					await new Promise((resolve) => setTimeout(resolve, 100));
-					currentTableRowCount =
-						tableRef.current?.getRowModel().rows.length ?? 0;
-					attempts++;
+					await waitForGridCommit(
+						() =>
+							propsRef.current.data !== dataBeforeRowsAdd ||
+							(tableRef.current?.getRowModel().rows.length ?? 0) >=
+								expectedRowCount,
+					);
 				}
 			}
 
@@ -1172,17 +1210,11 @@ function useDataGrid<TData>({
 		}
 	};
 
-	// Release focus guard after delay to allow async data re-renders to settle.
-	// 300ms accounts for db sync and virtualized cell mounting
-	const releaseFocusGuard = (immediate = false) => {
-		if (immediate) {
-			focusGuardRef.current = false;
-			return;
-		}
-
-		setTimeout(() => {
-			focusGuardRef.current = false;
-		}, 300);
+	// Programmatic `focus()` dispatches focusout/focusin synchronously. Keep the
+	// guard set only across that operation; row/data readiness is handled by the
+	// commit waiters, so no timing guess is needed here.
+	const releaseFocusGuard = () => {
+		focusGuardRef.current = false;
 	};
 
 	const focusCellWrapper = (rowIndex: number, columnId: string) => {
@@ -2154,43 +2186,50 @@ function useDataGrid<TData>({
 
 			rowVirtualizerRef.current?.scrollToIndex(rowIndex, { align });
 
-			const scrollRowIntoView = (retries = 1) => {
-				requestAnimationFrame(() => {
-					const targetRow = rowMapRef.current.get(rowIndex);
-					if (!targetRow) {
-						if (retries > 0) {
-							scrollRowIntoView(retries - 1);
-						}
+			if (rowIndex >= (tableRef.current?.getRowModel().rows.length ?? 0)) {
+				return;
+			}
+
+			void waitForGridCommit(() => rowMapRef.current.has(rowIndex)).then(
+				(rowMounted) => {
+					if (!rowMounted) {
 						return;
 					}
 
-					const headerBottom =
-						headerRef.current?.getBoundingClientRect().bottom ??
-						container.getBoundingClientRect().top;
+					// The row registration is commit-driven; one animation frame is retained
+					// so browser scroll/layout has settled before geometry is measured.
+					requestAnimationFrame(() => {
+						const targetRow = rowMapRef.current.get(rowIndex);
+						if (!targetRow) {
+							return;
+						}
 
-					const viewportTop = headerBottom + VIEWPORT_OFFSET;
+						const headerBottom =
+							headerRef.current?.getBoundingClientRect().bottom ??
+							container.getBoundingClientRect().top;
 
-					const rowRect = targetRow.getBoundingClientRect();
+						const viewportTop = headerBottom + VIEWPORT_OFFSET;
 
-					if (rowRect.top < viewportTop) {
-						container.scrollTop -= viewportTop - rowRect.top;
-					}
+						const rowRect = targetRow.getBoundingClientRect();
 
-					const cellKey = getCellKey(rowIndex, columnId);
-					const targetCell = cellMapRef.current.get(cellKey);
-					if (targetCell) {
-						scrollCellIntoView({
-							container,
-							targetCell,
-							tableRef,
-							viewportOffset: VIEWPORT_OFFSET,
-							isRtl: dir === "rtl",
-						});
-					}
-				});
-			};
+						if (rowRect.top < viewportTop) {
+							container.scrollTop -= viewportTop - rowRect.top;
+						}
 
-			scrollRowIntoView();
+						const cellKey = getCellKey(rowIndex, columnId);
+						const targetCell = cellMapRef.current.get(cellKey);
+						if (targetCell) {
+							scrollCellIntoView({
+								container,
+								targetCell,
+								tableRef,
+								viewportOffset: VIEWPORT_OFFSET,
+								isRtl: dir === "rtl",
+							});
+						}
+					});
+				},
+			);
 		},
 		onRowHeightChange,
 		onRowSelect,
@@ -2339,86 +2378,88 @@ function useDataGrid<TData>({
 		const targetColumnId = columnId ?? navigableIds[0];
 
 		if (!targetColumnId) {
-			releaseFocusGuard(true);
+			releaseFocusGuard();
 			return;
 		}
 
-		async function onScrollAndFocus(retryCount: number) {
-			if (!targetColumnId) {
-				return;
-			}
-			const currentRowCount = propsRef.current.data.length;
-
-			// If the requested row doesn't exist yet, wait for data to update
-			if (rowIndex >= currentRowCount && retryCount > 0) {
-				await new Promise((resolve) => setTimeout(resolve, 50));
-				await onScrollAndFocus(retryCount - 1);
-				return;
-			}
-
-			const safeRowIndex = Math.min(rowIndex, Math.max(0, currentRowCount - 1));
-
-			const isBottomHalf = safeRowIndex > currentRowCount / 2;
-			rowVirtualizer.scrollToIndex(safeRowIndex, {
-				align: isBottomHalf ? "end" : "start",
-			});
-
-			await new Promise((resolve) => requestAnimationFrame(resolve));
-
-			// Adjust scroll position to account for sticky header/footer
-			const container = dataGridRef.current;
-			const targetRow = rowMapRef.current.get(safeRowIndex);
-
-			if (container && targetRow) {
-				const containerRect = container.getBoundingClientRect();
-				const headerHeight =
-					headerRef.current?.getBoundingClientRect().height ?? 0;
-				const footerHeight =
-					footerRef.current?.getBoundingClientRect().height ?? 0;
-
-				const viewportTop = containerRect.top + headerHeight + VIEWPORT_OFFSET;
-				const viewportBottom =
-					containerRect.bottom - footerHeight - VIEWPORT_OFFSET;
-
-				const rowRect = targetRow.getBoundingClientRect();
-				const isFullyVisible =
-					rowRect.top >= viewportTop && rowRect.bottom <= viewportBottom;
-
-				if (!isFullyVisible) {
-					if (rowRect.top < viewportTop) {
-						// Scroll up as row is partially hidden by header
-						container.scrollTop -= viewportTop - rowRect.top;
-					} else if (rowRect.bottom > viewportBottom) {
-						// Scroll down as row is partially hidden by footer
-						container.scrollTop += rowRect.bottom - viewportBottom;
-					}
-				}
-			}
-
-			store.batch(() => {
-				store.setState("focusedCell", {
-					rowIndex: safeRowIndex,
-					columnId: targetColumnId,
-				});
-				store.setState("editingCell", null);
-			});
-
-			const cellKey = getCellKey(safeRowIndex, targetColumnId);
-			const cellElement = cellMapRef.current.get(cellKey);
-
-			if (cellElement) {
-				cellElement.focus();
+		if (rowIndex >= propsRef.current.data.length) {
+			const rowAdded = await waitForGridCommit(
+				() => rowIndex < propsRef.current.data.length,
+			);
+			if (!rowAdded) {
 				releaseFocusGuard();
-			} else if (retryCount > 0) {
-				await new Promise((resolve) => requestAnimationFrame(resolve));
-				await onScrollAndFocus(retryCount - 1);
-			} else {
-				dataGridRef.current?.focus();
-				releaseFocusGuard();
+				return;
 			}
 		}
 
-		await onScrollAndFocus(SCROLL_SYNC_RETRY_COUNT);
+		const currentRowCount = propsRef.current.data.length;
+		const safeRowIndex = Math.min(rowIndex, Math.max(0, currentRowCount - 1));
+
+		const isBottomHalf = safeRowIndex > currentRowCount / 2;
+		rowVirtualizer.scrollToIndex(safeRowIndex, {
+			align: isBottomHalf ? "end" : "start",
+		});
+
+		const rowMounted = await waitForGridCommit(() =>
+			rowMapRef.current.has(safeRowIndex),
+		);
+		if (!rowMounted) {
+			releaseFocusGuard();
+			return;
+		}
+
+		// Row availability is signalled by the virtualized row's React commit.
+		// Retain one frame only for post-scroll browser layout/geometry settling.
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+
+		// Adjust scroll position to account for sticky header/footer
+		const container = dataGridRef.current;
+		const targetRow = rowMapRef.current.get(safeRowIndex);
+
+		if (container && targetRow) {
+			const containerRect = container.getBoundingClientRect();
+			const headerHeight =
+				headerRef.current?.getBoundingClientRect().height ?? 0;
+			const footerHeight =
+				footerRef.current?.getBoundingClientRect().height ?? 0;
+
+			const viewportTop = containerRect.top + headerHeight + VIEWPORT_OFFSET;
+			const viewportBottom =
+				containerRect.bottom - footerHeight - VIEWPORT_OFFSET;
+
+			const rowRect = targetRow.getBoundingClientRect();
+			const isFullyVisible =
+				rowRect.top >= viewportTop && rowRect.bottom <= viewportBottom;
+
+			if (!isFullyVisible) {
+				if (rowRect.top < viewportTop) {
+					// Scroll up as row is partially hidden by header
+					container.scrollTop -= viewportTop - rowRect.top;
+				} else if (rowRect.bottom > viewportBottom) {
+					// Scroll down as row is partially hidden by footer
+					container.scrollTop += rowRect.bottom - viewportBottom;
+				}
+			}
+		}
+
+		store.batch(() => {
+			store.setState("focusedCell", {
+				rowIndex: safeRowIndex,
+				columnId: targetColumnId,
+			});
+			store.setState("editingCell", null);
+		});
+
+		const cellKey = getCellKey(safeRowIndex, targetColumnId);
+		const cellElement = cellMapRef.current.get(cellKey);
+
+		if (cellElement) {
+			cellElement.focus();
+			releaseFocusGuard();
+		} else {
+			dataGridRef.current?.focus();
+			releaseFocusGuard();
+		}
 	};
 
 	const onRowAdd = async (event?: React.MouseEvent<HTMLDivElement>) => {
@@ -2442,7 +2483,7 @@ function useDataGrid<TData>({
 
 		onSelectionClear();
 
-		// onScrollToRow will handle retries if the row isn't rendered yet
+		// onScrollToRow waits for the row's data/render commits when needed.
 		const targetRowIndex = result.rowIndex ?? initialRowCount;
 		const targetColumnId = result.columnId;
 

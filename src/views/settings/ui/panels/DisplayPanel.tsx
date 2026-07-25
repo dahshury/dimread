@@ -1,4 +1,8 @@
-import { ComputerIcon, Sun03Icon } from "@hugeicons/core-free-icons";
+import {
+	ComputerIcon,
+	SlidersHorizontalIcon,
+	Sun03Icon,
+} from "@hugeicons/core-free-icons";
 import { useTranslations } from "use-intl";
 import {
 	patchSettingsSection,
@@ -8,20 +12,38 @@ import {
 import { useMonitors } from "@/features/display";
 import { FormControl } from "@/shared/ui/form-control";
 import { Toggle } from "@/shared/ui/toggle";
+import { QuickControls } from "@/widgets/quick-controls";
 import { MonitorCards } from "./MonitorCards";
 
-/** Settings → Display: colour-engine behaviour (smooth transition, wide colour
- *  range) plus the detected-monitor inventory. Wired to the `display` settings
- *  section (FEATURE-PARITY F1.2 / F1.8). The live temperature/brightness sliders
- *  stay in the main window — only the engine's behavioural switches live here. */
+/** Settings → Display — the app's landing tab and its only "live" surface.
+ *
+ *  Top: the {@link QuickControls} block (monitor strip, K/% readout, colour
+ *  temperature + brightness sliders, auto day/night, the eight preset modes) —
+ *  the controls that used to be a separate main window, rendered by the very
+ *  same components. Below it: the engine's behavioural switches (smooth
+ *  transition, wide ranges, fullscreen detection) and the detected-monitor
+ *  inventory, wired to the `display` settings section (FEATURE-PARITY F1.2 /
+ *  F1.8).
+ *
+ *  Keep the split in that order — instant effect first, configuration second. */
 export function DisplayPanel() {
 	const t = useTranslations("optionsTab");
+	const tDisplay = useTranslations("displayTab");
 	const tAbout = useTranslations("aboutTab");
 	const display = useSettingsStore((s) => s.settings.display);
 	const monitors = useMonitors();
 
 	return (
 		<>
+			<SettingSection
+				icon={SlidersHorizontalIcon}
+				title={tDisplay("quickControlsSectionTitle")}
+			>
+				<div className="pt-2">
+					<QuickControls />
+				</div>
+			</SettingSection>
+
 			<SettingSection divided icon={Sun03Icon} title={t("displaySectionTitle")}>
 				<FormControl
 					caption={t("smoothTransitionCaption")}

@@ -6,22 +6,21 @@
 //!   1. `overlay_notify(payload)` resolves the payload (tone/duration
 //!      defaults + clamps), positions + shows the prewarmed hidden `overlay`
 //!      window, and emits the `overlay:notify` specta event with the RESOLVED
-//!      notification (so the renderer's exit timer and the Rust hide timer
-//!      agree on timing).
+//!      notification.
 //!   2. The renderer plays the DynamicIsland enter animation, shows the pill
-//!      for `duration_ms`, then plays its exit; Rust hides the OS window at
-//!      `duration_ms + OVERLAY_EXIT_GRACE_MS` so the fully-faded frame is
-//!      composited before the hide (same rationale as the picker's grace).
-//!   3. A new notify while one is visible REPLACES it: the sequence counter
-//!      invalidates the pending hide and the renderer swaps content in place
+//!      until Rust emits `overlay:dismiss` at the semantic duration deadline,
+//!      then acknowledges the real CSS exit completion before Rust hides the
+//!      OS window.
+//!   3. A new notify while one is visible REPLACES it: its sequence invalidates
+//!      stale duration/animation callbacks and the renderer swaps content
 //!      (no queue — last notification wins; documented template behavior).
-//!   4. `overlay_dismiss` emits `overlay:dismiss` (renderer plays its exit
-//!      now) and hides after just the grace.
+//!   4. Listener startup uses subscribe-then-snapshot, so no timed re-emits are
+//!      needed to cover a suspended or newly resumed WebView.
 //!
 //! The download manager calls `notify_download_terminal` on completed/failed
 //! transfers, so the pill has a real producer out of the box.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -40,20 +39,18 @@ const OVERLAY_WIDTH: f64 = 720.0;
 const DEFAULT_DURATION_MS: u32 = 4000;
 const MIN_DURATION_MS: u32 = 1200;
 const MAX_DURATION_MS: u32 = 30_000;
-/// How long after the renderer's exit animation starts the OS window hides.
-/// MUST exceed the renderer's close transition (160 ms `--panel-close-dur`)
-/// so the fully-faded frame is composited before the hide — WebView2
-/// re-presents the last composited frame on the next show.
-const OVERLAY_EXIT_GRACE_MS: u64 = 400;
-/// First-show race: the prewarmed webview may need a beat after `show()`
-/// before its listener sees the event; duplicate notifies are idempotent
-/// (the renderer replaces content in place).
-const OVERLAY_NOTIFY_REEMIT_MS: &[u64] = &[75, 250];
+#[derive(Default)]
+struct OverlayState {
+    sequence: u64,
+    current: Option<OverlayNotification>,
+}
 
-/// Monotonic notify/dismiss counter: delayed hides and re-emits capture the
-/// value at schedule time and only fire while it is still current, so a new
-/// notify extends/replaces instead of being cut short by a stale timer.
-static OVERLAY_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Cached authoritative state for the renderer's subscribe-then-snapshot
+/// handshake. Sequence allocation and replacement are atomic under this lock.
+static OVERLAY_STATE: Mutex<OverlayState> = Mutex::new(OverlayState {
+    sequence: 0,
+    current: None,
+});
 
 /// Notification tone → the renderer maps it to status color tokens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -84,6 +81,8 @@ pub struct OverlayNotifyPayload {
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayNotification {
+    /// Process-monotonic ordering for event/snapshot races.
+    pub sequence: u64,
     #[specta(optional)]
     pub title: Option<String>,
     pub message: String,
@@ -91,8 +90,18 @@ pub struct OverlayNotification {
     pub duration_ms: u32,
 }
 
+/// Authoritative lifecycle snapshot read only after event listeners are live.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlaySnapshot {
+    pub sequence: u64,
+    #[specta(optional)]
+    pub notification: Option<OverlayNotification>,
+}
+
 pub(crate) fn resolve_notification(payload: OverlayNotifyPayload) -> OverlayNotification {
     OverlayNotification {
+        sequence: 0,
         title: payload.title.filter(|t| !t.trim().is_empty()),
         message: payload.message,
         tone: payload.tone.unwrap_or_default(),
@@ -103,16 +112,16 @@ pub(crate) fn resolve_notification(payload: OverlayNotifyPayload) -> OverlayNoti
     }
 }
 
-/// Dock the overlay top-center of the work area of the display the main
-/// window lives on (primary display when main is gone). Top edge = work-area
-/// top: the pill's `flatTop` island hangs flush from the screen edge.
+/// Dock the overlay top-center of the work area of the display the app window
+/// lives on (primary display when it is gone). Top edge = work-area top: the
+/// pill's `flatTop` island hangs flush from the screen edge.
 fn place_overlay(app: &AppHandle, window: &tauri::WebviewWindow) {
     let anchor_point = app
-        .get_webview_window("main")
-        .and_then(|main| {
-            let scale = main.scale_factor().unwrap_or(1.0);
-            let pos = main.outer_position().ok()?;
-            let size = main.outer_size().ok()?;
+        .get_webview_window(crate::windows::PRIMARY_WINDOW)
+        .and_then(|anchor| {
+            let scale = anchor.scale_factor().unwrap_or(1.0);
+            let pos = anchor.outer_position().ok()?;
+            let size = anchor.outer_size().ok()?;
             Some((
                 (pos.x as f64 + size.width as f64 / 2.0) / scale,
                 (pos.y as f64 + size.height as f64 / 2.0) / scale,
@@ -133,16 +142,29 @@ pub fn notify(app: &AppHandle, payload: OverlayNotifyPayload) -> Result<(), Stri
     if notification.message.trim().is_empty() {
         return Err("overlay message must not be empty".into());
     }
-    // A fresh notify owns the window: cancels any pending hide/re-emit.
-    let seq = OVERLAY_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut notification = notification;
+    let seq = {
+        let mut state = OVERLAY_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.sequence += 1;
+        notification.sequence = state.sequence;
+        state.current = Some(notification.clone());
+        state.sequence
+    };
 
-    let window = crate::windows::ensure_window(app, OVERLAY_LABEL)?;
+    let window = crate::windows::ensure_window(app, OVERLAY_LABEL).inspect_err(|_| {
+        clear_if_current(seq);
+    })?;
     place_overlay(app, &window);
     // Idempotent re-assert: creation sets click-through on Windows/macOS, but
     // Linux defers it to after the first show (hidden GTK windows aren't
     // realized yet) — and it must hold for every show path anyway.
     let _ = window.set_ignore_cursor_events(true);
-    window.show().map_err(|e| e.to_string())?;
+    window.show().map_err(|error| {
+        clear_if_current(seq);
+        error.to_string()
+    })?;
     let _ = window.set_always_on_top(true);
     // Deliberately NO set_focus(): the pill must never steal keyboard focus.
 
@@ -150,62 +172,54 @@ pub fn notify(app: &AppHandle, payload: OverlayNotifyPayload) -> Result<(), Stri
     if let Err(err) = event.emit(app) {
         log::warn!("[overlay] failed to emit overlay:notify: {err}");
     }
-    schedule_notify_reemits(app, event, seq);
-    schedule_hide(
-        app,
-        seq,
-        u64::from(notification.duration_ms) + OVERLAY_EXIT_GRACE_MS,
-    );
+    schedule_duration_deadline(app, seq, notification.duration_ms);
     Ok(())
 }
 
-/// Duplicate-notify re-emits for the first-show listener race (the renderer
-/// replaces content in place, so duplicates are idempotent).
-fn schedule_notify_reemits(app: &AppHandle, event: OverlayNotifyEvent, seq: u64) {
+/// A notification's visible duration is itself time-based. This is a one-shot
+/// semantic deadline; delivery and native-window lifecycle are callback-driven.
+fn schedule_duration_deadline(app: &AppHandle, seq: u64, duration_ms: u32) {
     let app = app.clone();
     std::thread::spawn(move || {
-        let mut elapsed = 0;
-        for delay_ms in OVERLAY_NOTIFY_REEMIT_MS {
-            std::thread::sleep(Duration::from_millis(delay_ms - elapsed));
-            elapsed = *delay_ms;
-            if OVERLAY_SEQ.load(Ordering::SeqCst) != seq {
-                return;
-            }
-            if let Err(err) = event.emit(&app) {
-                log::warn!("[overlay] failed to re-emit overlay:notify: {err}");
-            }
-        }
+        std::thread::sleep(Duration::from_millis(u64::from(duration_ms)));
+        dismiss_if_current(&app, Some(seq));
     });
 }
 
-/// Hide the OS window after `delay_ms`, unless a newer notify/dismiss took
-/// ownership in the meantime.
-fn schedule_hide(app: &AppHandle, seq: u64, delay_ms: u64) {
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(delay_ms));
-        if OVERLAY_SEQ.load(Ordering::SeqCst) != seq {
+fn dismiss_if_current(app: &AppHandle, expected: Option<u64>) {
+    let sequence = {
+        let mut state = OVERLAY_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.current.is_none()
+            || expected.is_some_and(|sequence| {
+                state.current.as_ref().map(|item| item.sequence) != Some(sequence)
+            })
+        {
             return;
         }
-        let _ = app.clone().run_on_main_thread(move || {
-            if OVERLAY_SEQ.load(Ordering::SeqCst) != seq {
-                return;
-            }
-            if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
-                let _ = window.hide();
-            }
-        });
-    });
-}
-
-/// Dismiss early: the renderer plays its exit now; the window hides after
-/// the exit grace.
-pub fn dismiss(app: &AppHandle) {
-    let seq = OVERLAY_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    if let Err(err) = (OverlayDismissEvent {}).emit(app) {
+        state.sequence += 1;
+        state.current = None;
+        state.sequence
+    };
+    if let Err(err) = (OverlayDismissEvent { sequence }).emit(app) {
         log::warn!("[overlay] failed to emit overlay:dismiss: {err}");
     }
-    schedule_hide(app, seq, OVERLAY_EXIT_GRACE_MS);
+}
+
+fn clear_if_current(sequence: u64) {
+    let mut state = OVERLAY_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.current.as_ref().map(|item| item.sequence) == Some(sequence) {
+        state.current = None;
+    }
+}
+
+/// Dismiss early: the renderer plays its exit and reports when it actually
+/// completed; there is no guessed native-hide delay.
+pub fn dismiss(app: &AppHandle) {
+    dismiss_if_current(app, None);
 }
 
 /// Real producer: the download manager reports terminal transfer states here
@@ -247,6 +261,35 @@ pub fn overlay_notify(app: AppHandle, payload: OverlayNotifyPayload) -> Result<(
 #[specta::specta]
 pub fn overlay_dismiss(app: AppHandle) {
     dismiss(&app);
+}
+
+/// Latest notification for a race-free subscribe-then-snapshot handshake.
+#[tauri::command]
+#[specta::specta]
+pub fn overlay_snapshot() -> OverlaySnapshot {
+    let state = OVERLAY_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    OverlaySnapshot {
+        sequence: state.sequence,
+        notification: state.current.clone(),
+    }
+}
+
+/// Renderer acknowledgement that the CSS exit really completed. A newer
+/// notification keeps the native window alive, making late callbacks harmless.
+#[tauri::command]
+#[specta::specta]
+pub fn overlay_hide_complete(app: AppHandle, sequence: u64) {
+    let should_hide = {
+        let state = OVERLAY_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.sequence == sequence && state.current.is_none()
+    };
+    if should_hide && let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
+        let _ = window.hide();
+    }
 }
 
 #[cfg(test)]

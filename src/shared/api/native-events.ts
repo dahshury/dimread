@@ -10,6 +10,8 @@ export const NATIVE_EVENTS = {
 	OVERLAY_NOTIFY: "overlay:notify",
 	/** Early dismiss: the overlay renderer plays its exit animation now. */
 	OVERLAY_DISMISS: "overlay:dismiss",
+	/** Physical displays changed; payload is the freshly reconciled monitor list. */
+	DISPLAY_TOPOLOGY: "display:topology",
 	/**
 	 * Renderer-to-renderer broadcast (emitted via `@tauri-apps/api/event`, not
 	 * Rust): the picker window announces a selection/favorites change so every

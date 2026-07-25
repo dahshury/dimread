@@ -263,34 +263,40 @@ mod tests {
 
     #[test]
     fn write_lock_serializes_whole_tree_rmw() {
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
 
         // Model the production read→merge→write span: two threads each replace
         // ONE section under the lock; neither section may be lost.
         let store = Arc::new(Mutex::new(AppSettings::default()));
+        // Release both writers at the same instant without repeatedly yielding
+        // and hoping the OS scheduler creates contention.
+        let start = Arc::new(Barrier::new(3));
 
         let s1 = Arc::clone(&store);
+        let start1 = Arc::clone(&start);
         let t1 = std::thread::spawn(move || {
+            start1.wait();
             for _ in 0..200 {
                 with_settings_write_lock(|| {
                     let mut tree = lock_recover(&s1).clone();
                     tree.general.autostart = true;
                     *lock_recover(&s1) = tree;
                 });
-                std::thread::yield_now();
             }
         });
         let s2 = Arc::clone(&store);
+        let start2 = Arc::clone(&start);
         let t2 = std::thread::spawn(move || {
+            start2.wait();
             for _ in 0..200 {
                 with_settings_write_lock(|| {
                     let mut tree = lock_recover(&s2).clone();
                     tree.downloads.concurrency = 4;
                     *lock_recover(&s2) = tree;
                 });
-                std::thread::yield_now();
             }
         });
+        start.wait();
         t1.join().unwrap();
         t2.join().unwrap();
 

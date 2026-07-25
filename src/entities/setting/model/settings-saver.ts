@@ -13,8 +13,8 @@ import { useSettingsHydrationStore } from "./settings-hydration-store";
  *
  * Several slices persist DIFFERENT sections of the SAME settings tree through
  * the revision-checked `settings_save` pipeline — the Display slice
- * (`features/display`) posts `display` / `dayNight`, the Options tab
- * (`views/main`) posts every other section. Routing every save through ONE
+ * (`features/display`) posts `display` / `dayNight`, the settings panels
+ * (`views/settings`) post every other section. Routing every save through ONE
  * promise chain closes the races a per-slice saver cannot:
  *
  *  1. **Lost update.** `settings_save` echoes the whole backend tree. That

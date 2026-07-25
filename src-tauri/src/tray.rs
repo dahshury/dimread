@@ -5,16 +5,16 @@
 //! quick-set submenu — which is not a brightness control, it is ten buttons
 //! shaped like one. Instead the tray icon opens a transparent webview popup
 //! (`crate::tray_menu`, the `tray-menu` window) that renders the real Display
-//! controls: the same gradient brightness / colour-temperature sliders the main
+//! controls: the same gradient brightness / colour-temperature sliders the app
 //! window uses, plus the mode grid. RIGHT click toggles it — that is where the
-//! native context menu used to be; the popup's own rows cover Show / Settings /
-//! Quit. LEFT click is the plain "give me the app" gesture and surfaces the main
+//! native context menu used to be; the popup's own rows cover Settings / Quit.
+//! LEFT click is the plain "give me the app" gesture and surfaces the app
 //! window (same path as the `toggleMain` hotkey's show branch).
 //!
 //! What stays in Rust is the icon, the tooltip, and the click routing. Every
 //! display mutation now flows through the renderer's normal
 //! `settings_save` / `display_preview` path (`features/display`), so the tray
-//! and the main window share ONE persistence contract instead of the tray
+//! and the app window share ONE persistence contract instead of the tray
 //! keeping a parallel Rust-side writer. In particular the "dimming while
 //! paused redirects the edit into `custom`" rule lives in
 //! `buildSliderCommitPatch` and now applies to the tray sliders too.
@@ -22,11 +22,31 @@
 //! The tooltip shows the live engine output (e.g. `DimRead — 5000K · 85%`) and
 //! follows the `display:state` event.
 //!
-//! The taskbar/menu-bar theme can differ from the app theme, so the icon is
-//! chosen from the OS: on Windows the `SystemUsesLightTheme` registry value
-//! (the app theme registry key is `AppsUseLightTheme` — the WRONG one for the
-//! tray), elsewhere the main window's reported theme. A dark taskbar gets the
-//! light glyph and vice versa. Repainted on `WindowEvent::ThemeChanged`.
+//! # The icon is STATEFUL
+//!
+//! The tray glyph is not one image — it is a family, picked from three axes:
+//!
+//!   * **display mode** — one variant per entry in `DISPLAY_MODE_IDS` (pause,
+//!     health, game, movie, office, editing, reading, custom), so the tray shows
+//!     what the engine is doing without opening anything. `pause` is the
+//!     "filtering off" member of the family.
+//!   * **day / night phase** — the same mark tinted cool for the day profile and
+//!     warm for the night one, following the scheduler. `transition` renders as
+//!     day (there is no third artwork; the tooltip carries the exact numbers).
+//!   * **taskbar theme** — a dark taskbar gets the light-optimised rendering and
+//!     vice versa. The taskbar/menu-bar theme can differ from the app theme, so
+//!     this comes from the OS: on Windows the `SystemUsesLightTheme` registry
+//!     value (the app-theme key is `AppsUseLightTheme` — the WRONG one for the
+//!     tray), elsewhere the app window's reported theme.
+//!
+//! All 8 x 2 x 2 renderings are generated from ONE base mark by
+//! `tools/assets/generate-icons.py` into `icons/tray/` and embedded here with
+//! `include_bytes!`, so adding a display mode means adding its artwork to that
+//! generator and its id to `TRAY_ICON_VARIANTS` — the compile fails otherwise,
+//! which is the point.
+//!
+//! Repainted on `display:state` (mode/phase changed) and on
+//! `WindowEvent::ThemeChanged` (taskbar theme changed).
 
 use tauri::image::Image;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -42,10 +62,56 @@ pub enum AppTheme {
     Light,
 }
 
-/// The compact full-color app mark shown on a DARK taskbar.
-const TRAY_ICON_ON_DARK: &[u8] = include_bytes!("../icons/tray-on-dark.png");
-/// The compact full-color app mark shown on a LIGHT taskbar.
-const TRAY_ICON_ON_LIGHT: &[u8] = include_bytes!("../icons/tray-on-light.png");
+/// Which day/night rendering of the mark to show. `transition` maps to `Day`:
+/// the scheduler is mid-blend and a third artwork would only add flicker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayPhase {
+    Day,
+    Night,
+}
+
+impl TrayPhase {
+    fn from_engine_phase(phase: &str) -> Self {
+        if phase == "night" {
+            Self::Night
+        } else {
+            Self::Day
+        }
+    }
+}
+
+/// The four renderings of one display mode's mark.
+struct TrayIconVariant {
+    mode: &'static str,
+    day_on_dark: &'static [u8],
+    day_on_light: &'static [u8],
+    night_on_dark: &'static [u8],
+    night_on_light: &'static [u8],
+}
+
+/// Expand one mode id into its four embedded PNGs. Keeps the roster a plain
+/// list of ids instead of 32 hand-written `include_bytes!` lines that could
+/// silently pair the wrong file with the wrong state.
+macro_rules! tray_icon_variants {
+    ($($mode:literal),+ $(,)?) => {
+        &[$(TrayIconVariant {
+            mode: $mode,
+            day_on_dark: include_bytes!(concat!("../icons/tray/", $mode, "-day-on-dark.png")),
+            day_on_light: include_bytes!(concat!("../icons/tray/", $mode, "-day-on-light.png")),
+            night_on_dark: include_bytes!(concat!("../icons/tray/", $mode, "-night-on-dark.png")),
+            night_on_light: include_bytes!(concat!("../icons/tray/", $mode, "-night-on-light.png")),
+        }),+]
+    };
+}
+
+/// Must mirror `DISPLAY_MODE_IDS` in `settings/mod.rs` — a test asserts it.
+const TRAY_ICON_VARIANTS: &[TrayIconVariant] = tray_icon_variants![
+    "pause", "health", "game", "movie", "office", "editing", "reading", "custom",
+];
+
+/// Rendering used when the persisted mode is not in the roster (a settings file
+/// from a newer build, or a hand-edited one). `custom` is the neutral member.
+const TRAY_ICON_FALLBACK_MODE: &str = "custom";
 
 /// Product name shown in the tooltip.
 const APP_NAME: &str = "DimRead";
@@ -72,7 +138,7 @@ pub fn get_current_theme(app: &AppHandle) -> AppTheme {
     if let Some(theme) = windows_taskbar_theme() {
         return theme;
     }
-    match app.get_webview_window("main") {
+    match app.get_webview_window(crate::windows::PRIMARY_WINDOW) {
         Some(main_window) => match main_window.theme().unwrap_or(Theme::Dark) {
             Theme::Light => AppTheme::Light,
             _ => AppTheme::Dark,
@@ -102,11 +168,35 @@ fn windows_taskbar_theme() -> Option<AppTheme> {
     taskbar_theme_from_registry_value(system_uses_light)
 }
 
-fn tray_icon_for_theme(theme: AppTheme) -> Result<Image<'static>, tauri::Error> {
-    Image::from_bytes(match theme {
-        AppTheme::Dark => TRAY_ICON_ON_DARK,
-        AppTheme::Light => TRAY_ICON_ON_LIGHT,
-    })
+/// Pick the embedded PNG for a (mode, phase, taskbar theme) triple, falling
+/// back to [`TRAY_ICON_FALLBACK_MODE`] for an unknown mode.
+fn tray_icon_bytes(mode: &str, phase: TrayPhase, theme: AppTheme) -> &'static [u8] {
+    let variant = TRAY_ICON_VARIANTS
+        .iter()
+        .find(|variant| variant.mode == mode)
+        .or_else(|| {
+            TRAY_ICON_VARIANTS
+                .iter()
+                .find(|variant| variant.mode == TRAY_ICON_FALLBACK_MODE)
+        })
+        .expect("the tray icon roster always contains the fallback mode");
+    match (phase, theme) {
+        // A DARK taskbar gets the on-dark rendering, and vice versa.
+        (TrayPhase::Day, AppTheme::Dark) => variant.day_on_dark,
+        (TrayPhase::Day, AppTheme::Light) => variant.day_on_light,
+        (TrayPhase::Night, AppTheme::Dark) => variant.night_on_dark,
+        (TrayPhase::Night, AppTheme::Light) => variant.night_on_light,
+    }
+}
+
+/// Decode the tray icon for the engine's current output on the current taskbar
+/// theme.
+fn tray_icon_for(output: &DisplayOutput, theme: AppTheme) -> Result<Image<'static>, tauri::Error> {
+    Image::from_bytes(tray_icon_bytes(
+        &output.mode,
+        TrayPhase::from_engine_phase(&output.phase),
+        theme,
+    ))
 }
 
 /// Build the tray icon and stash its handle in managed state so
@@ -116,10 +206,13 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
     let output = crate::display::engine::current_output();
 
     let tray = TrayIconBuilder::new()
-        .icon(tray_icon_for_theme(get_current_theme(app))?)
+        .icon(tray_icon_for(&output, get_current_theme(app))?)
         .tooltip(tray_tooltip_text(&output))
-        // macOS: template icons are recolored by the system for the menu bar.
-        .icon_as_template(true)
+        // NOT a template icon. A macOS template is drawn from its alpha channel
+        // alone, which would flatten every mode/phase variant into the same
+        // silhouette — and the variant's COLOUR is the state signal here. The
+        // on-dark / on-light pair already covers menu-bar contrast manually.
+        .icon_as_template(false)
         // No `.menu(...)`: right click opens the webview flyout, left click
         // raises the main window (see the `on_tray_icon_event` handler below).
         .show_menu_on_left_click(false)
@@ -136,11 +229,12 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
             let app = tray_handle.app_handle();
             match button {
                 // Left click is the plain "give me the app" gesture: surface +
-                // focus the main window. Any open flyout is dismissed first so
-                // the two tray surfaces are never up at once.
+                // focus the app window (the settings window — the app's only
+                // top-level surface). Any open flyout is dismissed first so the
+                // two tray surfaces are never up at once.
                 MouseButton::Left => {
                     crate::tray_menu::hide(app);
-                    crate::window_state::show_main_window(app);
+                    crate::window_state::show_primary_window(app);
                 }
                 // Right click keeps the flyout — it is where the native context
                 // menu used to be.
@@ -169,21 +263,30 @@ pub fn init_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Update the tray tooltip from the latest engine output.
+/// Update the tray tooltip AND glyph from the latest engine output — the mode
+/// and phase in that output are two of the icon's three axes.
 fn sync_tray_to_output(app: &AppHandle, output: &DisplayOutput) {
-    if let Some(tray) = app.try_state::<TrayIcon>()
-        && let Err(err) = tray.set_tooltip(Some(tray_tooltip_text(output)))
-    {
+    let Some(tray) = app.try_state::<TrayIcon>() else {
+        return;
+    };
+    if let Err(err) = tray.set_tooltip(Some(tray_tooltip_text(output))) {
         log::warn!("[tray] failed to set tooltip: {err}");
     }
+    set_tray_icon(&tray, output, get_current_theme(app));
 }
 
-/// Repaint the tray icon for the current OS theme (ThemeChanged handler).
+/// Repaint the tray icon for the current OS theme (ThemeChanged handler),
+/// keeping the mode/phase the engine is currently in.
 pub fn refresh_tray_icon(app: &AppHandle) {
     let Some(tray) = app.try_state::<TrayIcon>() else {
         return;
     };
-    match tray_icon_for_theme(get_current_theme(app)) {
+    let output = crate::display::engine::current_output();
+    set_tray_icon(&tray, &output, get_current_theme(app));
+}
+
+fn set_tray_icon(tray: &TrayIcon, output: &DisplayOutput, theme: AppTheme) {
+    match tray_icon_for(output, theme) {
         Ok(image) => {
             if let Err(err) = tray.set_icon(Some(image)) {
                 log::warn!("[tray] failed to set tray icon: {err}");
@@ -212,10 +315,67 @@ mod tests {
         assert_eq!(taskbar_theme_from_registry_value(2), None);
     }
 
+    /// The tray roster IS the display-mode roster. If a mode is added to the
+    /// settings schema without artwork, the tray would silently fall back to
+    /// `custom` and the icon would stop meaning anything.
     #[test]
-    fn embedded_tray_icons_decode() {
-        assert!(tray_icon_for_theme(AppTheme::Dark).is_ok());
-        assert!(tray_icon_for_theme(AppTheme::Light).is_ok());
+    fn tray_icon_roster_matches_the_display_modes() {
+        let modes: Vec<&str> = TRAY_ICON_VARIANTS.iter().map(|v| v.mode).collect();
+        assert_eq!(modes, crate::settings::DISPLAY_MODE_IDS.to_vec());
+        assert!(modes.contains(&TRAY_ICON_FALLBACK_MODE));
+    }
+
+    #[test]
+    fn every_embedded_tray_icon_decodes() {
+        for variant in TRAY_ICON_VARIANTS {
+            for phase in [TrayPhase::Day, TrayPhase::Night] {
+                for theme in [AppTheme::Dark, AppTheme::Light] {
+                    assert!(
+                        Image::from_bytes(tray_icon_bytes(variant.mode, phase, theme)).is_ok(),
+                        "{} {phase:?} {theme:?} does not decode",
+                        variant.mode
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every (mode, phase, theme) triple must resolve to a DISTINCT image —
+    /// otherwise the generator silently emitted duplicates and the tray stops
+    /// communicating state.
+    #[test]
+    fn each_tray_state_has_its_own_artwork() {
+        let mut seen: Vec<&[u8]> = Vec::new();
+        for variant in TRAY_ICON_VARIANTS {
+            for phase in [TrayPhase::Day, TrayPhase::Night] {
+                for theme in [AppTheme::Dark, AppTheme::Light] {
+                    let bytes = tray_icon_bytes(variant.mode, phase, theme);
+                    assert!(
+                        !seen.contains(&bytes),
+                        "{} {phase:?} {theme:?} duplicates another tray icon",
+                        variant.mode
+                    );
+                    seen.push(bytes);
+                }
+            }
+        }
+        assert_eq!(seen.len(), TRAY_ICON_VARIANTS.len() * 4);
+    }
+
+    #[test]
+    fn an_unknown_mode_falls_back_instead_of_panicking() {
+        assert_eq!(
+            tray_icon_bytes("mode-from-the-future", TrayPhase::Day, AppTheme::Dark),
+            tray_icon_bytes(TRAY_ICON_FALLBACK_MODE, TrayPhase::Day, AppTheme::Dark),
+        );
+    }
+
+    #[test]
+    fn only_night_renders_the_warm_variant() {
+        assert_eq!(TrayPhase::from_engine_phase("night"), TrayPhase::Night);
+        assert_eq!(TrayPhase::from_engine_phase("day"), TrayPhase::Day);
+        // Mid-blend has no third artwork; the tooltip carries the numbers.
+        assert_eq!(TrayPhase::from_engine_phase("transition"), TrayPhase::Day);
     }
 
     #[test]
@@ -232,6 +392,7 @@ mod tests {
             brightness: 100,
             mode: "pause".into(),
             phase: "day".into(),
+            grayscale_applied: false,
         };
         assert_eq!(tray_tooltip_text(&paused), "DimRead — Paused");
 
@@ -240,6 +401,7 @@ mod tests {
             brightness: 85,
             mode: "health".into(),
             phase: "night".into(),
+            grayscale_applied: false,
         };
         assert_eq!(tray_tooltip_text(&active), "DimRead — 5000K · 85%");
     }

@@ -19,7 +19,7 @@ pub fn install() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         write_crash_report(info);
-        // A panic on the smooth-transition worker, the autodark ticker, or the
+        // A panic on the smooth-transition worker, the autodark deadline worker, or the
         // blur tracker would otherwise leave the screen tinted and the taskbar
         // transparent. This is the one abnormal-exit path that can still run
         // code with the in-memory snapshots intact, so undo the system state

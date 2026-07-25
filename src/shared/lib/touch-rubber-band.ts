@@ -6,6 +6,11 @@ const RUBBER_BAND_IGNORE_SELECTOR =
 const RUBBER_BAND_OFF_SELECTOR = "[data-rubber-band='off']";
 
 let installed = false;
+const pendingReleaseCleanups = new WeakMap<HTMLElement, () => void>();
+
+function finishPendingRelease(target: HTMLElement) {
+	pendingReleaseCleanups.get(target)?.();
+}
 
 function dampenRubberBandDistance(distance: number) {
 	const magnitude = Math.abs(distance);
@@ -64,6 +69,7 @@ function applyPull(
 		translate: string;
 	},
 ) {
+	finishPendingRelease(target);
 	target.style.transition = release
 		? `translate ${RUBBER_BAND_RELEASE_MS}ms ${RUBBER_BAND_RELEASE_EASING}`
 		: "none";
@@ -71,10 +77,23 @@ function applyPull(
 	if (!release) {
 		return;
 	}
-	window.setTimeout(() => {
+	const cleanup = () => {
+		target.removeEventListener("transitionend", onTransitionFinished);
+		target.removeEventListener("transitioncancel", onTransitionFinished);
+		if (pendingReleaseCleanups.get(target) === cleanup) {
+			pendingReleaseCleanups.delete(target);
+		}
 		target.style.transition = original.transition;
 		target.style.translate = original.translate;
-	}, RUBBER_BAND_RELEASE_MS);
+	};
+	const onTransitionFinished = (event: TransitionEvent) => {
+		if (event.target === target && event.propertyName === "translate") {
+			cleanup();
+		}
+	};
+	pendingReleaseCleanups.set(target, cleanup);
+	target.addEventListener("transitionend", onTransitionFinished);
+	target.addEventListener("transitioncancel", onTransitionFinished);
 }
 
 /**
@@ -148,6 +167,7 @@ export function installTouchRubberBand(): void {
 			return;
 		}
 
+		finishPendingRelease(nextViewport);
 		viewport = nextViewport;
 		originalStyles = {
 			overscrollBehaviorY: viewport.style.overscrollBehaviorY,

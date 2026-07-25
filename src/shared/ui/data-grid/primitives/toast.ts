@@ -97,9 +97,22 @@ function show(kind: ToastKind, message: string, opts?: ToastOptions): void {
 
 	const duration = opts?.duration ?? 3200;
 	window.setTimeout(() => {
+		if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+			el.remove();
+			return;
+		}
+		const remove = (event: TransitionEvent) => {
+			if (event.target !== el || event.propertyName !== "opacity") {
+				return;
+			}
+			el.removeEventListener("transitionend", remove);
+			el.removeEventListener("transitioncancel", remove);
+			el.remove();
+		};
+		el.addEventListener("transitionend", remove);
+		el.addEventListener("transitioncancel", remove);
 		el.style.opacity = "0";
 		el.style.transform = "translateY(6px)";
-		window.setTimeout(() => el.remove(), 180);
 	}, duration);
 }
 

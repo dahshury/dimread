@@ -14,7 +14,7 @@ export function openPickerAtRect(
 	void commands.openWindow("picker", rect.x, rect.y, rect.width, rect.height);
 }
 
-/** Animated close (emits `picker:closing`, hides after the fade grace). */
+/** Animated close; the renderer reports the real exit completion before hide. */
 export function closePicker(): void {
 	void commands.closeWindow("picker");
 }

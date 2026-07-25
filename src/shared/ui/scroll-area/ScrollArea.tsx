@@ -154,13 +154,12 @@ function useTouchRubberBand(
 		let boundaryStartY = 0;
 		let boundary: "top" | "bottom" | null = null;
 		let currentOffset = 0;
-		let resetTimer: number | undefined;
+		let releasePending = false;
 
-		const clearResetTimer = () => {
-			if (resetTimer !== undefined) {
-				window.clearTimeout(resetTimer);
-				resetTimer = undefined;
-			}
+		const clearReleasedOffset = () => {
+			releasePending = false;
+			content.style.transition = "";
+			content.style.transform = "";
 		};
 
 		const setOffset = (offset: number, release: boolean) => {
@@ -172,19 +171,23 @@ function useTouchRubberBand(
 		};
 
 		const resetOffset = (release: boolean) => {
-			clearResetTimer();
+			releasePending = false;
 			if (currentOffset === 0) {
 				content.style.transition = "";
 				content.style.transform = "";
 				return;
 			}
+			releasePending = release;
 			setOffset(0, release);
-			if (release) {
-				resetTimer = window.setTimeout(() => {
-					content.style.transition = "";
-					content.style.transform = "";
-					resetTimer = undefined;
-				}, RUBBER_BAND_RELEASE_MS);
+		};
+
+		const onReleaseFinished = (event: TransitionEvent) => {
+			if (
+				releasePending &&
+				event.target === content &&
+				event.propertyName === "transform"
+			) {
+				clearReleasedOffset();
 			}
 		};
 
@@ -200,7 +203,7 @@ function useTouchRubberBand(
 				active = false;
 				return;
 			}
-			clearResetTimer();
+			releasePending = false;
 			active = true;
 			rubberBanding = false;
 			boundary = null;
@@ -259,13 +262,17 @@ function useTouchRubberBand(
 		viewport.addEventListener("touchmove", onTouchMove, { passive: true });
 		viewport.addEventListener("touchend", onTouchEnd, { passive: true });
 		viewport.addEventListener("touchcancel", onTouchEnd, { passive: true });
+		content.addEventListener("transitionend", onReleaseFinished);
+		content.addEventListener("transitioncancel", onReleaseFinished);
 
 		return () => {
 			viewport.removeEventListener("touchstart", onTouchStart);
 			viewport.removeEventListener("touchmove", onTouchMove);
 			viewport.removeEventListener("touchend", onTouchEnd);
 			viewport.removeEventListener("touchcancel", onTouchEnd);
-			clearResetTimer();
+			content.removeEventListener("transitionend", onReleaseFinished);
+			content.removeEventListener("transitioncancel", onReleaseFinished);
+			releasePending = false;
 			content.style.transition = "";
 			content.style.transform = "";
 		};

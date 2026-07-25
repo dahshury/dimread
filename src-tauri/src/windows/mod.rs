@@ -1,19 +1,26 @@
-//! Window-management commands for the starter's window topology. Each window
-//! is a Tauri WebviewWindow loading its own HTML entry (main at "/", secondary
-//! windows at "windows/<name>.html"), created PROGRAMMATICALLY (tauri.conf.json
-//! has `"windows": []`) so portable mode can redirect the WebView2 user-data
-//! folder.
+//! Window-management commands for DimRead's window topology. Each window is a
+//! Tauri WebviewWindow loading its own HTML entry (the PRIMARY window at "/",
+//! secondary windows at "windows/<name>.html"), created PROGRAMMATICALLY
+//! (tauri.conf.json has `"windows": []`) so portable mode can redirect the
+//! WebView2 user-data folder.
+//!
+//! There is deliberately NO separate "main" window. DimRead is a tray app whose
+//! ONE visible surface is the settings window: it hosts the live quick controls
+//! (monitor strip, sliders, preset modes) at the top of its Display tab and
+//! every configuration surface behind the sidebar rail. The tray flyout is the
+//! only other control surface. Do not reintroduce a second top-level window for
+//! "quick" controls — that split is what this topology removed.
 //!
 //! Creation policy:
-//!   - `main` is created eagerly in lib.rs setup (NOT here).
-//!   - `settings` / `gallery` are created LAZILY on first `open_window` and
-//!     HIDDEN (not destroyed) on close, so re-open preserves renderer state.
+//!   - `settings` (== {@link PRIMARY_WINDOW}) is created eagerly in lib.rs setup
+//!     and HIDDEN on close, so re-open preserves renderer state.
+//!   - `gallery` is created LAZILY on first `open_window` and hidden on close.
 //!   - `picker` is PREWARMED hidden shortly after startup (plus a compositor
 //!     warm cycle) so its first open animates instead of cold-compositing.
 //!
 //! Two placement regimes:
-//!   - PLAIN windows (settings/gallery): fixed size, centered (settings on the
-//!     main window — it is a MODAL CHILD of it), shown + focused, hide-on-close.
+//!   - PLAIN windows (settings/gallery): fixed size, centered (gallery on the
+//!     primary window when it is up), shown + focused, hide-on-close.
 //!   - The PICKER: a frameless transparent popup. The renderer sends the
 //!     trigger's viewport rect in `open_window`; we convert it to screen space
 //!     via the OPENER window's bounds, resize the picker window to fill the
@@ -29,9 +36,8 @@
 //!     transparent window repaints its transparent regions with the webview's
 //!     opaque default (white) the moment it gains focus.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -40,7 +46,6 @@ pub(crate) mod placement;
 pub use placement::virtual_screen_bounds;
 use placement::{
     anchor_from_rect, center_window, close_picker_with_animation, place_picker, resolve_opener,
-    warm_picker_compositor,
 };
 
 /// Per-window chrome/geometry spec.
@@ -77,43 +82,25 @@ struct WindowSpec {
 /// white flash on opaque windows. Matches the renderer's page background.
 const SUBSTRATE: Option<(u8, u8, u8, u8)> = Some((9, 9, 11, 255));
 
-/// Window specs (main is created in lib.rs setup; listed here for reference —
-/// `open_window` rejects it).
+/// The app's ONE top-level window. It is built eagerly in lib.rs setup, shown
+/// by the tray / the `toggleMain` hotkey, and hidden (or the app quits) on
+/// close — the role the removed `main` window used to play.
+pub const PRIMARY_WINDOW: &str = "settings";
+
+/// Window specs. `PRIMARY_WINDOW` is built from its spec during setup rather
+/// than on a renderer's `open_window` call; everything else is lazy/prewarmed.
 const WINDOW_SPECS: &[WindowSpec] = &[
-    // Main — the compact quick-control panel: custom titlebar over a single
-    // scrolling column (monitor strip, live readout, temperature + brightness
-    // sliders, the eight preset modes, and the instant feature switches).
-    // Frameless, opaque, fixed size. Every configuration surface lives in the
-    // `settings` window instead, which is why this one is narrow and tall —
-    // sized for the sliders, not for a tab rail.
-    WindowSpec {
-        label: "main",
-        url: "/",
-        title: "DimRead",
-        width: 440.0,
-        height: 600.0,
-        min_width: 440.0,
-        min_height: 600.0,
-        resizable: false,
-        decorations: false,
-        transparent: false,
-        always_on_top: false,
-        skip_taskbar: false,
-        shadow: true,
-        click_through: false,
-        non_activating: false,
-        background: SUBSTRATE,
-    },
-    // Settings — frameless TRANSPARENT window centered on the main window; the
-    // renderer draws the entire window visual (rounded card + border + shadow)
-    // and animates it as ONE unit. It is a MODAL CHILD of main (owner set in
-    // `ensure_window`): it sits above it and main is input-disabled while it's
-    // open (`set_main_modal`). `shadow: false` — a DWM shadow on a transparent
-    // undecorated window draws a SQUARE outline that ignores the CSS rounding.
+    // Settings — the app window. Frameless and TRANSPARENT: the renderer draws
+    // the entire window visual (rounded card + border + shadow) and animates it
+    // as ONE unit. `shadow: false` — a DWM shadow on a transparent undecorated
+    // window draws a SQUARE outline that ignores the CSS rounding.
+    //
+    // `skip_taskbar: false`: this is the only window the user ever sees, so it
+    // owns the taskbar button (it used to be `main`'s).
     WindowSpec {
         label: "settings",
-        url: "windows/settings.html",
-        title: "DimRead — Settings",
+        url: "/",
+        title: "DimRead",
         width: 940.0,
         height: 680.0,
         min_width: 940.0,
@@ -122,7 +109,7 @@ const WINDOW_SPECS: &[WindowSpec] = &[
         decorations: false,
         transparent: true,
         always_on_top: false,
-        skip_taskbar: true,
+        skip_taskbar: false,
         shadow: false,
         click_through: false,
         non_activating: false,
@@ -296,17 +283,20 @@ impl WindowOperation {
 fn is_window_operation_allowed(caller: &str, operation: WindowOperation, target: &str) -> bool {
     match operation {
         WindowOperation::Open => match target {
-            // The tray flyout's "Settings" row opens the same modal the main
-            // window's gear does — it is the tray's only cross-window reach.
-            "settings" => matches!(caller, "main" | "tray-menu"),
-            "gallery" => caller == "main",
-            "picker" => matches!(caller, "main" | "settings" | "gallery"),
+            // The tray flyout's "Settings" row surfaces the app window — the
+            // tray's only cross-window reach.
+            "settings" => caller == "tray-menu",
+            "gallery" => caller == PRIMARY_WINDOW,
+            "picker" => matches!(caller, "settings" | "gallery"),
             _ => false,
         },
         WindowOperation::Close => match target {
-            "main" => false,
-            "settings" | "gallery" => caller == target,
-            "picker" => matches!(caller, "main" | "settings" | "gallery" | "picker"),
+            // The app window closes through `close_self_window`, which routes
+            // to the hide-to-tray / quit decision. A generic `close_window`
+            // would hide it and skip that, so it is not allowed here.
+            "settings" => false,
+            "gallery" => caller == target,
+            "picker" => matches!(caller, "settings" | "gallery" | "picker"),
             // The flyout dismisses itself through `tray_menu_hide` (a park, not
             // a hide) — never through the generic window commands.
             _ => false,
@@ -347,13 +337,15 @@ pub(crate) struct PickerAnchor {
 #[derive(Clone)]
 pub(crate) struct PickerState {
     anchor: Option<PickerAnchor>,
+    /// Last panel rect emitted while open. Renderers subscribe first and then
+    /// read this snapshot so a newly resumed WebView never needs timed replays.
+    current_panel: Option<crate::events::PickerAnchorEvent>,
     /// Desired panel footprint (logical px). Fixed for the starter's single
     /// generic picker; widened to the trigger width at placement time.
     width: f64,
     height: f64,
-    /// True from close-animation start until the next anchored open (the hide
-    /// is delayed so the faded frame composits — placement must not re-show
-    /// the window during that grace).
+    /// True from close-animation start until the renderer acknowledges the
+    /// actual CSS animation completion or a new anchored open supersedes it.
     closing: bool,
 }
 
@@ -368,6 +360,7 @@ pub(crate) fn with_picker_state<R>(f: impl FnOnce(&mut PickerState) -> R) -> R {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let entry = guard.get_or_insert_with(|| PickerState {
         anchor: None,
+        current_panel: None,
         width: PICKER_PANEL_SIZE.0,
         height: PICKER_PANEL_SIZE.1,
         closing: false,
@@ -376,7 +369,7 @@ pub(crate) fn with_picker_state<R>(f: impl FnOnce(&mut PickerState) -> R) -> R {
 }
 
 /// Ensure the labelled window exists (creating it lazily from its spec) and
-/// return a handle. `main` is never (re)created here — it's owned by setup.
+/// return a handle.
 /// The tao event-loop thread, recorded in `setup`. Window CREATION must happen
 /// there (wry/tao constraint on Windows): building a webview window from a
 /// command thread deadlocks the event loop — the app keeps painting but every
@@ -417,9 +410,6 @@ fn build_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, St
         return Ok(existing);
     }
     let spec = spec_for(label).ok_or_else(|| format!("unknown window '{label}'"))?;
-    if label == "main" {
-        return Err("main window must already exist".into());
-    }
 
     let mut builder = WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.url.into()))
         .title(spec.title)
@@ -453,30 +443,19 @@ fn build_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, St
         builder = builder.background_color(tauri::webview::Color(0, 0, 0, 0));
     }
 
-    // Settings is a modal child owned by the main window. On Windows `parent()`
-    // sets `main` as the OWNER window: the modal is always above it in the
-    // z-order, is hidden when main is minimized, and is destroyed with it.
-    if spec.label == "settings" {
-        match app.get_webview_window("main") {
-            Some(main) => {
-                builder = builder
-                    .parent(&main)
-                    .map_err(|e| format!("parent {} to main failed: {e}", spec.label))?;
-            }
-            None => log::warn!(
-                "ensure_window: main window missing; {} created without owner",
-                spec.label
-            ),
-        }
+    // The app window seeds centered on the primary display; `lib.rs` then
+    // overrides that with the remembered position while it is still hidden.
+    if spec.label == PRIMARY_WINDOW {
+        builder = builder.center();
     }
 
     if let Some(data_dir) = crate::portable::data_dir() {
         // CRITICAL: every webview in the process MUST share ONE WebView2
         // user-data folder — WebView2 allows only a single user-data-folder per
         // process, and a second webview requesting a DIFFERENT folder silently
-        // fails to load its content (blank window). The main window uses
-        // `data_dir/webview` (lib.rs setup), so every secondary window MUST use
-        // the SAME path, NOT a per-label dir.
+        // fails to load its content (blank window). Every window is built
+        // through this function, so they all share `data_dir/webview` — never
+        // give one a per-label dir.
         builder = builder.data_directory(data_dir.join("webview"));
     }
 
@@ -517,13 +496,11 @@ fn build_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, St
 
 // ── Prewarm ─────────────────────────────────────────────────────────────────
 
-const POST_STARTUP_PREWARM_DELAY_MS: u64 = 250;
-static POST_STARTUP_PREWARM_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static POST_STARTUP_PREWARMED: OnceLock<()> = OnceLock::new();
 
 /// Secondary windows worth prewarming shortly after first paint. The picker
-/// gets an extra compositor warm cycle (see `warm_picker_compositor`); settings
-/// is pre-created hidden so its first open shows an already-loaded webview;
-/// the overlay is pre-created so the first notification only has to reveal an
+/// gets an extra compositor warm cycle (see `warm_picker_compositor`); the
+/// overlay is pre-created so the first notification only has to reveal an
 /// already-loaded transparent webview.
 ///
 /// The gallery is prewarmed too — EVERY secondary window is. A webview built
@@ -534,7 +511,6 @@ static POST_STARTUP_PREWARM_SCHEDULED: AtomicBool = AtomicBool::new(false);
 /// lazy build navigates.
 const POST_STARTUP_PREWARM_LABELS: &[&str] = &[
     "picker",
-    "settings",
     "overlay",
     "gallery",
     "focus-overlay",
@@ -542,86 +518,56 @@ const POST_STARTUP_PREWARM_LABELS: &[&str] = &[
     "tray-menu",
 ];
 
-/// Pre-create hidden secondary windows after the main window paints. WebView2
+/// Pre-create hidden secondary windows after the app window paints. WebView2
 /// creation happens on the main thread (required) but off the first-paint path.
 /// Idempotent: `ensure_window` early-returns for existing windows.
 fn prewarm_windows(app: &AppHandle) {
-    let app = app.clone();
-    let _ = app.clone().run_on_main_thread(move || {
-        for label in POST_STARTUP_PREWARM_LABELS {
-            let started = Instant::now();
-            match ensure_window(&app, label) {
-                Ok(window) => {
-                    log::debug!(
-                        "[prewarm] '{label}' pre-created (hidden) in {} ms",
-                        started.elapsed().as_millis()
-                    );
-                    // The picker also needs its COMPOSITOR warmed (an
-                    // off-screen show/hide cycle), or the first user open eats
-                    // the open animation during WebView2's cold-composite.
-                    if *label == "picker" {
-                        warm_picker_compositor(&app, &window);
-                    }
-                    // The tray flyout warms differently: it is PARKED
-                    // off-screen and left shown for the whole app lifetime, so
-                    // its composition surface (and its self-reported content
-                    // size) are ready before the first tray click.
-                    if *label == crate::tray_menu::TRAY_MENU_LABEL {
-                        crate::tray_menu::prewarm(&window);
-                    }
+    for label in POST_STARTUP_PREWARM_LABELS {
+        let started = Instant::now();
+        match ensure_window(app, label) {
+            Ok(window) => {
+                log::debug!(
+                    "[prewarm] '{label}' pre-created (hidden) in {} ms",
+                    started.elapsed().as_millis()
+                );
+                // The tray flyout warms differently: it is PARKED off-screen
+                // and left shown for the whole app lifetime, so its
+                // composition surface and self-reported size are ready before
+                // the first tray click.
+                if *label == crate::tray_menu::TRAY_MENU_LABEL {
+                    crate::tray_menu::prewarm(&window);
                 }
-                Err(e) => log::warn!("[prewarm] '{label}' failed: {e}"),
             }
+            Err(e) => log::warn!("[prewarm] '{label}' failed: {e}"),
         }
-    });
+    }
 }
 
-/// Schedule noncritical secondary WebView2 creation after the main window is
-/// visible. Idempotent.
-pub(crate) fn schedule_post_startup_prewarm(app: &AppHandle) {
-    if POST_STARTUP_PREWARM_SCHEDULED.swap(true, Ordering::SeqCst) {
+/// App-window page-load callback: pre-create noncritical secondary WebViews
+/// only after the primary document has finished loading. The builder's
+/// `on_page_load` callback calls this for the app window's
+/// `PageLoadEvent::Finished`, replacing the old arbitrary post-startup sleep.
+/// Idempotent across reloads.
+pub(crate) fn on_primary_page_loaded(app: &AppHandle) {
+    if POST_STARTUP_PREWARMED.set(()).is_err() {
         return;
     }
+    // `on_page_load` runs inside WebView2's NavigationCompleted dispatch.
+    // Building more WebViews re-entrantly from that callback can wedge them at
+    // about:blank, so hop off the callback and queue creation on Tauri's main
+    // thread after the current dispatch returns.
     let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(POST_STARTUP_PREWARM_DELAY_MS));
-        if let Err(e) = app
-            .clone()
-            .run_on_main_thread(move || prewarm_windows(&app))
-        {
-            log::warn!("post-startup prewarm scheduling failed: {e}");
-        }
-    });
-}
-
-// ── Settings modal (main-window input gate) ─────────────────────────────────
-
-/// Enable/disable the main window's input while the Settings modal is up, so
-/// the two read as one window.
-pub(crate) fn set_main_modal(app: &AppHandle, modal_active: bool) {
-    if let Some(main) = app.get_webview_window("main")
-        && let Err(e) = main.set_enabled(!modal_active)
-    {
-        log::warn!("set_main_modal({modal_active}): {e}");
+    let spawned = std::thread::Builder::new()
+        .name("prewarm-dispatch".into())
+        .spawn(move || {
+            let dispatch_app = app.clone();
+            if let Err(error) = app.run_on_main_thread(move || prewarm_windows(&dispatch_app)) {
+                log::warn!("post-load prewarm dispatch failed: {error}");
+            }
+        });
+    if let Err(error) = spawned {
+        log::warn!("failed to spawn post-load prewarm dispatcher: {error}");
     }
-}
-
-/// Close a modal child of the main window: re-enable the owner BEFORE hiding
-/// the child (the Win32 modal teardown order), then return focus to main.
-///
-/// There is deliberately NO native window-opacity animation here: any exit
-/// animation is done in the renderer (CSS) — a native `WS_EX_LAYERED` alpha
-/// fade is not honored on a window's first show on Windows.
-pub(crate) fn close_main_modal_window(
-    app: &AppHandle,
-    window: &tauri::WebviewWindow,
-) -> Result<(), String> {
-    set_main_modal(app, false);
-    let _ = window.hide();
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.set_focus();
-    }
-    Ok(())
 }
 
 // NOTE: the tray used to open Settings through a Rust-side
@@ -668,17 +614,17 @@ pub fn open_window(
         return Ok(());
     }
 
-    // Plain window: center (settings on the main window, gallery on the
-    // primary display), then show + focus.
-    center_window(&app, &window, label == "settings");
+    // The app window keeps whatever position the user last dragged it to, so
+    // re-opening it from the tray must NOT recenter. The gallery is a transient
+    // demo window and centers on the app window when that is up.
+    if label == PRIMARY_WINDOW {
+        crate::window_state::show_primary_window(&app);
+        return Ok(());
+    }
+    center_window(&app, &window, true);
     window.show().map_err(|e| e.to_string())?;
     let _ = window.unminimize();
     let _ = window.set_focus();
-    // The settings modal disables main after taking focus so it cannot be
-    // focused/clicked underneath. Close paths re-enable it.
-    if label == "settings" {
-        set_main_modal(&app, true);
-    }
     Ok(())
 }
 
@@ -686,15 +632,8 @@ pub fn open_window(
 /// backend-owned cleanup after the caller has already been established by code.
 pub(crate) fn close_window_internal(app: &AppHandle, label: &str) -> Result<(), String> {
     let label = known_window_label(label)?;
-    if label == "main" {
-        return Err("main window cannot be closed through close_window".into());
-    }
-    if label == "settings" {
-        if let Some(window) = app.get_webview_window(label) {
-            return close_main_modal_window(app, &window);
-        }
-        set_main_modal(app, false);
-        return Ok(());
+    if label == PRIMARY_WINDOW {
+        return Err("the app window closes through close_primary_window".into());
     }
     if let Some(window) = app.get_webview_window(label) {
         if label == "picker" {
@@ -725,14 +664,18 @@ pub fn close_window(
 }
 
 /// `close_self_window` — hide the CALLING window (resolved from its own webview
-/// label). Self-closing secondary windows route their close button here instead
-/// of a bare webview hide so the settings modal can release the main-window
-/// input lock as it closes.
+/// label). Self-closing windows route their close button here instead of a bare
+/// webview hide so each label's real teardown runs — above all the APP window,
+/// whose close is a hide-to-tray or an app quit depending on the user's
+/// `general.minimizeToTray` setting.
 #[tauri::command]
 #[specta::specta]
 pub fn close_self_window(app: AppHandle, webview: tauri::WebviewWindow) -> Result<(), String> {
     match webview.label() {
-        "settings" => close_main_modal_window(&app, &webview),
+        PRIMARY_WINDOW => {
+            crate::window_state::close_primary_window(&app);
+            Ok(())
+        }
         "picker" => {
             close_picker_with_animation(&app, &webview);
             Ok(())
@@ -750,7 +693,8 @@ pub fn close_self_window(app: AppHandle, webview: tauri::WebviewWindow) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        WINDOW_SPECS, WindowOperation, is_window_operation_allowed, known_window_label, spec_for,
+        PRIMARY_WINDOW, WINDOW_SPECS, WindowOperation, is_window_operation_allowed,
+        known_window_label, spec_for,
     };
 
     /// Tauri v2 scopes capabilities BY WINDOW LABEL: a window missing from the
@@ -787,10 +731,23 @@ mod tests {
         );
     }
 
+    /// The app has exactly ONE top-level window. A reintroduced `main` — or any
+    /// second taskbar-visible spec — would resurrect the split-surface topology
+    /// this app deliberately removed.
+    #[test]
+    fn the_app_window_is_the_only_top_level_window() {
+        assert!(spec_for("main").is_none());
+        let top_level: Vec<&str> = WINDOW_SPECS
+            .iter()
+            .filter(|spec| !spec.skip_taskbar)
+            .map(|spec| spec.label)
+            .collect();
+        assert_eq!(top_level, vec![PRIMARY_WINDOW, "gallery"]);
+    }
+
     #[test]
     fn known_labels_resolve() {
         for label in [
-            "main",
             "settings",
             "picker",
             "gallery",
@@ -816,7 +773,7 @@ mod tests {
         assert!(spec.background.is_none());
         // Never opened via renderer window commands (engine-owned).
         assert!(!is_window_operation_allowed(
-            "main",
+            PRIMARY_WINDOW,
             WindowOperation::Open,
             "focus-overlay"
         ));
@@ -836,33 +793,16 @@ mod tests {
 
     #[test]
     fn settings_uses_renderer_owned_transparent_chrome() {
-        let spec = spec_for("settings").expect("settings spec");
+        let spec = spec_for(PRIMARY_WINDOW).expect("settings spec");
         assert!(!spec.decorations);
         assert!(spec.transparent);
         assert!(!spec.shadow);
-        assert!(spec.skip_taskbar);
+        // The app window owns the taskbar button — nothing else is visible.
+        assert!(!spec.skip_taskbar);
         assert!(spec.background.is_none());
         assert_eq!((spec.width, spec.height), (940.0, 680.0));
-    }
-
-    #[test]
-    fn main_matches_spec_roster() {
-        let spec = spec_for("main").expect("main spec");
-        // Compact quick-control panel — narrow and tall. Configuration lives in
-        // the settings window, so main must stay far smaller than it.
-        assert_eq!((spec.width, spec.height), (440.0, 600.0));
-        assert!(!spec.decorations);
-        assert!(!spec.transparent);
-        assert!(!spec.resizable);
-        assert!(spec.shadow);
-    }
-
-    #[test]
-    fn main_stays_smaller_than_settings() {
-        let main = spec_for("main").expect("main spec");
-        let settings = spec_for("settings").expect("settings spec");
-        assert!(main.width < settings.width);
-        assert!(main.width * main.height < settings.width * settings.height);
+        // Served from the Vite ROOT entry, so the dev server's "/" is the app.
+        assert_eq!(spec.url, "/");
     }
 
     #[test]
@@ -885,7 +825,7 @@ mod tests {
         assert!(!spec.shadow);
         assert!(spec.background.is_none());
         // Every OTHER window keeps normal input handling.
-        for label in ["main", "settings", "picker", "gallery"] {
+        for label in ["settings", "picker", "gallery"] {
             assert!(!spec_for(label).unwrap().click_through, "{label}");
         }
     }
@@ -906,9 +846,8 @@ mod tests {
     fn window_open_authorization_allows_renderer_flows() {
         assert_window_rules(
             &[
-                ("main", WindowOperation::Open, "settings"),
-                ("main", WindowOperation::Open, "gallery"),
-                ("main", WindowOperation::Open, "picker"),
+                ("tray-menu", WindowOperation::Open, "settings"),
+                ("settings", WindowOperation::Open, "gallery"),
                 ("settings", WindowOperation::Open, "picker"),
                 ("gallery", WindowOperation::Open, "picker"),
             ],
@@ -921,15 +860,19 @@ mod tests {
         assert_window_rules(
             &[
                 ("picker", WindowOperation::Open, "settings"),
-                ("settings", WindowOperation::Open, "gallery"),
+                // Only the tray flyout may surface the app window; it must not
+                // be able to re-open itself into a second show path.
+                ("settings", WindowOperation::Open, "settings"),
+                ("gallery", WindowOperation::Open, "gallery"),
                 ("gallery", WindowOperation::Close, "settings"),
-                ("settings", WindowOperation::Close, "main"),
-                ("main", WindowOperation::Close, "main"),
+                // The app window's close is a hide-to-tray/quit decision that
+                // only `close_self_window` makes.
+                ("settings", WindowOperation::Close, "settings"),
                 // The overlay is backend-owned: shown by `overlay_notify`,
                 // hidden by its timer / `overlay_dismiss` — never by
                 // renderer window commands.
-                ("main", WindowOperation::Open, "overlay"),
-                ("main", WindowOperation::Close, "overlay"),
+                ("settings", WindowOperation::Open, "overlay"),
+                ("settings", WindowOperation::Close, "overlay"),
             ],
             false,
         );
@@ -939,11 +882,10 @@ mod tests {
     fn window_close_authorization_allows_renderer_flows() {
         assert_window_rules(
             &[
-                ("settings", WindowOperation::Close, "settings"),
                 ("gallery", WindowOperation::Close, "gallery"),
                 ("picker", WindowOperation::Close, "picker"),
-                ("main", WindowOperation::Close, "picker"),
                 ("settings", WindowOperation::Close, "picker"),
+                ("gallery", WindowOperation::Close, "picker"),
             ],
             true,
         );

@@ -15,7 +15,13 @@ import {
 	useIsPresent,
 	useReducedMotion,
 } from "motion/react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+	type FocusEvent,
+	type ReactNode,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
 import { useTranslations } from "use-intl";
 import { cn } from "@/shared/lib/cn";
 import { matchesFuzzySearch } from "@/shared/lib/fuzzy-search";
@@ -117,10 +123,8 @@ export function SettingsSidebar({ links }: SettingsSidebarProps) {
 			if (target && searchRegionRef.current?.contains(target)) {
 				return;
 			}
-			window.setTimeout(() => {
-				setSearchOpen(false);
-				setQuery("");
-			}, 120);
+			setSearchOpen(false);
+			setQuery("");
 		};
 		document.addEventListener("pointerdown", onOutsidePress, true);
 		return () =>
@@ -133,13 +137,13 @@ export function SettingsSidebar({ links }: SettingsSidebarProps) {
 		inputRef.current?.blur();
 	};
 
-	const handleSearchBlur = () => {
-		window.setTimeout(() => {
-			if (document.activeElement !== inputRef.current) {
-				setSearchOpen(false);
-				setQuery("");
-			}
-		}, 120);
+	const handleSearchBlur = (event: FocusEvent<HTMLInputElement>) => {
+		const nextTarget = event.relatedTarget;
+		if (nextTarget && searchRegionRef.current?.contains(nextTarget)) {
+			return;
+		}
+		setSearchOpen(false);
+		setQuery("");
 	};
 
 	const openSearch = () => {

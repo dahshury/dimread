@@ -18,8 +18,10 @@ if (!container) {
 }
 
 /**
- * Settings-window bootstrap. The settings window is a SEPARATE webview and
- * does NOT mount RootLayout (whose shell paints an opaque `bg-surface-1` —
+ * App-window bootstrap — this is the ROOT entry (`index.html`), because the
+ * settings window IS the application: there is no separate main window.
+ *
+ * It does NOT mount RootLayout (whose shell paints an opaque `bg-surface-1` —
  * this window is transparent; the view paints its own rounded card). It still
  * needs the data hooks, above all `useSettingsSync`, which hydrates the local
  * settings cache from the backend store.

@@ -96,7 +96,9 @@ function HotkeyField({
 					onClick={onClear}
 					tooltip={clearLabel}
 				/>
-			) : null}
+			) : (
+				<span aria-hidden className="size-7 shrink-0" />
+			)}
 		</div>
 	);
 }

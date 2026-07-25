@@ -30,7 +30,11 @@ import {
 	useTransparentBody,
 } from "@/shared/lib/window-effects";
 import { ScrollArea } from "@/shared/ui/scroll-area";
-import { useSettingsWindowMotion } from "../model/use-settings-window-motion";
+import { useAppWindowReveal } from "../model/use-app-window-reveal";
+import {
+	useSettingsWindowMotion,
+	type WindowExitIntent,
+} from "../model/use-settings-window-motion";
 import { AboutPanel } from "./AboutPanel";
 import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
@@ -45,12 +49,12 @@ import { SettingsSidebar, type SidebarLink } from "./SettingsSidebar";
 
 function SettingsPanelContent({ tab }: { tab: string }): ReactNode {
 	switch (tab) {
+		case "appearance":
+			return <AppearancePanel />;
 		case "general":
 			return <GeneralPanel />;
 		case "hotkeys":
 			return <HotkeysPanel />;
-		case "display":
-			return <DisplayPanel />;
 		case "dayNight":
 			return <DayNightPanel />;
 		case "focus":
@@ -63,8 +67,10 @@ function SettingsPanelContent({ tab }: { tab: string }): ReactNode {
 			return <RulesPanel />;
 		case "about":
 			return <AboutPanel />;
+		// `display` is the landing tab, so it is also the fallback for an
+		// unrecognised key.
 		default:
-			return <AppearancePanel />;
+			return <DisplayPanel />;
 	}
 }
 
@@ -93,17 +99,36 @@ function SettingsHydrationPanel({
 	);
 }
 
-/** Sidebar rail links — every configuration surface in the app.
+/** Sidebar rail links — every surface in the app.
  *
- *  The main window is a compact quick-control panel (sliders, preset modes and
- *  the instant on/off switches); EVERY setting behind them lives here, grouped
- *  App / Display / Features / Application. Each link carries per-tab search
- *  keywords (its setting names) so the sidebar search surfaces a tab by its
- *  contents, which is what keeps a roster this long navigable. */
+ *  This window IS the app: the live controls (sliders, preset modes, auto
+ *  day/night) sit at the top of the Display tab and every setting behind them
+ *  lives one tab away, grouped Display / App / Features / Application. Display
+ *  leads the rail because it is the landing tab ({@link INITIAL_TAB}) — opening
+ *  the app should land on the controls, not on a preferences page.
+ *
+ *  Each link carries per-tab search keywords (its setting names) so the sidebar
+ *  search surfaces a tab by its contents, which is what keeps a roster this long
+ *  navigable. */
 function useSettingsSidebarLinks(): SidebarLink[] {
 	const t = useTranslations("settings");
 	const tHotkeys = useTranslations("hotkeys");
 	return [
+		{
+			key: "display",
+			label: t("display"),
+			icon: Sun03Icon,
+			tooltip: t("displayTooltip"),
+			keywords: t("displayKeywords"),
+			groupLabel: t("navDisplay"),
+		},
+		{
+			key: "dayNight",
+			label: t("dayNight"),
+			icon: SunriseIcon,
+			tooltip: t("dayNightTooltip"),
+			keywords: t("dayNightKeywords"),
+		},
 		{
 			key: "appearance",
 			label: t("appearance"),
@@ -125,21 +150,6 @@ function useSettingsSidebarLinks(): SidebarLink[] {
 			icon: KeyboardIcon,
 			tooltip: t("hotkeysTooltip"),
 			keywords: `${tHotkeys("sectionTitle")} ${tHotkeys("toggleMainLabel")} ${tHotkeys("brightnessUpLabel")} ${tHotkeys("tempUpLabel")} ${tHotkeys("toggleFilterLabel")}`,
-		},
-		{
-			key: "display",
-			label: t("display"),
-			icon: Sun03Icon,
-			tooltip: t("displayTooltip"),
-			keywords: t("displayKeywords"),
-			groupLabel: t("navDisplay"),
-		},
-		{
-			key: "dayNight",
-			label: t("dayNight"),
-			icon: SunriseIcon,
-			tooltip: t("dayNightTooltip"),
-			keywords: t("dayNightKeywords"),
 		},
 		{
 			key: "focus",
@@ -181,21 +191,39 @@ function useSettingsSidebarLinks(): SidebarLink[] {
 	];
 }
 
-function windowCloseSelf(): void {
-	void commands.closeSelfWindow();
+/** End the exit animation the way the gesture that started it meant.
+ *
+ *  `close` is the X button and Alt+F4: a real close, which quits the app unless
+ *  `general.minimizeToTray` is on. `dismiss` is Escape: a "get this off my
+ *  screen" gesture that must ALWAYS just hide to the tray — Escape taking the
+ *  whole app down (and with it the user's display filters) would be a trap. */
+function runExit(intent: WindowExitIntent): void {
+	void (intent === "dismiss"
+		? commands.hideAppWindow()
+		: commands.closeSelfWindow());
 }
 
+/** Landing tab. Opening the app shows the live controls, not a preferences
+ *  page — the Display panel renders `QuickControls` above its own settings. */
+const INITIAL_TAB = "display";
+
 /**
- * The settings window shell: a transparent OS window whose visible "window" is
- * the CSS card — sidebar rail + elevated content card — animated open/closed as
- * one unit.
+ * The app window: a transparent OS window whose visible "window" is the CSS
+ * card — sidebar rail + elevated content card — animated open/closed as one
+ * unit.
  *
- * This window owns EVERY configuration surface in the app. The main window is
- * deliberately a small quick-control panel (sliders, preset modes, instant
- * toggles); anything with a number, a hotkey, a schedule or a rule lives here.
+ * This is DimRead's ONLY top-level window. It owns both the live controls (the
+ * `QuickControls` block at the top of the Display tab — sliders, preset modes,
+ * auto day/night) and every configuration surface behind the rail. The tray
+ * flyout is the one other control surface; it renders the same controls from
+ * the same `features/display` seam, so the two stay in sync.
+ *
  * Saves flow through the shared debounced, revision-checked settings pipeline
  * (`entities/setting`) and the `settings:changed` broadcast keeps every window
- * in sync.
+ * in sync. Closing this window hides to the tray, or quits, depending on
+ * `general.minimizeToTray` — that decision lives in Rust
+ * (`window_state::close_primary_window`), reached through `close_self_window`.
+ * Escape deliberately takes the other path; see {@link ExitIntent}.
  */
 export function SettingsPage() {
 	const isLoaded = useSettingsStore((s) => s.isLoaded);
@@ -205,7 +233,7 @@ export function SettingsPage() {
 		isLoaded &&
 		(hydrationStatus === "ready" || hydrationStatus === "unavailable");
 	const t = useTranslations("settings");
-	const [activeTab, setActiveTab] = useState("appearance");
+	const [activeTab, setActiveTab] = useState(INITIAL_TAB);
 	const contentViewportRef = useRef<HTMLDivElement>(null);
 	// Reset the shared ScrollArea to the top on each tab switch.
 	useEffect(() => {
@@ -228,12 +256,20 @@ export function SettingsPage() {
 	}, []);
 
 	const contentReady = canRenderSettings || hydrationStatus === "error";
-	const { motionClassName, requestClose, shellRef } = useSettingsWindowMotion(
-		windowCloseSelf,
-		contentReady,
-	);
+	// The OS window is created hidden; this renderer owns the moment it first
+	// appears, so the user never sees an empty transparent rectangle.
+	useAppWindowReveal(contentReady);
+	// One exit animation, two endings: the intent rides through the motion
+	// driver and comes back out in `runExit`.
+	const {
+		motionClassName,
+		onShellTransitionEnd,
+		requestClose,
+		requestDismiss,
+		shellRef,
+	} = useSettingsWindowMotion(runExit, contentReady);
 	const closeActivation = useTouchActivation(requestClose);
-	useEscapeToClose(requestClose);
+	useEscapeToClose(requestDismiss);
 
 	const links = useSettingsSidebarLinks();
 	const contentLink = links.find((l) => l.key === activeTab) ?? links[0];
@@ -248,6 +284,7 @@ export function SettingsPage() {
 						"t-modal noise-overlay settings-window-shell relative flex min-w-0 flex-1 overflow-hidden rounded-[1.35rem] shadow-settings-window ring-1 ring-divider-strong",
 						motionClassName,
 					)}
+					onTransitionEnd={onShellTransitionEnd}
 					ref={shellRef}
 				>
 					<Tabs.Root

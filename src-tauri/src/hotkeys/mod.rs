@@ -107,18 +107,22 @@ fn on_hotkey_triggered(app: &AppHandle, id: &str, accelerator: &str) {
     }
 }
 
-/// Built-in `toggleMain` behavior: hide the visible main window, or surface +
+/// Built-in `toggleMain` behavior: hide the visible app window, or surface +
 /// focus it (native, so it works while no app window has focus).
+///
+/// The hotkey id stays `toggleMain` because it is a persisted settings field
+/// (`hotkeys.toggleMain`); the window it toggles is
+/// [`crate::windows::PRIMARY_WINDOW`] — the app's only top-level window.
 fn toggle_main_window(app: &AppHandle) {
-    let Some(main) = app.get_webview_window("main") else {
+    let Some(window) = app.get_webview_window(crate::windows::PRIMARY_WINDOW) else {
         return;
     };
-    let visible = main.is_visible().unwrap_or(false);
-    let minimized = main.is_minimized().unwrap_or(false);
+    let visible = window.is_visible().unwrap_or(false);
+    let minimized = window.is_minimized().unwrap_or(false);
     if visible && !minimized {
-        crate::window_state::hide_main_window(app);
+        crate::window_state::hide_primary_window(app);
     } else {
-        crate::window_state::show_main_window(app);
+        crate::window_state::show_primary_window(app);
     }
 }
 

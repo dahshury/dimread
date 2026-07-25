@@ -213,8 +213,8 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// Pause: a queued entry parks immediately; an active transfer parks at the
-    /// next chunk boundary (its worker returns `Paused`, freeing the slot).
+    /// Pause: a queued entry parks immediately; an active transfer's wakeable
+    /// control signal interrupts its current network wait and frees the slot.
     pub fn pause(&self, app: &AppHandle, id: &str) -> Result<(), String> {
         let handle = self.handle(id)?;
         match handle.phase() {
@@ -246,9 +246,9 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// Cancel: an active transfer aborts at the next chunk boundary (the
-    /// engine deletes the partial file); a parked/queued entry is cancelled
-    /// and its partial file deleted here.
+    /// Cancel: an active transfer's wakeable control signal interrupts its
+    /// current network wait (the engine deletes the partial file); a
+    /// parked/queued entry is cancelled and its partial file deleted here.
     pub fn cancel(&self, app: &AppHandle, id: &str) -> Result<(), String> {
         let handle = self.handle(id)?;
         match handle.phase() {

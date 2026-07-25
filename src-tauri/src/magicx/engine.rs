@@ -89,6 +89,7 @@ pub fn toggle_effect(hwnd: Hwnd, effect: Effect) {
         };
         backend::apply(hwnd, applied);
     });
+    super::toolbar::refresh_effect_state();
 }
 
 /// Remove the effect from one window.
@@ -100,12 +101,14 @@ pub fn clear(hwnd: Hwnd) {
         map.remove(&hwnd);
         backend::apply(hwnd, None);
     });
+    super::toolbar::refresh_effect_state();
 }
 
 /// Remove every window's effect (app exit / MagicX disabled).
 pub fn clear_all() {
     with_effects(HashMap::clear);
     backend::clear_all();
+    super::toolbar::refresh_effect_state();
 }
 
 /// The `(dark, gray)` flags currently applied to a window.

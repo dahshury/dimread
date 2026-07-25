@@ -4,9 +4,9 @@
 //! toolbar, the tray icon and flyout, global hotkeys, the focus windows. Two
 //! effects do NOT, because they live in state owned by something else:
 //!
-//!   * the per-monitor **gamma ramp**, which lives in the GPU/GDI display device
-//!     (`SetDeviceGammaRamp`) — a force-kill leaves the screen dimmed, tinted, or
-//!     (Editing mode) inverted with no app left to fix it, and
+//!   * the per-monitor **gamma ramp**, which lives in the OS/compositor display
+//!     pipeline — a force-kill can leave the screen dimmed, tinted, or (Editing
+//!     mode) inverted with no app left to fix it, and
 //!   * the **taskbar accent policy**, which lives on Explorer's `Shell_TrayWnd`.
 //!
 //! Both are undone at exit from an in-memory snapshot of the pre-DimRead state
@@ -59,8 +59,8 @@ static JOURNAL: Mutex<SessionJournal> = Mutex::new(SessionJournal::empty());
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionJournal {
-    /// Pre-DimRead gamma ramp per GDI device name (`\\.\DISPLAY1`), flattened to
-    /// 768 `u16`s (R then G then B, 256 entries each).
+    /// Pre-DimRead gamma ramp per durable native display id, flattened to 768
+    /// `u16`s (R then G then B, 256 entries each).
     #[serde(default)]
     pub gamma_originals: BTreeMap<String, Vec<u16>>,
     /// Pre-override taskbar accent policy as its four raw `u32` fields
@@ -192,6 +192,14 @@ fn update(mutate: impl FnOnce(&mut SessionJournal)) {
         return;
     };
     if snapshot.is_empty() {
+        if let Err(err) = std::fs::remove_file(path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "[session-guard] failed to remove now-empty journal {}: {err}",
+                path.display()
+            );
+        }
         return;
     }
     if let Err(err) = write_journal(path, &snapshot) {

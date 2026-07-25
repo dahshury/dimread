@@ -43,9 +43,6 @@ const SECTION_IDS = [
 
 type SectionId = (typeof SECTION_IDS)[number];
 
-/** How long a nav click suppresses the scrollspy while smooth-scroll settles. */
-const CLICK_SCROLL_SETTLE_MS = 900;
-
 function NavLink({
 	active,
 	label,
@@ -94,13 +91,9 @@ export function GalleryPage() {
 	const viewportRef = useRef<HTMLDivElement>(null);
 	const [active, setActive] = useState<SectionId>("primitives");
 	// While a nav click smooth-scrolls, intermediate sections stream past the
-	// observer; hold the clicked target until the scroll settles. A boolean
-	// flag armed/reset by a timer (rather than a deadline timestamp) keeps
-	// impure clock reads out of render-adjacent code paths.
+	// observer; hold the clicked target until the viewport reports that the
+	// scroll has actually settled.
 	const clickScrollActive = useRef(false);
-	const clickScrollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
-		undefined,
-	);
 
 	// Scrollspy: on scroll, activate the LAST section whose heading has passed
 	// the top of the pane (with a small activation band), so the section you
@@ -137,14 +130,22 @@ export function GalleryPage() {
 				raf = requestAnimationFrame(update);
 			}
 		};
+		const onScrollEnd = () => {
+			if (!clickScrollActive.current) {
+				return;
+			}
+			clickScrollActive.current = false;
+			update();
+		};
 		viewport.addEventListener("scroll", onScroll, { passive: true });
+		viewport.addEventListener("scrollend", onScrollEnd);
 		update();
 		return () => {
 			viewport.removeEventListener("scroll", onScroll);
+			viewport.removeEventListener("scrollend", onScrollEnd);
 			if (raf) {
 				cancelAnimationFrame(raf);
 			}
-			clearTimeout(clickScrollTimer.current);
 		};
 	}, []);
 
@@ -178,14 +179,29 @@ export function GalleryPage() {
 
 	const jumpTo = (id: SectionId) => {
 		setActive(id);
-		clickScrollActive.current = true;
-		clearTimeout(clickScrollTimer.current);
-		clickScrollTimer.current = setTimeout(() => {
-			clickScrollActive.current = false;
-		}, CLICK_SCROLL_SETTLE_MS);
-		viewportRef.current
-			?.querySelector(`#${id}`)
-			?.scrollIntoView({ behavior: "smooth", block: "start" });
+		const viewport = viewportRef.current;
+		const target = viewport?.querySelector(`#${id}`);
+		if (!(viewport && target instanceof HTMLElement)) {
+			return;
+		}
+
+		const supportsScrollEnd = "onscrollend" in viewport;
+		const targetTop =
+			viewport.scrollTop +
+			target.getBoundingClientRect().top -
+			viewport.getBoundingClientRect().top -
+			Number.parseFloat(getComputedStyle(target).scrollMarginTop || "0");
+		const boundedTargetTop = Math.max(
+			0,
+			Math.min(targetTop, viewport.scrollHeight - viewport.clientHeight),
+		);
+		const willScroll = Math.abs(boundedTargetTop - viewport.scrollTop) > 1;
+
+		clickScrollActive.current = supportsScrollEnd && willScroll;
+		target.scrollIntoView({
+			behavior: supportsScrollEnd ? "smooth" : "auto",
+			block: "start",
+		});
 	};
 
 	return (

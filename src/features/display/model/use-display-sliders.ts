@@ -20,8 +20,8 @@ import { endDisplayPreview, previewDisplay } from "./preview";
 
 /**
  * The colour-temperature / brightness drag cycle, shared by every surface that
- * hosts the display sliders — the main window's Display tab (`views/main`) and
- * the tray flyout (`widgets/tray-menu`).
+ * hosts the display sliders — the quick controls in Settings → Display
+ * (`widgets/quick-controls`) and the tray flyout (`views/tray-menu`).
  *
  * The cycle is the load-bearing part and easy to get subtly wrong, which is why
  * it lives here rather than being written twice:
@@ -171,12 +171,24 @@ export function useDisplaySliders({
 	useEffect(() => {
 		if (previewActive) {
 			startedRef.current = true;
-			previewDisplay(previewKelvin, previewBrightness, previewId);
+			previewDisplay(
+				previewKelvin,
+				previewBrightness,
+				previewId,
+				previewWhenIdle ? null : phase,
+			);
 		} else if (startedRef.current) {
 			startedRef.current = false;
 			endDisplayPreview();
 		}
-	}, [previewActive, previewKelvin, previewBrightness, previewId]);
+	}, [
+		phase,
+		previewActive,
+		previewBrightness,
+		previewId,
+		previewKelvin,
+		previewWhenIdle,
+	]);
 
 	// A preview outliving the surface would pin the screen at the dragged value,
 	// and a drag left un-ended would strand the other surfaces on a stale mirror.

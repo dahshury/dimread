@@ -16,12 +16,26 @@ use crate::{
     windows,
 };
 
-/// `show_main_window` — surface + focus the main window (tray, second-instance
-/// launches, and renderer flows all funnel here).
+/// `show_app_window` — surface + focus the app's one top-level window (the
+/// settings window). The tray, second-instance launches, and the renderer's
+/// startup reveal all funnel here.
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn show_main_window(app: AppHandle) {
-    crate::window_state::show_main_window(&app);
+pub(crate) fn show_app_window(app: AppHandle) {
+    crate::window_state::show_primary_window(&app);
+}
+
+/// `hide_app_window` — dismiss the app window to the tray WITHOUT consulting
+/// `general.minimizeToTray`.
+///
+/// Distinct from `close_self_window` on purpose. Closing is a decision ("am I
+/// done with this app?") and may quit; the Escape key is a dismissal ("get this
+/// off my screen") and must never take the app down with it — Escape quitting
+/// DimRead would also drop the user's display filters.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn hide_app_window(app: AppHandle) {
+    crate::window_state::hide_primary_window(&app);
 }
 
 /// `app_quit` — exit the app. The tray flyout's Quit row is the only caller
@@ -39,7 +53,12 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         windows::open_window,
         windows::close_window,
         windows::close_self_window,
-        show_main_window,
+        windows::placement::picker_anchor_snapshot,
+        windows::placement::picker_compositor_warmup_start,
+        windows::placement::picker_compositor_warmup_complete,
+        windows::placement::picker_hide_complete,
+        show_app_window,
+        hide_app_window,
         app_quit,
         // ── tray flyout ──
         tray_menu::commands::tray_menu_hide,
@@ -62,6 +81,8 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         // ── overlay ──
         overlay::overlay_notify,
         overlay::overlay_dismiss,
+        overlay::overlay_snapshot,
+        overlay::overlay_hide_complete,
         // ── display ──
         display::engine::display_list_monitors,
         display::engine::display_current,
@@ -74,9 +95,12 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         focus::focus_read_toggle,
         focus::focus_blur_toggle,
         focus::focus_active_state,
+        focus::blur::focus_blur_anchor_snapshot,
         // ── magicx (F9) ──
         magicx::magicx_toggle_effect,
         magicx::magicx_clear_target,
+        magicx::toolbar::magictoolbar_renderer_ready,
+        magicx::toolbar::magictoolbar_hide_complete,
     ]);
 
     builder.events(collect_events![
@@ -88,6 +112,7 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         events::OverlayNotifyEvent,
         events::OverlayDismissEvent,
         events::DisplayStateEvent,
+        events::DisplayTopologyEvent,
         events::FocusStateEvent,
         events::FocusCursorEvent,
         events::FocusAnchorEvent,

@@ -5,11 +5,28 @@ Read this before changing code. It applies to human contributors and AI agents a
 ## What this project is
 
 A generic Tauri v2 + React 19 desktop-app starter template. It ships a design system
-(Tailwind v4 tokens + Base UI primitives), a multi-window app shell (main + settings +
-detachable picker + gallery + a click-through notification overlay), a settings pipeline
-with cross-window sync, a generic download manager, and settings-driven global hotkeys —
-extracted from WinSTT with all speech/AI domain logic removed.
+(Tailwind v4 tokens + Base UI primitives), a multi-window app shell (the app window +
+detachable picker + gallery + a click-through notification overlay + the tray flyout),
+a settings pipeline with cross-window sync, a generic download manager, and
+settings-driven global hotkeys — extracted from WinSTT with all speech/AI domain logic
+removed.
 `TEMPLATE_SPEC.md` records the extraction contract; `NOTES-*.md` record build decisions.
+
+### There is ONE top-level window
+
+DimRead is a tray app. Its only visible surface is the **settings window**
+(`windows::PRIMARY_WINDOW`, label `settings`, served from the Vite ROOT entry
+`index.html`): the live controls — monitor strip, K/% readout, temperature and
+brightness sliders, auto day/night, the eight preset modes — render at the top of its
+**Display** tab via `widgets/quick-controls`, and every configuration surface sits one
+sidebar tab away. The tray flyout (`tray-menu`) is the only other control surface and
+drives the same `features/display` seam.
+
+There used to be a separate compact `main` window holding those live controls. It is
+gone, deliberately. Do not add a second top-level window for "quick" controls — a test
+in `src-tauri/src/windows/mod.rs` fails if one appears. A tray LEFT click, the
+`toggleMain` hotkey (the id is a persisted settings field; it toggles the app window)
+and the flyout's Settings row all surface that one window.
 
 ## Architecture — do not erode these boundaries
 
@@ -50,6 +67,25 @@ Imports must only point downward. `shared/` never imports from any other layer.
 
 New backend features get their own module + a command file registered in `commands_registry.rs`.
 Do not put business logic in `lib.rs` (it is boot orchestration only).
+
+### Icons are generated, not drawn
+
+`src-tauri/icons/` is build output. The brand mark lives as code in
+`tools/assets/dimread_mark.py`; `tools/assets/generate-icons.py` renders it into the app
+icons AND the tray's **32-PNG state family** — 8 display modes × day/night phase ×
+light/dark taskbar — which `tray.rs` embeds with `include_bytes!`.
+
+```sh
+python tools/assets/generate-icons.py     # or: uv run --with pillow ...
+```
+
+Adding a display mode therefore means adding its glyph to `MODE_GLYPHS`, its id to
+`DISPLAY_MODE_IDS` (`settings/mod.rs`) and to `TRAY_ICON_VARIANTS` (`tray.rs`), then
+re-running the generator. Rust tests fail if those rosters drift, if any of the 32 files
+is missing or undecodable, or if two states share artwork. Never hand-edit a file under
+`src-tauri/icons/`, and always eyeball
+`tools/assets/icon-preview/contact-sheet.png` after a glyph change — a tray icon is
+judged at 16 px, not at 512.
 
 ### IPC: bindings are generated — never hand-edit
 

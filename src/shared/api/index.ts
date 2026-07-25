@@ -29,5 +29,6 @@ export { NATIVE_EVENTS, type NativeEventName } from "./native-events";
 export { closePicker, openPickerAtRect } from "./picker-window";
 export {
 	subscribeNativeEvent,
+	subscribeNativeEventPair,
 	type Unsubscribe,
 } from "./subscribe-native-event";

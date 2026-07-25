@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use crate::display::engine::DisplayOutput;
+use crate::display::{MonitorInfo, engine::DisplayOutput};
 use crate::downloads::DownloadSnapshot;
 use crate::focus::FocusState;
 use crate::overlay::OverlayNotification;
@@ -56,7 +56,7 @@ impl tauri_specta::Event for PickerAnchorEvent {
 }
 
 /// `picker:closing` — the close animation is starting; the renderer plays its
-/// fade-out during the native hide grace (see `windows::placement`).
+/// fade-out and acknowledges its actual completion (see `windows::placement`).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Type)]
 pub struct PickerClosingEvent {}
 
@@ -81,8 +81,7 @@ impl tauri_specta::Event for HotkeyTriggeredEvent {
 }
 
 /// `overlay:notify` — show a notification in the overlay pill window. The
-/// payload is the RESOLVED notification (tone/duration defaults filled in) so
-/// the renderer's exit timer and the Rust hide timer agree on timing.
+/// payload is the RESOLVED notification (tone/duration defaults filled in).
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct OverlayNotifyEvent(pub OverlayNotification);
 
@@ -90,10 +89,13 @@ impl tauri_specta::Event for OverlayNotifyEvent {
     const NAME: &'static str = "overlay:notify";
 }
 
-/// `overlay:dismiss` — the overlay is being dismissed early; the renderer
-/// plays its exit animation during the native hide grace (see `crate::overlay`).
+/// `overlay:dismiss` — the overlay is being dismissed; the renderer plays its
+/// exit animation and acknowledges its real completion to the backend.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Type)]
-pub struct OverlayDismissEvent {}
+#[serde(rename_all = "camelCase")]
+pub struct OverlayDismissEvent {
+    pub sequence: u64,
+}
 
 impl tauri_specta::Event for OverlayDismissEvent {
     const NAME: &'static str = "overlay:dismiss";
@@ -107,6 +109,16 @@ pub struct DisplayStateEvent(pub DisplayOutput);
 
 impl tauri_specta::Event for DisplayStateEvent {
     const NAME: &'static str = "display:state";
+}
+
+/// `display:topology` — the set of displays changed after a native hot-plug,
+/// disconnect, or display reconfiguration notification. Renderers subscribe to
+/// this instead of periodically re-enumerating monitors.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct DisplayTopologyEvent(pub Vec<MonitorInfo>);
+
+impl tauri_specta::Event for DisplayTopologyEvent {
+    const NAME: &'static str = "display:topology";
 }
 
 /// `focus:state` — the combined Focus Read / Focus Blur activation, emitted on
@@ -165,6 +177,10 @@ pub struct AnchorRect {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct FocusAnchorEvent {
+    /// Process-monotonic ordering for the renderer's subscribe-then-snapshot
+    /// handshake. The snapshot is applied only when it is newer than every live
+    /// event already observed by that renderer.
+    pub sequence: u64,
     pub window_id: u64,
     pub x: i32,
     pub y: i32,

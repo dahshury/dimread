@@ -2,13 +2,13 @@
 //!
 //! CareUEyes' rules engine forces a preset mode while a matching window owns the
 //! foreground (e.g. Photoshop → Editing, a game → Game) and reverts on focus
-//! change (FEATURE-PARITY F4). We replicate it with a lightweight polling
-//! watcher instead of `SetWinEventHook`:
+//! change (FEATURE-PARITY F4). The watcher is push-based:
 //!
-//!   * [`init`] — on Windows, spawns a background thread that samples
-//!     `GetForegroundWindow` every [`windows_impl::POLL_INTERVAL_MS`] ms,
-//!     resolves the window's process image name / class / title, matches it
-//!     against `settings.rules`, and calls
+//!   * [`init`] — on Windows, spawns a background thread with narrow WinEvent
+//!     hooks for foreground, title, and foreground-window geometry changes.
+//!     Settings edits wake the same message loop through `settings:changed`.
+//!     The watcher resolves the window's process image name / class / title,
+//!     matches it against `settings.rules`, and calls
 //!     `crate::display::engine::set_rule_override(Some(mode))` /
 //!     `set_rule_override(None)` as the active rule changes. Non-Windows: no-op.
 //!   * [`rules_list_windows`] — the `rules_list_windows` IPC command backing the
@@ -117,34 +117,49 @@ pub fn rules_list_windows() -> Vec<OpenWindow> {
 
 #[cfg(windows)]
 mod windows_impl {
-    use std::time::Duration;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    use tauri::AppHandle;
+    use tauri::{AppHandle, Listener};
     use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, MAX_PATH, RECT, TRUE};
     use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromWindow,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
     };
+    use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
-        GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, IsZoomed, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE,
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+        EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GWL_EXSTYLE,
+        GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsZoomed,
+        KillTimer, MSG, OBJID_WINDOW, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetTimer,
+        TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_APP, WM_TIMER, WS_EX_APPWINDOW,
+        WS_EX_TOOLWINDOW,
     };
     use windows::core::{BOOL, PWSTR};
 
     use super::OpenWindow;
     use super::matcher::resolve_override;
 
-    /// How often the watcher samples the foreground window. 700 ms is well below
-    /// human focus-switch cadence yet negligible CPU — deliberately simpler than
-    /// a `SetWinEventHook` message loop.
-    pub(super) const POLL_INTERVAL_MS: u64 = 700;
+    /// Time a window must remain full-screen before filtering is suspended.
+    /// This preserves the old watcher's two-sample debounce without waking the
+    /// process periodically: a one-shot thread timer exists only while a
+    /// full-screen candidate is pending.
+    const FULLSCREEN_CONFIRM_MS: u32 = 700;
 
-    /// The foreground window's identity for one poll.
+    /// Thread message posted by the `settings:changed` listener.
+    const SETTINGS_CHANGED_MESSAGE: u32 = WM_APP + 1;
+
+    /// Message-loop thread id, used to wake the watcher after settings edits.
+    /// Zero until the thread has created its message queue.
+    static WATCHER_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+    /// The foreground window's identity for one event-driven refresh.
     struct ForegroundInfo {
         process: String,
         title: String,
@@ -153,65 +168,345 @@ mod windows_impl {
         is_self: bool,
     }
 
+    /// Mutable watcher state. Out-of-context WinEvent callbacks run on the
+    /// thread that pumps their message queue, so a thread-local avoids locking.
+    struct WatcherState {
+        app: AppHandle,
+        last_override: Option<String>,
+        fullscreen_active: bool,
+        fullscreen_pending: bool,
+        fullscreen_timer: usize,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<WatcherState>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FullscreenTransition {
+        active: bool,
+        pending: bool,
+        output: Option<bool>,
+    }
+
+    /// Pure transition behind the one-shot full-screen debounce.
+    fn transition_fullscreen(
+        active: bool,
+        pending: bool,
+        sample: bool,
+        confirmation: bool,
+    ) -> FullscreenTransition {
+        if !sample {
+            return FullscreenTransition {
+                active: false,
+                pending: false,
+                output: active.then_some(false),
+            };
+        }
+        if active {
+            return FullscreenTransition {
+                active,
+                pending: false,
+                output: None,
+            };
+        }
+        // A confirmation is meaningful only for the candidate that armed the
+        // timer. This also makes a stale or unrelated WM_TIMER harmless.
+        if confirmation && pending {
+            return FullscreenTransition {
+                active: true,
+                pending: false,
+                output: Some(true),
+            };
+        }
+        FullscreenTransition {
+            active,
+            pending: true,
+            output: None,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SyncReason {
+        Foreground,
+        Identity,
+        Geometry,
+        Settings,
+        FullscreenConfirmation,
+    }
+
+    impl SyncReason {
+        fn refreshes_rules(self) -> bool {
+            matches!(self, Self::Foreground | Self::Identity | Self::Settings)
+        }
+    }
+
     /// Spawn the detached foreground watcher thread (dies with the process).
     pub(super) fn start_watcher(app: AppHandle) {
+        let _ = app.listen_any("settings:changed", |_event| request_settings_sync());
         let spawned = std::thread::Builder::new()
             .name("rules-watcher".into())
-            .spawn(move || watcher_loop(&app));
+            .spawn(move || watcher_loop(app));
         if let Err(err) = spawned {
             log::warn!("[rules] failed to start foreground watcher: {err}");
         }
     }
 
-    /// Poll the foreground window forever, driving the engine's rule override.
-    /// Re-reads the settings snapshot each tick so enabling/disabling rules or
-    /// editing them takes effect without a restart.
-    fn watcher_loop(app: &AppHandle) {
-        let mut last_override: Option<String> = None;
-        let mut last_fullscreen = false;
-        let mut fullscreen_streak = 0u32;
-        loop {
-            std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
-            let settings = crate::settings::store::read_settings(app);
-            let rules = &settings.rules;
+    /// Wake the watcher so settings edits take effect without polling.
+    fn request_settings_sync() {
+        let thread_id = WATCHER_THREAD_ID.load(Ordering::SeqCst);
+        if thread_id == 0 {
+            return;
+        }
+        // SAFETY: posting to a thread id is safe even if it exited between the
+        // atomic load and this call; failure merely means there is no watcher.
+        unsafe {
+            let _ = PostThreadMessageW(
+                thread_id,
+                SETTINGS_CHANGED_MESSAGE,
+                Default::default(),
+                Default::default(),
+            );
+        }
+    }
 
-            // Full-screen app detection (F1.11): suspend filtering while a
-            // game/full-screen window owns the foreground. Independent of the
-            // per-app rules toggle; only re-applies when the state flips, and
-            // debounced so a transient full-screen shell surface (the Alt+Tab
-            // switcher above all) cannot flash the user's filter off.
-            let sample = settings.display.disable_on_fullscreen && is_fullscreen_foreground();
-            let fullscreen = confirm_fullscreen(&mut fullscreen_streak, sample);
-            if fullscreen != last_fullscreen {
-                crate::display::engine::set_fullscreen_suspend(fullscreen);
-                last_fullscreen = fullscreen;
+    /// Install hooks, seed the current foreground state, and pump callbacks.
+    fn watcher_loop(app: AppHandle) {
+        STATE.set(Some(WatcherState {
+            app,
+            last_override: None,
+            fullscreen_active: false,
+            fullscreen_pending: false,
+            fullscreen_timer: 0,
+        }));
+
+        // Force creation of this thread's message queue before publishing its
+        // id; otherwise an early PostThreadMessageW can race the first GetMessageW.
+        let mut queue_probe = MSG::default();
+        // SAFETY: `queue_probe` is a live out-param; PM_NOREMOVE leaves any
+        // matching message in the newly-created queue.
+        unsafe {
+            let _ = PeekMessageW(&mut queue_probe, None, 0, 0, PM_NOREMOVE);
+        }
+        // SAFETY: always succeeds and returns the calling thread's id.
+        let thread_id = unsafe { GetCurrentThreadId() };
+        WATCHER_THREAD_ID.store(thread_id, Ordering::SeqCst);
+
+        let hooks = install_hooks();
+        if hooks.is_empty() {
+            log::warn!("[rules] no WinEvent hooks installed; foreground changes cannot be tracked");
+        }
+        sync_foreground(SyncReason::Foreground);
+        pump_messages();
+
+        STATE.with_borrow_mut(|slot| {
+            if let Some(state) = slot.as_mut() {
+                cancel_fullscreen_timer(state);
             }
+            *slot = None;
+        });
+        for hook in hooks {
+            // SAFETY: every handle came from SetWinEventHook and is unhooked
+            // exactly once before this thread exits.
+            unsafe {
+                let _ = UnhookWinEvent(hook);
+            }
+        }
+        let _ =
+            WATCHER_THREAD_ID.compare_exchange(thread_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
 
-            let next = if !rules.enabled {
-                None
-            } else {
-                match foreground_info() {
-                    // Our own window in front: leave whatever override is active
-                    // (don't let opening DimRead's window clear a rule).
-                    Some(info) if info.is_self => last_override.clone(),
-                    Some(info) => {
-                        resolve_override(rules, &info.process, &info.class_name, &info.title)
-                    }
-                    None => last_override.clone(),
-                }
+    /// Narrow hook ranges avoid waking for unrelated accessibility traffic.
+    fn install_hooks() -> Vec<HWINEVENTHOOK> {
+        const RANGES: [(u32, u32); 5] = [
+            (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+            (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
+            (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+            (EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE),
+            (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+        ];
+        let mut hooks = Vec::with_capacity(RANGES.len());
+        for (min, max) in RANGES {
+            // SAFETY: the callback is static and remains valid until every hook
+            // is removed below; NULL module is required out-of-context.
+            let hook = unsafe {
+                SetWinEventHook(
+                    min,
+                    max,
+                    None,
+                    Some(win_event_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                )
             };
+            if hook.0.is_null() {
+                log::warn!("[rules] SetWinEventHook failed for range {min:#x}..={max:#x}");
+            } else {
+                hooks.push(hook);
+            }
+        }
+        hooks
+    }
 
-            if next != last_override {
-                crate::display::engine::set_rule_override(next.clone());
-                last_override = next;
+    /// Route relevant WinEvents into a foreground-state refresh.
+    unsafe extern "system" fn win_event_proc(
+        _hook: HWINEVENTHOOK,
+        event: u32,
+        hwnd: HWND,
+        id_object: i32,
+        id_child: i32,
+        _thread: u32,
+        _time: u32,
+    ) {
+        if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 {
+            return;
+        }
+        if event == EVENT_SYSTEM_FOREGROUND {
+            sync_foreground(SyncReason::Foreground);
+            return;
+        }
+        // Background windows generate the same title/geometry events. Only the
+        // foreground one can affect an active rule or full-screen suspension.
+        // SAFETY: GetForegroundWindow returns a handle or NULL.
+        if unsafe { GetForegroundWindow() } != hwnd {
+            return;
+        }
+        let reason = if event == EVENT_OBJECT_NAMECHANGE {
+            SyncReason::Identity
+        } else {
+            SyncReason::Geometry
+        };
+        sync_foreground(reason);
+    }
+
+    /// Process WinEvents, settings messages, and the one-shot debounce timer.
+    fn pump_messages() {
+        let mut msg = MSG::default();
+        loop {
+            // SAFETY: `msg` is a live out-param; NULL hwnd retrieves this
+            // thread's complete queue and dispatches out-of-context callbacks.
+            let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+            if result.0 <= 0 {
+                return;
+            }
+            if msg.message == SETTINGS_CHANGED_MESSAGE {
+                sync_foreground(SyncReason::Settings);
+                continue;
+            }
+            if msg.message == WM_TIMER && is_fullscreen_timer(msg.wParam.0) {
+                sync_foreground(SyncReason::FullscreenConfirmation);
+                continue;
+            }
+            // SAFETY: GetMessageW just initialized `msg`.
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
     }
 
+    fn is_fullscreen_timer(timer: usize) -> bool {
+        STATE.with_borrow(|slot| {
+            slot.as_ref()
+                .is_some_and(|state| state.fullscreen_timer != 0 && state.fullscreen_timer == timer)
+        })
+    }
+
+    /// Re-evaluate the current foreground window and apply only changed outputs.
+    fn sync_foreground(reason: SyncReason) {
+        let Some(app) = STATE.with_borrow(|slot| slot.as_ref().map(|state| state.app.clone()))
+        else {
+            return;
+        };
+        let settings = crate::settings::store::read_settings(&app);
+        let foreground = unsafe { GetForegroundWindow() };
+        let fullscreen_sample = settings.display.disable_on_fullscreen
+            && !foreground.0.is_null()
+            && is_fullscreen_window(foreground);
+        let info = reason
+            .refreshes_rules()
+            .then(|| foreground_info(foreground))
+            .flatten();
+
+        let (fullscreen_output, override_output) = STATE.with_borrow_mut(|slot| {
+            let Some(state) = slot.as_mut() else {
+                return (None, None);
+            };
+            let confirmation = matches!(reason, SyncReason::FullscreenConfirmation);
+            let mut transition = transition_fullscreen(
+                state.fullscreen_active,
+                state.fullscreen_pending,
+                fullscreen_sample,
+                confirmation,
+            );
+            if !state.fullscreen_pending && transition.pending {
+                // SAFETY: NULL hwnd creates a timer on this thread's queue.
+                state.fullscreen_timer = unsafe { SetTimer(None, 0, FULLSCREEN_CONFIRM_MS, None) };
+                if state.fullscreen_timer == 0 {
+                    log::warn!("[rules] failed to arm full-screen confirmation timer");
+                    transition = transition_fullscreen(
+                        state.fullscreen_active,
+                        true,
+                        fullscreen_sample,
+                        true,
+                    );
+                }
+            } else if state.fullscreen_pending && !transition.pending {
+                cancel_fullscreen_timer(state);
+            }
+            state.fullscreen_active = transition.active;
+            state.fullscreen_pending = transition.pending;
+
+            let override_output = if reason.refreshes_rules() {
+                let next = if !settings.rules.enabled {
+                    None
+                } else {
+                    match info.as_ref() {
+                        // Our own window in front leaves an active override in
+                        // place, matching the previous watcher semantics.
+                        Some(info) if info.is_self => state.last_override.clone(),
+                        Some(info) => resolve_override(
+                            &settings.rules,
+                            &info.process,
+                            &info.class_name,
+                            &info.title,
+                        ),
+                        None => state.last_override.clone(),
+                    }
+                };
+                (next != state.last_override).then(|| {
+                    state.last_override = next.clone();
+                    next
+                })
+            } else {
+                None
+            };
+            (transition.output, override_output)
+        });
+
+        if let Some(fullscreen) = fullscreen_output {
+            crate::display::engine::set_fullscreen_suspend(fullscreen);
+        }
+        if let Some(next) = override_output {
+            crate::display::engine::set_rule_override(next);
+        }
+    }
+
+    fn cancel_fullscreen_timer(state: &mut WatcherState) {
+        if state.fullscreen_timer == 0 {
+            return;
+        }
+        // SAFETY: NULL hwnd and the id returned by SetTimer identify this
+        // thread timer. A queued stale WM_TIMER is rejected by id afterwards.
+        unsafe {
+            let _ = KillTimer(None, state.fullscreen_timer);
+        }
+        state.fullscreen_timer = 0;
+    }
+
     /// Resolve the current foreground window's process / class / title.
-    fn foreground_info() -> Option<ForegroundInfo> {
-        // SAFETY: returns the foreground HWND or a null handle (no focus).
-        let hwnd = unsafe { GetForegroundWindow() };
+    fn foreground_info(hwnd: HWND) -> Option<ForegroundInfo> {
         if hwnd.0.is_null() {
             return None;
         }
@@ -233,11 +528,12 @@ mod windows_impl {
     /// are the load-bearing ones: on Windows 11 the Alt+Tab / Win+Tab UI is a
     /// full-screen, NON-maximized `XamlExplorerHostIslandWindow` owned by
     /// explorer.exe, which satisfies every other test here. Without this
-    /// exclusion a poll landing while the switcher is up read as "a game went
+    /// exclusion a foreground callback landing while the switcher is up read
+    /// as "a game went
     /// full-screen" and restored the original gamma ramps, so Alt-tabbing
     /// flashed the screen back to full brightness with no blue filter for a
-    /// poll interval — see also the maximized-window exclusion below, the same
-    /// bug from a different direction.
+    /// until the next foreground callback — see also the maximized-window
+    /// exclusion below, the same bug from a different direction.
     fn is_shell_class(class: &str) -> bool {
         matches!(
             class,
@@ -258,36 +554,10 @@ mod windows_impl {
         )
     }
 
-    /// Consecutive full-screen samples required before filtering is suspended.
-    /// Belt-and-braces on top of [`is_shell_class`]: the shell has more
-    /// transient full-screen surfaces than we can enumerate by class (snap
-    /// assist, splash screens, a switcher class we have not met yet), and a
-    /// wrong suspension is a *visible gamma flash*, whereas a wrong 700 ms
-    /// delay before a game suspends filtering is imperceptible. Asymmetric on
-    /// purpose — see [`confirm_fullscreen`].
-    const FULLSCREEN_CONFIRM_TICKS: u32 = 2;
-
-    /// Advance the full-screen confirmation `streak` with one `sample` and
-    /// report whether a suspension is confirmed.
-    ///
-    /// Engaging needs [`FULLSCREEN_CONFIRM_TICKS`] consecutive full-screen
-    /// samples; releasing is immediate, so leaving a game restores filtering on
-    /// the very next poll. Split out from the loop so the debounce is
-    /// unit-tested without a foreground window.
-    fn confirm_fullscreen(streak: &mut u32, sample: bool) -> bool {
-        *streak = if sample { streak.saturating_add(1) } else { 0 };
-        *streak >= FULLSCREEN_CONFIRM_TICKS
-    }
-
     /// Whether the foreground window fully covers its monitor — a game or other
     /// full-screen app (FEATURE-PARITY F1.11). Excludes our own windows and the
     /// desktop/shell surfaces (which also span the screen but are not apps).
-    fn is_fullscreen_foreground() -> bool {
-        // SAFETY: returns the foreground HWND or a null handle (no focus).
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.0.is_null() {
-            return false;
-        }
+    fn is_fullscreen_window(hwnd: HWND) -> bool {
         let mut pid: u32 = 0;
         // SAFETY: `hwnd` is valid; `pid` is a live out-param.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -346,7 +616,7 @@ mod windows_impl {
             .map(|()| rect)
     }
 
-    /// The pure geometry rule behind [`is_fullscreen_foreground`], split out so
+    /// The pure geometry rule behind [`is_fullscreen_window`], split out so
     /// it can be unit-tested without a foreground window.
     ///
     /// A MAXIMIZED window is never full-screen, even when it covers the monitor
@@ -481,8 +751,8 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            FULLSCREEN_CONFIRM_TICKS, RECT, confirm_fullscreen, is_fullscreen_geometry,
-            is_shell_class,
+            FullscreenTransition, RECT, is_fullscreen_geometry, is_shell_class,
+            transition_fullscreen,
         };
 
         const MONITOR: RECT = RECT {
@@ -571,36 +841,75 @@ mod windows_impl {
         }
 
         #[test]
-        fn fullscreen_must_be_seen_twice_before_it_engages() {
-            let mut streak = 0;
-            assert!(!confirm_fullscreen(&mut streak, true));
-            assert!(confirm_fullscreen(&mut streak, true));
-            assert!(confirm_fullscreen(&mut streak, true));
+        fn fullscreen_sample_arms_confirmation_without_engaging() {
+            assert_eq!(
+                transition_fullscreen(false, false, true, false),
+                FullscreenTransition {
+                    active: false,
+                    pending: true,
+                    output: None,
+                }
+            );
         }
 
         #[test]
-        fn a_single_transient_fullscreen_sample_never_engages() {
-            // One poll landing on an unknown full-screen shell surface must
-            // not suspend filtering.
-            let mut streak = 0;
-            assert!(!confirm_fullscreen(&mut streak, true));
-            assert!(!confirm_fullscreen(&mut streak, false));
-            assert!(!confirm_fullscreen(&mut streak, true));
+        fn fullscreen_confirmation_engages_suspension() {
+            assert_eq!(
+                transition_fullscreen(false, true, true, true),
+                FullscreenTransition {
+                    active: true,
+                    pending: false,
+                    output: Some(true),
+                }
+            );
+        }
+
+        #[test]
+        fn unarmed_confirmation_does_not_engage_suspension() {
+            assert_eq!(
+                transition_fullscreen(false, false, true, true),
+                FullscreenTransition {
+                    active: false,
+                    pending: true,
+                    output: None,
+                }
+            );
+        }
+
+        #[test]
+        fn transient_fullscreen_cancels_pending_confirmation() {
+            assert_eq!(
+                transition_fullscreen(false, true, false, false),
+                FullscreenTransition {
+                    active: false,
+                    pending: false,
+                    output: None,
+                }
+            );
         }
 
         #[test]
         fn leaving_fullscreen_releases_immediately() {
-            let mut streak = 0;
-            for _ in 0..FULLSCREEN_CONFIRM_TICKS {
-                confirm_fullscreen(&mut streak, true);
-            }
-            assert!(!confirm_fullscreen(&mut streak, false));
+            assert_eq!(
+                transition_fullscreen(true, false, false, false),
+                FullscreenTransition {
+                    active: false,
+                    pending: false,
+                    output: Some(false),
+                }
+            );
         }
 
         #[test]
-        fn a_long_fullscreen_run_cannot_overflow_the_streak() {
-            let mut streak = u32::MAX;
-            assert!(confirm_fullscreen(&mut streak, true));
+        fn repeated_fullscreen_events_do_not_rearm_pending_confirmation() {
+            assert_eq!(
+                transition_fullscreen(false, true, true, false),
+                FullscreenTransition {
+                    active: false,
+                    pending: true,
+                    output: None,
+                }
+            );
         }
     }
 }

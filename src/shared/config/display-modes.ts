@@ -15,9 +15,13 @@ import {
  * and `descKey` point at the `displayTab` i18n block the foundation seeded.
  *
  * Lives in `shared/` because TWO surfaces render the mode roster and they sit
- * in different FSD slices: the main window's Display tab (`views/main`) and the
- * tray flyout (`views/tray-menu`). Keeping one table means a new mode shows up
- * in both without a second edit.
+ * in different FSD slices: the quick controls in Settings → Display
+ * (`widgets/quick-controls`) and the tray flyout (`views/tray-menu`). Keeping
+ * one table means a new mode shows up in both without a second edit.
+ *
+ * The ORDER is load-bearing beyond layout: it mirrors `DISPLAY_MODE_IDS` in
+ * `src-tauri/src/settings/mod.rs`, which the tray's per-mode icon family is
+ * asserted against.
  *
  * Declared `as const` so the message-key literals survive for use-intl's strict
  * key typing (a widened `string` would be rejected by `t(...)`).

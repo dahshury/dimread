@@ -32,4 +32,8 @@ export {
 	type UseDisplaySlidersOptions,
 } from "./model/use-display-sliders";
 export { useDisplayState } from "./model/use-display-state";
-export { useMonitors } from "./model/use-monitors";
+export {
+	type MonitorTopology,
+	useMonitors,
+	useMonitorTopology,
+} from "./model/use-monitors";

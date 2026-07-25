@@ -65,11 +65,11 @@ export default defineConfig(({ command }) => {
 			reportCompressedSize: false,
 			rolldownOptions: {
 				input: {
-					// `main` stays at the root so the Tauri dev server serves it from
+					// The APP window (the settings window — the app's only top-level
+					// window) is the ROOT entry, so the Tauri dev server serves it from
 					// `/`. Secondary windows live under `windows/`; build output mirrors
 					// the input layout (dist/windows/*).
-					main: resolve(rootDir, "index.html"),
-					settings: resolve(rootDir, "windows/settings.html"),
+					app: resolve(rootDir, "index.html"),
 					picker: resolve(rootDir, "windows/picker.html"),
 					gallery: resolve(rootDir, "windows/gallery.html"),
 					overlay: resolve(rootDir, "windows/overlay.html"),

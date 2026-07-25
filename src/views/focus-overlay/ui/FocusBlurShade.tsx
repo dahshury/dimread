@@ -1,6 +1,6 @@
 import { AnimatePresence, m } from "motion/react";
-import { useEffect, useState } from "react";
-import { type FocusAnchorEvent, events } from "@/bindings";
+import { useEffect, useRef, useState } from "react";
+import { commands, type FocusAnchorEvent, events } from "@/bindings";
 import {
 	type BlurViewport,
 	computeBlurLayout,
@@ -63,19 +63,38 @@ export function FocusBlurShade({ active }: { active: boolean }) {
 	const settings = useFocusBlurSettings();
 	const [tracked, setTracked] = useState<TrackedAnchor | null>(null);
 	const [viewport, setViewport] = useState<BlurViewport>(readViewport);
+	const latestSequence = useRef(0);
 
 	useEffect(() => {
 		if (!(active && hasNativeRuntime())) {
 			return;
 		}
-		return subscribeNativeEvent(events.focusAnchor, (event) => {
+		const applyAnchor = (anchor: FocusAnchorEvent) => {
+			if (anchor.sequence <= latestSequence.current) {
+				return;
+			}
+			latestSequence.current = anchor.sequence;
 			// `moved` is resolved HERE rather than during render because it is a
 			// property of the TRANSITION between two anchors, not of either one.
 			setTracked((previous) => ({
-				anchor: event.payload,
-				moved: previous?.anchor.windowId === event.payload.windowId,
+				anchor,
+				moved: previous?.anchor.windowId === anchor.windowId,
 			}));
-		});
+		};
+
+		// Install the live listener FIRST, then read the backend's cached latest
+		// anchor. `sequence` makes this race-free in both directions: an event that
+		// lands while the command is in flight always wins over an older snapshot.
+		return subscribeNativeEvent(
+			events.focusAnchor,
+			(event) => applyAnchor(event.payload),
+			async (isDisposed) => {
+				const snapshot = await commands.focusBlurAnchorSnapshot();
+				if (!isDisposed() && snapshot) {
+					applyAnchor(snapshot);
+				}
+			},
+		);
 	}, [active]);
 
 	useEffect(() => {

@@ -6,7 +6,6 @@ export interface ToolbarColorFieldProps {
 	disabled?: boolean;
 	onChange: (color: string) => void;
 	onReset: () => void;
-	/** Text for the reset link (e.g. "Reset"). */
 	resetLabel: string;
 	/** Current colour, `#rrggbb`. */
 	value: string;

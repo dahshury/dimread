@@ -45,7 +45,7 @@ impl Default for AppearanceSettings {
 pub struct GeneralSettings {
     /// Launch the app at login (wired to tauri-plugin-autostart on save).
     pub autostart: bool,
-    /// Closing the main window hides to the tray instead of quitting.
+    /// Closing the app window hides to the tray instead of quitting.
     pub minimize_to_tray: bool,
 }
 
@@ -84,7 +84,9 @@ impl Default for DownloadsSettings {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HotkeysSettings {
-    /// Toggles main-window visibility (show + focus / hide). "" disables it.
+    /// Toggles the APP window's visibility (show + focus / hide). "" disables
+    /// it. The field name predates the removal of the separate `main` window
+    /// and is kept because renaming it would orphan every persisted binding.
     pub toggle_main: String,
     /// Raise brightness one step. "" = unbound. (Effect wired by Agent D via
     /// `crate::hotkeys::actions`.)
@@ -158,6 +160,18 @@ impl Default for MonitorOverride {
     }
 }
 
+/// The eight preset mode ids (FEATURE-PARITY F1.3), in the order every surface
+/// presents them.
+///
+/// Single source of truth for the roster: `default_modes` seeds exactly these
+/// (asserted below), `src/shared/config/display-modes.ts` mirrors the order for
+/// the UI, and `tray.rs` asserts its per-mode icon family covers every entry —
+/// so adding a mode without artwork fails the build rather than shipping a tray
+/// icon that has quietly stopped meaning anything.
+pub const DISPLAY_MODE_IDS: [&str; 8] = [
+    "pause", "health", "game", "movie", "office", "editing", "reading", "custom",
+];
+
 /// The eight CareUEyes preset modes, seeded from FEATURE-PARITY F1.3.
 fn default_modes() -> HashMap<String, ModePreset> {
     fn preset(kd: u32, kn: u32, bd: u32, bn: u32) -> ModePreset {
@@ -199,7 +213,7 @@ pub struct DisplaySettings {
     pub smooth_transition: bool,
     /// Apply one value to every monitor; when off, use `monitor_overrides`.
     pub sync_monitors: bool,
-    /// Per-monitor overrides keyed by GDI device name (`\\.\DISPLAY1`).
+    /// Per-monitor overrides keyed by the display backend's durable monitor id.
     pub monitor_overrides: HashMap<String, MonitorOverride>,
     /// The eight editable preset modes keyed by mode id.
     pub modes: HashMap<String, ModePreset>,
@@ -532,6 +546,21 @@ pub(crate) fn merge_patch(current: &AppSettings, patch: PartialSettings) -> AppS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `DISPLAY_MODE_IDS` is the roster other modules key off (the tray's icon
+    /// family, above all). Keep it and the seeded presets in lockstep.
+    #[test]
+    fn the_seeded_presets_are_exactly_the_declared_mode_ids() {
+        let mut seeded: Vec<String> = default_modes().into_keys().collect();
+        seeded.sort();
+        let mut declared: Vec<String> = DISPLAY_MODE_IDS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+        declared.sort();
+        assert_eq!(seeded, declared);
+        assert!(DISPLAY_MODE_IDS.contains(&AppSettings::default().display.mode.as_str()));
+    }
 
     #[test]
     fn defaults_are_sane() {

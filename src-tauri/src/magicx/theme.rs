@@ -29,8 +29,8 @@
 //! emitted as [`crate::events::AutoDarkChangedEvent`]. Taskbar transparency
 //! (F9.6) is applied best-effort through the undocumented
 //! `SetWindowCompositionAttribute` accent policy on `Shell_TrayWnd`, re-asserted
-//! on the ticker (the taskbar restarts with Explorer) and restored when toggled
-//! off or on exit.
+//! when Windows reports that Explorer recreated the taskbar, and restored when
+//! toggled off or on exit.
 //!
 //! ## Restoring the taskbar (do not "simplify" this)
 //! There is no way to hand the taskbar back to the shell once its composition
@@ -45,7 +45,9 @@
 //! Everything Win32 is `cfg(windows)`-gated; off-Windows the seam compiles and is
 //! inert (it never touches any registry).
 
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use tauri::AppHandle;
 use tauri_specta::Event;
@@ -56,6 +58,11 @@ use crate::settings::AutoDarkSettings;
 /// Handle for the scheduler to read `settings.auto_dark` from a background
 /// context.
 static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// Coalescing wake channel for settings, registry, clock/resume, and Explorer
+/// notifications. A single worker serializes all theme/taskbar reconciliation.
+#[cfg(windows)]
+static WAKE_TX: OnceLock<SyncSender<()>> = OnceLock::new();
 
 /// Last resolved system-theme decision, so the registry is written and the event
 /// re-broadcast only on an ACTUAL change. Outer `None` = never applied yet; an
@@ -73,16 +80,6 @@ struct ResolvedTheme {
 /// re-assert the taskbar effect after [`restore_on_exit`] has cleared it.
 #[cfg(windows)]
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// A settings-driven `apply_now` worker is currently running; further
-/// `settings:changed` events coalesce into [`APPLY_PENDING`] instead of each
-/// spawning their own thread (a held brightness hotkey fires many saves/second).
-#[cfg(windows)]
-static APPLY_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// A `settings:changed` arrived while a worker was running; the worker drains it
-/// with one more `apply_now` rather than losing the latest state.
-#[cfg(windows)]
-static APPLY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// Capture the handle and start the theme scheduler. Idempotent — a second call
 /// (or a second window) is a no-op. Called from [`super::init`].
 pub fn init(app: &AppHandle) {
@@ -91,57 +88,120 @@ pub fn init(app: &AppHandle) {
     }
     #[cfg(windows)]
     {
-        use std::sync::atomic::Ordering;
-
         use tauri::Listener;
-        // React immediately to any settings save (the theme dropdowns, day/night
-        // edits) — off the event-loop thread so the registry broadcast can never
-        // stall the UI. `apply_now` no-ops when nothing actually changed.
-        //
-        // Coalesced: while one worker runs, additional saves just flip
-        // `APPLY_PENDING` and are drained by the running worker, so a held
-        // brightness/temperature hotkey (many saves/second, all unrelated to
-        // auto_dark) never spawns a thread-per-keypress or re-applies the taskbar
-        // accent per step.
-        let _ = app.listen_any("settings:changed", |_event| {
-            APPLY_PENDING.store(true, Ordering::SeqCst);
-            if APPLY_BUSY.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            if let Err(err) = std::thread::Builder::new()
-                .name("autodark-apply".into())
-                .spawn(|| {
-                    while APPLY_PENDING.swap(false, Ordering::SeqCst) {
-                        apply_now();
-                    }
-                    APPLY_BUSY.store(false, Ordering::SeqCst);
-                })
-            {
-                log::warn!("[autodark] failed to spawn apply thread: {err}");
-                APPLY_BUSY.store(false, Ordering::SeqCst);
-            }
-        });
-        // Background ticker: follow day/night transitions and re-assert the
-        // taskbar effect after an Explorer restart.
+
+        let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+        let _ = WAKE_TX.set(wake_tx);
+        let _ = app.listen_any("settings:changed", |_event| request_wake());
+
         if let Err(err) = std::thread::Builder::new()
             .name("autodark-scheduler".into())
-            .spawn(ticker_loop)
+            .spawn(move || scheduler_loop(wake_rx))
         {
-            log::warn!("[autodark] failed to start scheduler thread: {err}");
+            log::warn!("[autodark] failed to start deadline worker: {err}");
+        }
+        if let Err(err) = std::thread::Builder::new()
+            .name("autodark-registry-events".into())
+            .spawn(registry_notification_loop)
+        {
+            log::warn!("[autodark] failed to start registry listener: {err}");
         }
     }
 }
 
-/// The 60 s driver: re-evaluate the schedule (day/night flips) and re-assert the
-/// taskbar effect as the wall clock and Explorer state change.
+/// Wake the serialized worker without ever blocking an event/message-loop
+/// thread. A full channel means reconciliation is already pending.
 #[cfg(windows)]
-fn ticker_loop() {
-    // Apply once now that the handle + settings are reachable (boot-time init
-    // ran before this thread and the store may not have been readable yet).
+fn request_wake() {
+    if let Some(tx) = WAKE_TX.get() {
+        let _ = tx.try_send(());
+    }
+}
+
+/// Called by the shared native Windows clock/Explorer listener in the display
+/// scheduler. Off-Windows the theme seam remains inert.
+#[cfg(windows)]
+pub(crate) fn notify_system_change() {
+    request_wake();
+}
+
+#[cfg(not(windows))]
+pub(crate) fn notify_system_change() {}
+
+/// Deadline-driven Auto Dark worker. Fixed targets have no timer at all; an
+/// automatic target sleeps directly to its next sunrise/sunset boundary.
+#[cfg(windows)]
+fn scheduler_loop(wake_rx: Receiver<()>) {
     apply_now();
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
+        match next_theme_delay() {
+            Some(delay) => {
+                let _ = wake_rx.recv_timeout(delay);
+            }
+            None => {
+                if wake_rx.recv().is_err() {
+                    return;
+                }
+            }
+        }
         apply_now();
+    }
+}
+
+#[cfg(windows)]
+fn next_theme_delay() -> Option<Duration> {
+    let app = APP.get()?;
+    let settings = crate::settings::store::read_settings(app).auto_dark;
+    if settings.system_theme != "auto" {
+        return None;
+    }
+    let now_minutes = local_now_minutes_precise();
+    Some(duration_until_next_boundary(
+        parse_hhmm(&settings.system_sunrise),
+        parse_hhmm(&settings.system_sunset),
+        now_minutes,
+    ))
+}
+
+fn duration_until_next_boundary(sunrise: f64, sunset: f64, now_minutes: f64) -> Duration {
+    let next_delta = [sunrise, sunset]
+        .into_iter()
+        .map(|boundary| (boundary - now_minutes).rem_euclid(1440.0))
+        .filter(|delta| *delta > f64::EPSILON)
+        .fold(1440.0, f64::min);
+    Duration::from_secs_f64((next_delta * 60.0).max(0.05))
+}
+
+/// Block in `RegNotifyChangeKeyValue` until Windows reports that Personalize
+/// changed. This observes manual theme edits with zero sampling and lets the
+/// configured DimRead target reconcile immediately.
+#[cfg(windows)]
+fn registry_notification_loop() {
+    use windows::Win32::System::Registry::{
+        HKEY, REG_NOTIFY_CHANGE_LAST_SET, RegNotifyChangeKeyValue,
+    };
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_NOTIFY, KEY_READ};
+
+    const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    let Ok(key) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(PERSONALIZE, KEY_READ | KEY_NOTIFY)
+    else {
+        log::warn!("[autodark] could not open Personalize registry key for notifications");
+        return;
+    };
+    let key_handle = HKEY(key.raw_handle().cast());
+    loop {
+        // SAFETY: `key` owns this live HKEY for the whole blocking call and no
+        // event handle is needed for synchronous notification delivery.
+        let status = unsafe {
+            RegNotifyChangeKeyValue(key_handle, false, REG_NOTIFY_CHANGE_LAST_SET, None, false)
+        };
+        if status.is_err() {
+            log::warn!("[autodark] Personalize registry notification failed: {status:?}");
+            return;
+        }
+        request_wake();
     }
 }
 
@@ -165,8 +225,8 @@ pub fn apply_now() {
     // Reconcile against what Windows ACTUALLY has, not against what we last
     // wrote. Gating on our own cached decision means that once the user changes
     // the theme themselves (Settings → Personalization → Colors), our cache and
-    // the registry disagree forever and the ticker never re-asserts — the setting
-    // silently stops controlling anything. Comparing to the live value makes the
+    // the registry disagree until the next event/deadline — the setting silently
+    // stops controlling anything. Comparing to the live value makes the
     // schedule authoritative and self-healing, and still writes nothing when the
     // registry already agrees.
     if let Some(dark) = resolved.system
@@ -189,9 +249,8 @@ pub fn apply_now() {
 /// no-op when it was never applied. Called from `app_exit`.
 #[cfg(windows)]
 pub fn restore_on_exit() {
-    // Latch shutdown FIRST so any scheduler/listener tick still in flight (the
-    // 60 s ticker + settings:changed threads keep running until the process
-    // actually terminates) can't re-assert transparency after we clear it below.
+    // Latch shutdown FIRST so any scheduler/listener wake still in flight can't
+    // re-assert transparency after we clear it below.
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut last = LAST_TASKBAR
         .lock()
@@ -270,6 +329,15 @@ fn local_now_minutes() -> f64 {
     use chrono::Timelike;
     let now = chrono::Local::now();
     f64::from(now.hour()) * 60.0 + f64::from(now.minute()) + f64::from(now.second()) / 60.0
+}
+
+fn local_now_minutes_precise() -> f64 {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    f64::from(now.hour()) * 60.0
+        + f64::from(now.minute())
+        + f64::from(now.second()) / 60.0
+        + f64::from(now.nanosecond()) / 60_000_000_000.0
 }
 
 /// Broadcast the resolved dark flag to the renderers (a `None` target reports
@@ -383,7 +451,7 @@ fn broadcast_theme_change() {}
 #[cfg(windows)]
 static LAST_TASKBAR: Mutex<bool> = Mutex::new(false);
 
-/// Guards the one-time "unavailable" warning so the ticker doesn't spam the log.
+/// Guards the one-time "unavailable" warning so repeated callbacks don't spam.
 #[cfg(windows)]
 static TASKBAR_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -439,8 +507,8 @@ const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_ENABLE_TRANSPARENTGRADIENT: u32 = 2;
 
 /// Assert or clear the taskbar effect. When enabled it is (re-)applied every call
-/// so an Explorer restart is corrected on the next tick; the restore runs only on
-/// the on→off edge.
+/// so an Explorer restart callback repairs the recreated taskbar; the restore
+/// runs only on the on→off edge.
 ///
 /// The off path re-applies [`ORIGINAL_ACCENT`] — the policy captured before the
 /// first override. If the capture failed we deliberately leave the taskbar ALONE
@@ -458,6 +526,11 @@ fn apply_taskbar(enabled: bool) {
     let mut last = LAST_TASKBAR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Close the check-before-lock race with restore_on_exit(): a worker may
+    // have observed `false` and then blocked while shutdown restored the taskbar.
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     if enabled {
         capture_original_accent();
         set_taskbar_accent(ACCENT_ENABLE_TRANSPARENTGRADIENT);
@@ -760,5 +833,21 @@ mod tests {
     #[test]
     fn degenerate_clock_window_is_never_day() {
         assert!(!is_day_by_clock(420.0, 420.0, 720.0));
+    }
+
+    #[test]
+    fn theme_deadline_targets_the_next_sun_boundary() {
+        assert_eq!(
+            duration_until_next_boundary(420.0, 1140.0, 360.0),
+            Duration::from_secs(60 * 60)
+        );
+        assert_eq!(
+            duration_until_next_boundary(420.0, 1140.0, 720.0),
+            Duration::from_secs(7 * 60 * 60)
+        );
+        assert_eq!(
+            duration_until_next_boundary(420.0, 1140.0, 1200.0),
+            Duration::from_secs(11 * 60 * 60)
+        );
     }
 }

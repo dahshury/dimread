@@ -4,10 +4,10 @@
 //! target window it creates a layered, click-through host window pinned over the
 //! target's DWM extended frame bounds, hosting a `WC_MAGNIFIER` child at 1.0×
 //! zoom. The child carries an invert (Dark) or Rec. 601 luminance (Gray) colour
-//! matrix. A message pump drives a refresh loop (~60 Hz `MagSetWindowSource` +
-//! `InvalidateRect`) and a slower tracker (~10 Hz) that follows the target's
-//! rect + z-order, hides the host while the target is minimized, and tears the
-//! host down when the target is destroyed.
+//! matrix. A message pump drives the only periodic work the backend needs: the
+//! ~60 Hz `MagSetWindowSource` + `InvalidateRect` animation loop. Narrow WinEvent
+//! hooks wake a coalesced tracker when a target moves, changes z-order, is
+//! minimized/restored, or is destroyed.
 //!
 //! The Magnification API is thread-affine (it needs a message loop on the thread
 //! that owns the magnifier windows), so all Win32 work happens on that one
@@ -26,17 +26,21 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Magnification::{
     MAGCOLOREFFECT, MW_FILTERMODE_EXCLUDE, MagInitialize, MagSetColorEffect,
     MagSetWindowFilterList, MagSetWindowSource, WC_MAGNIFIER,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, GW_HWNDPREV, GetMessageW, GetWindow,
-    GetWindowRect, HWND_TOP, IsIconic, IsWindow, KillTimer, LWA_ALPHA, MSG, MoveWindow,
-    PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SET_WINDOW_POS_FLAGS, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_TIMER, WM_USER,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    CHILDID_SELF, CreateWindowExW, DestroyWindow, DispatchMessageW, EVENT_OBJECT_DESTROY,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
+    EVENT_SYSTEM_MOVESIZESTART, GW_HWNDPREV, GetMessageW, GetWindow, GetWindowRect, HWND_TOP,
+    IsIconic, IsWindow, KillTimer, LWA_ALPHA, MSG, MoveWindow, OBJID_WINDOW, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SetLayeredWindowAttributes, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_TIMER,
+    WM_USER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
@@ -48,11 +52,12 @@ use crate::magicx::Hwnd;
 /// target content keeps re-magnifying.
 const FRAME_INTERVAL_MS: u32 = 16;
 
-/// Run the slower target tracker every Nth frame (≈10 Hz rect / z-order poll).
-const TRACK_EVERY: u32 = 6;
-
 /// Posted (thread) message that wakes the pump to drain the command channel.
 const WM_APP_WAKE: u32 = WM_APP + 1;
+
+/// Posted once for a burst of accessibility callbacks. The worker clears the
+/// latch before tracking, so an event racing the refresh schedules another pass.
+const WM_APP_TRACK: u32 = WM_APP + 2;
 
 /// A command sent to the worker thread.
 enum Cmd {
@@ -67,6 +72,9 @@ static SENDER: OnceLock<Sender<Cmd>> = OnceLock::new();
 
 /// Worker thread id, for [`PostThreadMessageW`] wakes (`0` until published).
 static WORKER_TID: AtomicU32 = AtomicU32::new(0);
+
+/// Coalesces high-frequency move/resize WinEvents into one queued tracker pass.
+static TRACK_PENDING: AtomicU32 = AtomicU32::new(0);
 
 /// Set (or clear) the effect on one window.
 pub fn apply(hwnd: Hwnd, effect: Option<Effect>) {
@@ -150,7 +158,7 @@ fn worker(rx: Receiver<Cmd>) {
     let mut hosts: HashMap<Hwnd, Host> = HashMap::new();
     let mut host_ids: HashSet<isize> = HashSet::new();
     let mut frame_timer: usize = 0;
-    let mut tick: u32 = 0;
+    let hooks = install_hooks();
 
     drain(&rx, &mut hosts, &mut host_ids);
     manage_timer(&hosts, &mut frame_timer);
@@ -167,14 +175,13 @@ fn worker(rx: Receiver<Cmd>) {
                 drain(&rx, &mut hosts, &mut host_ids);
                 manage_timer(&hosts, &mut frame_timer);
             }
+            WM_APP_TRACK => {
+                TRACK_PENDING.store(0, Ordering::Release);
+                track(&mut hosts, &mut host_ids);
+                manage_timer(&hosts, &mut frame_timer);
+            }
             WM_TIMER => {
                 refresh(&hosts);
-                tick += 1;
-                if tick >= TRACK_EVERY {
-                    tick = 0;
-                    track(&mut hosts, &mut host_ids);
-                    manage_timer(&hosts, &mut frame_timer);
-                }
             }
             _ => {
                 // SAFETY: dispatch host / magnifier window messages normally.
@@ -184,6 +191,81 @@ fn worker(rx: Receiver<Cmd>) {
                 }
             }
         }
+    }
+
+    for hook in hooks {
+        // SAFETY: every handle came from `SetWinEventHook` on this thread and is
+        // removed exactly once after the pump stops.
+        unsafe {
+            let _ = UnhookWinEvent(hook);
+        }
+    }
+}
+
+/// Subscribe only to changes that can affect target lifetime, visibility,
+/// geometry, or stacking. The hooks are global because MagicX can target any
+/// process; callbacks are delivered on this message-pump thread.
+fn install_hooks() -> Vec<HWINEVENTHOOK> {
+    const RANGES: [(u32, u32); 6] = [
+        (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+        (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
+        (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+        (EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY),
+        (EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER),
+        (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+    ];
+    let mut hooks = Vec::with_capacity(RANGES.len());
+    for (min, max) in RANGES {
+        // SAFETY: `win_event_proc` is static and all hooks are unregistered
+        // before the worker exits. A null module is correct out-of-context.
+        let hook = unsafe {
+            SetWinEventHook(
+                min,
+                max,
+                None,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if hook.0.is_null() {
+            log::warn!("[magicx] SetWinEventHook failed for range {min:#x}..={max:#x}");
+        } else {
+            hooks.push(hook);
+        }
+    }
+    hooks
+}
+
+/// Accessibility callback: validate object events, then schedule one coalesced
+/// tracker pass. System events use object id 0 and bypass the object filter.
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    _hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if matches!(
+        event,
+        EVENT_OBJECT_DESTROY | EVENT_OBJECT_REORDER | EVENT_OBJECT_LOCATIONCHANGE
+    ) && (id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32)
+    {
+        return;
+    }
+    request_track();
+}
+
+fn request_track() {
+    if TRACK_PENDING.swap(1, Ordering::AcqRel) != 0 {
+        return;
+    }
+    let tid = WORKER_TID.load(Ordering::Acquire);
+    if tid == 0 || unsafe { PostThreadMessageW(tid, WM_APP_TRACK, WPARAM(0), LPARAM(0)) }.is_err() {
+        TRACK_PENDING.store(0, Ordering::Release);
     }
 }
 
@@ -497,7 +579,7 @@ fn manage_timer(hosts: &HashMap<Hwnd, Host>, frame_timer: &mut usize) {
         // SAFETY: thread timer (null hwnd) — its id is returned for KillTimer.
         *frame_timer = unsafe { SetTimer(None, 0, FRAME_INTERVAL_MS, None) };
     } else if !want && *frame_timer != 0 {
-        // SAFETY: stop the idle refresh timer by the id SetTimer returned.
+        // SAFETY: stop the active frame-refresh timer by the id SetTimer returned.
         unsafe {
             let _ = KillTimer(None, *frame_timer);
         }

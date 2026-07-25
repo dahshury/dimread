@@ -1,11 +1,14 @@
 use std::fs;
+use std::future::Future;
 use std::io::Write;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
+use tokio::sync::Notify;
 
 /// Max time to wait for the connection to start delivering data (response headers) and for EACH
 /// subsequent body chunk. `connect_timeout` only bounds the TCP/TLS handshake — once connected, a
@@ -59,24 +62,14 @@ pub struct TransferRequest<'a> {
 }
 
 pub trait TransferControl: Send + Sync {
-    fn should_cancel(&self) -> bool {
-        false
-    }
+    fn requested_outcome(&self) -> Option<TransferOutcome>;
 
-    fn should_pause(&self) -> bool {
-        false
-    }
+    fn wait_for_outcome(&self) -> Pin<Box<dyn Future<Output = TransferOutcome> + Send + '_>>;
 }
 
-impl TransferControl for AtomicBool {
-    fn should_cancel(&self) -> bool {
-        self.load(Ordering::Acquire)
-    }
-}
-
-/// Cooperative pause/cancel flags polled by `transfer_url` on every chunk. Each download
-/// handle embeds one of these instead of re-declaring an identical `{ paused, cancelled }`
-/// pair plus its `TransferControl` impl.
+/// Cooperative pause/cancel state with a wake signal. Each download handle
+/// embeds one of these instead of re-declaring an identical
+/// `{ paused, cancelled, notify }` tuple plus its `TransferControl` impl.
 ///
 /// Semantics are intentionally minimal so each manager keeps its own cancel policy: `cancel` only
 /// raises the cancel flag (a manager that also wants to clear a pending pause on cancel calls
@@ -86,11 +79,13 @@ impl TransferControl for AtomicBool {
 pub(crate) struct PauseCancelFlags {
     paused: AtomicBool,
     cancelled: AtomicBool,
+    changed: Notify,
 }
 
 impl PauseCancelFlags {
     pub(crate) fn pause(&self) {
         self.paused.store(true, Ordering::Release);
+        self.changed.notify_one();
     }
 
     pub(crate) fn resume(&self) {
@@ -99,6 +94,7 @@ impl PauseCancelFlags {
 
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.changed.notify_one();
     }
 
     pub(crate) fn reset(&self) {
@@ -116,13 +112,31 @@ impl PauseCancelFlags {
 }
 
 impl TransferControl for PauseCancelFlags {
-    fn should_cancel(&self) -> bool {
-        self.is_cancelled()
+    fn requested_outcome(&self) -> Option<TransferOutcome> {
+        if self.is_cancelled() {
+            Some(TransferOutcome::Cancelled)
+        } else if self.is_paused() {
+            Some(TransferOutcome::Paused)
+        } else {
+            None
+        }
     }
 
-    fn should_pause(&self) -> bool {
-        self.is_paused()
+    fn wait_for_outcome(&self) -> Pin<Box<dyn Future<Output = TransferOutcome> + Send + '_>> {
+        Box::pin(async move {
+            loop {
+                if let Some(outcome) = self.requested_outcome() {
+                    return outcome;
+                }
+                self.changed.notified().await;
+            }
+        })
     }
+}
+
+enum TransferWait<T> {
+    Ready(T),
+    Stopped(TransferOutcome),
 }
 
 pub async fn transfer_url<F>(
@@ -144,14 +158,43 @@ where
         http_request = http_request.header(RANGE, format!("bytes={existing_bytes}-"));
     }
 
-    let mut response = with_idle_timeout(http_request.send(), request.url, "request").await?;
+    let mut response =
+        match with_idle_timeout_or_control(http_request.send(), request.url, "request", control)
+            .await?
+        {
+            TransferWait::Ready(response) => response,
+            TransferWait::Stopped(outcome) => {
+                return Ok(stopped_report(
+                    &request,
+                    existing_bytes,
+                    request.known_total_bytes,
+                    outcome,
+                ));
+            }
+        };
     let mut status = response.status();
 
     if existing_bytes > 0 && status == StatusCode::OK {
         drop(response);
         let _ = fs::remove_file(request.partial_path);
-        response =
-            with_idle_timeout(client.get(request.url).send(), request.url, "request").await?;
+        response = match with_idle_timeout_or_control(
+            client.get(request.url).send(),
+            request.url,
+            "request",
+            control,
+        )
+        .await?
+        {
+            TransferWait::Ready(response) => response,
+            TransferWait::Stopped(outcome) => {
+                return Ok(stopped_report(
+                    &request,
+                    0,
+                    request.known_total_bytes,
+                    outcome,
+                ));
+            }
+        };
         status = response.status();
     }
 
@@ -187,22 +230,18 @@ where
     );
 
     loop {
-        if let Some(outcome) = requested_outcome(control) {
-            file.flush().map_err(io_error)?;
-            drop(file);
-            if outcome == TransferOutcome::Cancelled && request.delete_partial_on_cancel {
-                let _ = fs::remove_file(request.partial_path);
-            }
-            return Ok(TransferReport {
-                downloaded_bytes: downloaded,
-                outcome,
-                total_bytes,
-            });
-        }
-
-        let Some(bytes) = with_idle_timeout(response.chunk(), request.url, "read").await? else {
-            break;
-        };
+        let bytes =
+            match with_idle_timeout_or_control(response.chunk(), request.url, "read", control)
+                .await?
+            {
+                TransferWait::Ready(Some(bytes)) => bytes,
+                TransferWait::Ready(None) => break,
+                TransferWait::Stopped(outcome) => {
+                    file.flush().map_err(io_error)?;
+                    drop(file);
+                    return Ok(stopped_report(&request, downloaded, total_bytes, outcome));
+                }
+            };
         file.write_all(&bytes).map_err(io_error)?;
         downloaded = downloaded.saturating_add(bytes.len() as u64);
 
@@ -272,15 +311,43 @@ async fn with_idle_timeout<T>(
     }
 }
 
-fn requested_outcome(control: Option<&dyn TransferControl>) -> Option<TransferOutcome> {
-    let control = control?;
-    if control.should_cancel() {
-        return Some(TransferOutcome::Cancelled);
+/// Race network readiness against the control's wakeable terminal signal.
+/// Unlike chunk-boundary flag sampling, pause/cancel interrupts a stalled
+/// request or body read immediately.
+async fn with_idle_timeout_or_control<T>(
+    fut: impl Future<Output = Result<T, reqwest::Error>>,
+    url: &str,
+    what: &str,
+    control: Option<&dyn TransferControl>,
+) -> Result<TransferWait<T>, TransferError> {
+    let Some(control) = control else {
+        return with_idle_timeout(fut, url, what)
+            .await
+            .map(TransferWait::Ready);
+    };
+    if let Some(outcome) = control.requested_outcome() {
+        return Ok(TransferWait::Stopped(outcome));
     }
-    if control.should_pause() {
-        return Some(TransferOutcome::Paused);
+    tokio::select! {
+        result = with_idle_timeout(fut, url, what) => result.map(TransferWait::Ready),
+        outcome = control.wait_for_outcome() => Ok(TransferWait::Stopped(outcome)),
     }
-    None
+}
+
+fn stopped_report(
+    request: &TransferRequest<'_>,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    outcome: TransferOutcome,
+) -> TransferReport {
+    if outcome == TransferOutcome::Cancelled && request.delete_partial_on_cancel {
+        let _ = fs::remove_file(request.partial_path);
+    }
+    TransferReport {
+        downloaded_bytes,
+        outcome,
+        total_bytes,
+    }
 }
 
 fn emit_progress<F>(
@@ -382,6 +449,26 @@ fn io_error(err: std::io::Error) -> TransferError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_control_resolves_its_wakeable_outcome() {
+        let flags = PauseCancelFlags::default();
+        flags.pause();
+        let outcome = tauri::async_runtime::block_on(async {
+            tokio::time::timeout(Duration::from_millis(100), flags.wait_for_outcome())
+                .await
+                .expect("pause signal wakes without a network chunk")
+        });
+        assert_eq!(outcome, TransferOutcome::Paused);
+    }
+
+    #[test]
+    fn cancel_has_priority_over_a_pending_pause() {
+        let flags = PauseCancelFlags::default();
+        flags.pause();
+        flags.cancel();
+        assert_eq!(flags.requested_outcome(), Some(TransferOutcome::Cancelled));
+    }
 
     #[test]
     fn parses_content_range_totals() {

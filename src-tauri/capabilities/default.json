@@ -3,7 +3,6 @@
   "identifier": "default",
   "description": "Shared renderer baseline for every starter window. Keep this small.",
   "windows": [
-    "main",
     "settings",
     "picker",
     "gallery",

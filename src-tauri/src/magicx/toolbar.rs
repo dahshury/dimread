@@ -10,11 +10,11 @@
 //! - [`set_target`] — record the attached window (slice, on show/hide).
 //!
 //! ## What this slice implements
-//! [`init`] spawns a ~150 ms hover tracker (Windows-only) that, while
+//! [`init`] spawns an event-driven hover tracker (Windows-only) that, while
 //! `settings.magicx.enabled` and `toolbar_enabled`:
-//!   1. samples the foreground window (`GetForegroundWindow` + `GetWindowRect`)
-//!      and the cursor (`GetCursorPos`), skipping our own windows, minimized
-//!      windows, and zero-size rects,
+//!   1. reacts to foreground/window accessibility callbacks plus a low-level
+//!      mouse-move hook, skipping our own windows, minimized windows, and
+//!      zero-size rects,
 //!   2. computes a small hover zone at the window's TOP edge, aligned per
 //!      `toolbar_align` + `toolbar_offset` (the pure geometry in [`geometry`]),
 //!   3. once the cursor dwells in that zone for `toolbar_delay_ms`, positions +
@@ -32,14 +32,14 @@
 
 use std::sync::Mutex;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::Hwnd;
 
 /// The window the toolbar is currently attached to (`None` when hidden).
 static TARGET: Mutex<Option<Hwnd>> = Mutex::new(None);
 
-/// Start the hover tracker. On Windows this spawns the polling watcher thread;
+/// Start the hover tracker. On Windows this spawns the native-hook watcher;
 /// elsewhere it is inert. Called from [`super::init`]; idempotent.
 pub fn init(app: &AppHandle) {
     #[cfg(windows)]
@@ -58,6 +58,35 @@ pub fn current_target() -> Option<Hwnd> {
 /// window.
 pub fn set_target(hwnd: Option<Hwnd>) {
     *TARGET.lock().unwrap_or_else(|p| p.into_inner()) = hwnd.filter(|&h| h != 0);
+}
+
+/// Re-emit the current target's effect flags after the effect engine mutates.
+/// This explicit callback replaces the old periodic toolbar-state reassertion.
+pub(crate) fn refresh_effect_state() {
+    #[cfg(windows)]
+    windows_impl::request_effect_refresh();
+}
+
+/// Renderer subscribe handshake: re-emit the current shown state only after the
+/// webview confirms both toolbar listeners are registered.
+#[tauri::command]
+#[specta::specta]
+pub fn magictoolbar_renderer_ready() {
+    #[cfg(windows)]
+    windows_impl::request_renderer_sync();
+}
+
+/// Renderer exit-animation callback. The target guard makes a late completion
+/// harmless if the toolbar was shown again before the old exit finished.
+#[tauri::command]
+#[specta::specta]
+pub fn magictoolbar_hide_complete(app: AppHandle) {
+    if current_target().is_some() {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("magic-toolbar") {
+        let _ = window.hide();
+    }
 }
 
 // ── Pure geometry (unit-tested on every platform) ───────────────────────────
@@ -163,165 +192,380 @@ mod geometry {
 
 #[cfg(windows)]
 mod windows_impl {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
-
-    use tauri::{AppHandle, Manager, PhysicalPosition};
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use tauri::{AppHandle, Listener, Manager, PhysicalPosition};
     use tauri_specta::Event as _;
-    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        CHILDID_SELF, CallNextHookEx, DispatchMessageW, EVENT_OBJECT_DESTROY,
+        EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+        EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+        GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowThreadProcessId,
+        HC_ACTION, HHOOK, IsIconic, KillTimer, MSG, MSLLHOOKSTRUCT, OBJID_WINDOW, PM_NOREMOVE,
+        PeekMessageW, PostThreadMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
+        UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_MOUSEMOVE, WM_TIMER,
     };
 
     use super::geometry::{
         Align, TB_WIDTH, clamp_toolbar_left, hover_zone, toolbar_left, zone_contains,
     };
-    use super::{Hwnd, set_target};
+    use super::{Hwnd, current_target, set_target};
     use crate::events::{MagicToolbarHideEvent, MagicToolbarShowEvent};
     use crate::magicx::engine;
 
     /// The `magic-toolbar` window label (see `windows::WINDOW_SPECS`).
     const LABEL: &str = "magic-toolbar";
-    /// How often the tracker samples the cursor / foreground window.
-    const POLL_MS: u64 = 150;
-    /// Delay before the OS window hides after `magictoolbar:hide` — long enough
-    /// for the renderer's exit frame to composite before the native hide.
-    const HIDE_GRACE_MS: u64 = 130;
-
     /// One-shot guard so [`start`] spawns the watcher at most once.
     static STARTED: AtomicBool = AtomicBool::new(false);
-    /// Monotonic show/hide counter: a delayed hide only fires while still
-    /// current, so a re-show (which bumps it) cancels the pending hide.
-    static SEQ: AtomicU64 = AtomicU64::new(0);
+    const SETTINGS_CHANGED_MESSAGE: u32 = WM_APP + 1;
+    const CURSOR_MOVED_MESSAGE: u32 = WM_APP + 2;
+    const WINDOW_CHANGED_MESSAGE: u32 = WM_APP + 3;
+    const EFFECT_CHANGED_MESSAGE: u32 = WM_APP + 4;
+    const RENDERER_READY_MESSAGE: u32 = WM_APP + 5;
+
+    static WATCHER_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+    static CURSOR_PENDING: AtomicBool = AtomicBool::new(false);
+    static WINDOW_PENDING: AtomicBool = AtomicBool::new(false);
+    static CURSOR_X: AtomicI32 = AtomicI32::new(0);
+    static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 
     /// Spawn the detached hover watcher (dies with the process). Idempotent.
     pub(super) fn start(app: AppHandle) {
         if STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
+        let _ = app.listen_any("settings:changed", |_event| {
+            post_message(SETTINGS_CHANGED_MESSAGE);
+        });
         let spawned = std::thread::Builder::new()
             .name("magic-toolbar".into())
-            .spawn(move || watcher_loop(&app));
+            .spawn(move || watcher_loop(app));
         if let Err(err) = spawned {
             log::warn!("[magicx] failed to start toolbar watcher: {err}");
             STARTED.store(false, Ordering::SeqCst);
         }
     }
 
-    /// The toolbar's current shown state (its target + last-emitted effect
-    /// flags + a small re-emit budget for the first-show listener race).
+    /// The toolbar's current shown state (target, last-emitted effect flags,
+    /// and position) cached for the renderer-ready callback.
     struct Shown {
         target: Hwnd,
         dark: bool,
         gray: bool,
-        reasserts: u8,
+        x: i32,
+        y: i32,
     }
 
-    /// Poll the cursor + foreground window forever, showing/hiding the toolbar.
-    /// Re-reads the settings snapshot each tick so enabling/disabling MagicX or
-    /// editing the toolbar options takes effect without a restart.
-    fn watcher_loop(app: &AppHandle) {
-        let mut shown: Option<Shown> = None;
-        let mut hover: Option<(Hwnd, Instant)> = None;
-        loop {
-            std::thread::sleep(Duration::from_millis(POLL_MS));
+    #[derive(Clone, Copy)]
+    struct Config {
+        enabled: bool,
+        align: Align,
+        offset: f64,
+        delay_ms: u32,
+    }
+
+    impl Config {
+        fn read(app: &AppHandle) -> Self {
             let settings = crate::settings::store::read_settings(app);
-            let magicx = &settings.magicx;
-            if !(magicx.enabled && magicx.toolbar_enabled) {
-                if shown.take().is_some() {
-                    hide(app);
-                }
-                hover = None;
-                continue;
-            }
-
-            let align = Align::from_wire(&magicx.toolbar_align);
-            let offset = f64::from(magicx.toolbar_offset);
-            let delay = Duration::from_millis(u64::from(magicx.toolbar_delay_ms));
-
-            // Foreground target (skip our own windows, minimized, zero-size).
-            let Some((fg, rect, is_self)) = foreground_target() else {
-                if shown.take().is_some() {
-                    hide(app);
-                }
-                hover = None;
-                continue;
-            };
-            if is_self {
-                if shown.take().is_some() {
-                    hide(app);
-                }
-                hover = None;
-                continue;
-            }
-
-            let Some((cursor_x, cursor_y, scale)) = cursor_logical(app, &rect) else {
-                continue;
-            };
-            let win_left = f64::from(rect.left) / scale;
-            let win_top = f64::from(rect.top) / scale;
-            let win_right = f64::from(rect.right) / scale;
-            let desired_left = toolbar_left(win_left, win_right, TB_WIDTH, align, offset);
-            let tb_left = clamp_toolbar_left(desired_left, win_left, win_right, TB_WIDTH);
-            let zone = hover_zone(win_left, win_top, win_right, tb_left, TB_WIDTH);
-            let inside = zone_contains(zone, cursor_x, cursor_y);
-
-            match shown {
-                // Still hovering the same window's zone — stay up; refresh the
-                // button-highlight state and re-assert the show for the race.
-                Some(ref mut s) if s.target == fg && inside => {
-                    let (dark, gray) = engine::state_of(fg);
-                    if s.reasserts > 0 || dark != s.dark || gray != s.gray {
-                        emit_show(app, tb_left, win_top, scale, dark, gray);
-                        s.dark = dark;
-                        s.gray = gray;
-                        s.reasserts = s.reasserts.saturating_sub(1);
-                    }
-                }
-                // Foreground changed or the cursor left the zone — hide.
-                Some(_) => {
-                    shown = None;
-                    hide(app);
-                    hover = if inside {
-                        Some((fg, Instant::now()))
-                    } else {
-                        None
-                    };
-                }
-                // Not shown — dwell-detect, then show once the delay elapses.
-                None => {
-                    if inside {
-                        let dwelled = match hover {
-                            Some((h, since)) if h == fg => since.elapsed() >= delay,
-                            _ => {
-                                hover = Some((fg, Instant::now()));
-                                false
-                            }
-                        };
-                        if dwelled {
-                            let (dark, gray) = engine::state_of(fg);
-                            set_target(Some(fg));
-                            show(app, tb_left, win_top, scale);
-                            emit_show(app, tb_left, win_top, scale, dark, gray);
-                            shown = Some(Shown {
-                                target: fg,
-                                dark,
-                                gray,
-                                reasserts: 2,
-                            });
-                            hover = None;
-                        }
-                    } else {
-                        hover = None;
-                    }
-                }
+            Self {
+                enabled: settings.magicx.enabled && settings.magicx.toolbar_enabled,
+                align: Align::from_wire(&settings.magicx.toolbar_align),
+                offset: f64::from(settings.magicx.toolbar_offset),
+                delay_ms: settings.magicx.toolbar_delay_ms,
             }
         }
     }
 
-    /// The foreground window as `(hwnd, rect, is_self)`, or `None` when there is
-    /// no usable target (no focus, minimized, or a zero-size rect).
-    fn foreground_target() -> Option<(Hwnd, RECT, bool)> {
+    struct WatcherState {
+        app: AppHandle,
+        config: Config,
+        shown: Option<Shown>,
+        hover_target: Option<Hwnd>,
+        dwell_timer: usize,
+        dwell_ready: bool,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<WatcherState>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn request_effect_refresh() {
+        post_message(EFFECT_CHANGED_MESSAGE);
+    }
+
+    pub(super) fn request_renderer_sync() {
+        post_message(RENDERER_READY_MESSAGE);
+    }
+
+    fn post_message(message: u32) {
+        let thread_id = WATCHER_THREAD_ID.load(Ordering::Acquire);
+        if thread_id != 0 {
+            // SAFETY: posting to a thread queue is race-safe; failure means the
+            // process-lifetime watcher has not started or is already gone.
+            let _ = unsafe { PostThreadMessageW(thread_id, message, WPARAM(0), LPARAM(0)) };
+        }
+    }
+
+    fn watcher_loop(app: AppHandle) {
+        STATE.set(Some(WatcherState {
+            config: Config::read(&app),
+            app,
+            shown: None,
+            hover_target: None,
+            dwell_timer: 0,
+            dwell_ready: false,
+        }));
+
+        let mut probe = MSG::default();
+        // SAFETY: materialize the queue before publishing the thread id.
+        unsafe {
+            let _ = PeekMessageW(&mut probe, None, 0, 0, PM_NOREMOVE);
+        }
+        let thread_id = unsafe { GetCurrentThreadId() };
+        WATCHER_THREAD_ID.store(thread_id, Ordering::Release);
+
+        let win_hooks = install_win_event_hooks();
+        let mouse_hook = install_mouse_hook();
+        sync(None);
+        pump_messages();
+
+        STATE.with_borrow_mut(|slot| {
+            if let Some(state) = slot.as_mut() {
+                cancel_dwell(state);
+            }
+            *slot = None;
+        });
+        if let Some(hook) = mouse_hook {
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+        }
+        for hook in win_hooks {
+            unsafe {
+                let _ = UnhookWinEvent(hook);
+            }
+        }
+        let _ =
+            WATCHER_THREAD_ID.compare_exchange(thread_id, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn pump_messages() {
+        let mut msg = MSG::default();
+        loop {
+            let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+            if result.0 <= 0 {
+                return;
+            }
+            match msg.message {
+                SETTINGS_CHANGED_MESSAGE => {
+                    STATE.with_borrow_mut(|slot| {
+                        if let Some(state) = slot.as_mut() {
+                            state.config = Config::read(&state.app);
+                            cancel_dwell(state);
+                            state.hover_target = None;
+                        }
+                    });
+                    sync(None);
+                }
+                CURSOR_MOVED_MESSAGE => {
+                    CURSOR_PENDING.store(false, Ordering::Release);
+                    sync(Some(POINT {
+                        x: CURSOR_X.load(Ordering::Acquire),
+                        y: CURSOR_Y.load(Ordering::Acquire),
+                    }));
+                }
+                WINDOW_CHANGED_MESSAGE => {
+                    WINDOW_PENDING.store(false, Ordering::Release);
+                    sync(None);
+                }
+                EFFECT_CHANGED_MESSAGE => refresh_effect_flags(),
+                RENDERER_READY_MESSAGE => reemit_shown(),
+                WM_TIMER if consume_dwell_timer(msg.wParam.0) => sync(None),
+                _ => unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                },
+            }
+        }
+    }
+
+    fn consume_dwell_timer(timer: usize) -> bool {
+        STATE.with_borrow_mut(|slot| {
+            let Some(state) = slot.as_mut() else {
+                return false;
+            };
+            if state.dwell_timer == 0 || state.dwell_timer != timer {
+                return false;
+            }
+            unsafe {
+                let _ = KillTimer(None, timer);
+            }
+            state.dwell_timer = 0;
+            state.dwell_ready = true;
+            true
+        })
+    }
+
+    fn sync(cursor: Option<POINT>) {
+        STATE.with_borrow_mut(|slot| {
+            let Some(state) = slot.as_mut() else {
+                return;
+            };
+            if !state.config.enabled {
+                if state.shown.take().is_some() {
+                    hide(&state.app);
+                }
+                clear_hover(state);
+                return;
+            }
+            let Some((fg, native, rect, is_self)) = foreground_target() else {
+                if state.shown.take().is_some() {
+                    hide(&state.app);
+                }
+                clear_hover(state);
+                return;
+            };
+            if is_self {
+                if state.shown.take().is_some() {
+                    hide(&state.app);
+                }
+                clear_hover(state);
+                return;
+            }
+            let Some((cursor_x, cursor_y, scale)) = cursor_logical(native, cursor) else {
+                return;
+            };
+            let win_left = f64::from(rect.left) / scale;
+            let win_top = f64::from(rect.top) / scale;
+            let win_right = f64::from(rect.right) / scale;
+            let desired = toolbar_left(
+                win_left,
+                win_right,
+                TB_WIDTH,
+                state.config.align,
+                state.config.offset,
+            );
+            let tb_left = clamp_toolbar_left(desired, win_left, win_right, TB_WIDTH);
+            let zone = hover_zone(win_left, win_top, win_right, tb_left, TB_WIDTH);
+            let inside = zone_contains(zone, cursor_x, cursor_y);
+            let (x, y) = physical_position(tb_left, win_top, scale);
+
+            if let Some(shown) = state.shown.as_mut() {
+                if shown.target == fg && inside {
+                    if shown.x != x || shown.y != y {
+                        show(&state.app, x, y);
+                        shown.x = x;
+                        shown.y = y;
+                    }
+                    return;
+                }
+                state.shown = None;
+                hide(&state.app);
+                clear_hover(state);
+            }
+
+            if !inside {
+                clear_hover(state);
+                return;
+            }
+            if state.hover_target != Some(fg) {
+                cancel_dwell(state);
+                state.hover_target = Some(fg);
+                state.dwell_ready = state.config.delay_ms == 0;
+                if !state.dwell_ready {
+                    state.dwell_timer =
+                        unsafe { SetTimer(None, 0, state.config.delay_ms.max(1), None) };
+                    if state.dwell_timer == 0 {
+                        log::warn!("[magicx] failed to arm toolbar dwell timer");
+                    }
+                }
+            }
+            if !state.dwell_ready {
+                return;
+            }
+
+            let (dark, gray) = engine::state_of(fg);
+            set_target(Some(fg));
+            show(&state.app, x, y);
+            emit_show(&state.app, x, y, dark, gray);
+            state.shown = Some(Shown {
+                target: fg,
+                dark,
+                gray,
+                x,
+                y,
+            });
+            clear_hover(state);
+        });
+    }
+
+    fn refresh_effect_flags() {
+        STATE.with_borrow_mut(|slot| {
+            let Some(state) = slot.as_mut() else {
+                return;
+            };
+            let Some(shown) = state.shown.as_mut() else {
+                return;
+            };
+            let (dark, gray) = engine::state_of(shown.target);
+            if dark == shown.dark && gray == shown.gray {
+                return;
+            }
+            shown.dark = dark;
+            shown.gray = gray;
+            emit_show(&state.app, shown.x, shown.y, dark, gray);
+        });
+    }
+
+    fn reemit_shown() {
+        STATE.with_borrow(|slot| {
+            let Some(state) = slot.as_ref() else {
+                return;
+            };
+            let Some(shown) = state.shown.as_ref() else {
+                // A hide may have landed before the renderer listeners were
+                // installed. Reconcile the native window immediately.
+                let app = state.app.clone();
+                let _ = app.clone().run_on_main_thread(move || {
+                    if current_target().is_none()
+                        && let Some(window) = app.get_webview_window(LABEL)
+                    {
+                        let _ = window.hide();
+                    }
+                });
+                return;
+            };
+            emit_show(&state.app, shown.x, shown.y, shown.dark, shown.gray);
+        });
+    }
+
+    fn clear_hover(state: &mut WatcherState) {
+        cancel_dwell(state);
+        state.hover_target = None;
+        state.dwell_ready = false;
+    }
+
+    fn cancel_dwell(state: &mut WatcherState) {
+        if state.dwell_timer != 0 {
+            unsafe {
+                let _ = KillTimer(None, state.dwell_timer);
+            }
+            state.dwell_timer = 0;
+        }
+        state.dwell_ready = false;
+    }
+
+    /// The foreground window as `(hwnd_id, native_hwnd, rect, is_self)`, or
+    /// `None` when there is no usable target (no focus, minimized, or a
+    /// zero-size rect). The first two fields are the SAME window in different
+    /// forms — the numeric id the renderer speaks, then the raw Win32 handle —
+    /// so the positional order is worth stating explicitly.
+    fn foreground_target() -> Option<(Hwnd, HWND, RECT, bool)> {
         // SAFETY: returns the foreground HWND or a null handle (no focus).
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
@@ -343,47 +587,29 @@ mod windows_impl {
         // SAFETY: `hwnd` valid; `pid` is a live out-param.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         let is_self = pid == std::process::id();
-        Some((hwnd.0 as Hwnd, rect, is_self))
+        Some((hwnd.0 as Hwnd, hwnd, rect, is_self))
     }
 
     /// The cursor position converted to logical px on the target's monitor, plus
     /// that monitor's scale factor. `None` when the cursor can't be read.
-    fn cursor_logical(app: &AppHandle, rect: &RECT) -> Option<(f64, f64, f64)> {
-        let mut point = POINT::default();
-        // SAFETY: `point` is a live out-param.
-        if unsafe { GetCursorPos(&mut point) }.is_err() {
-            return None;
-        }
-        let scale = scale_for_rect(app, rect);
+    fn cursor_logical(target: HWND, supplied: Option<POINT>) -> Option<(f64, f64, f64)> {
+        let point = match supplied {
+            Some(point) => point,
+            None => {
+                let mut point = POINT::default();
+                if unsafe { GetCursorPos(&mut point) }.is_err() {
+                    return None;
+                }
+                point
+            }
+        };
+        let dpi = unsafe { GetDpiForWindow(target) };
+        let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
         Some((
             f64::from(point.x) / scale,
             f64::from(point.y) / scale,
             scale,
         ))
-    }
-
-    /// The scale factor of the monitor containing the target window's centre,
-    /// falling back to the primary monitor's (or 1.0).
-    fn scale_for_rect(app: &AppHandle, rect: &RECT) -> f64 {
-        let center_x = (rect.left + rect.right) / 2;
-        let center_y = (rect.top + rect.bottom) / 2;
-        if let Ok(monitors) = app.available_monitors() {
-            for monitor in monitors {
-                let pos = monitor.position();
-                let size = monitor.size();
-                if center_x >= pos.x
-                    && center_x < pos.x + size.width as i32
-                    && center_y >= pos.y
-                    && center_y < pos.y + size.height as i32
-                {
-                    return monitor.scale_factor();
-                }
-            }
-        }
-        app.primary_monitor()
-            .ok()
-            .flatten()
-            .map_or(1.0, |m| m.scale_factor())
     }
 
     /// Physical top-left the toolbar is placed at (logical position × scale;
@@ -397,9 +623,7 @@ mod windows_impl {
 
     /// Position + show the prewarmed toolbar window (non-activating: never
     /// focused). Runs the native ops on the main thread.
-    fn show(app: &AppHandle, tb_left: f64, win_top: f64, scale: f64) {
-        SEQ.fetch_add(1, Ordering::SeqCst);
-        let (x, y) = physical_position(tb_left, win_top, scale);
+    fn show(app: &AppHandle, x: i32, y: i32) {
         let app = app.clone();
         let _ = app.clone().run_on_main_thread(move || {
             if let Some(window) = app.get_webview_window(LABEL) {
@@ -413,8 +637,7 @@ mod windows_impl {
 
     /// Emit `magictoolbar:show` with the toolbar's physical position + the
     /// target's effect flags (so the renderer highlights the active buttons).
-    fn emit_show(app: &AppHandle, tb_left: f64, win_top: f64, scale: f64, dark: bool, gray: bool) {
-        let (x, y) = physical_position(tb_left, win_top, scale);
+    fn emit_show(app: &AppHandle, x: i32, y: i32, dark: bool, gray: bool) {
         if let Err(err) = (MagicToolbarShowEvent {
             x,
             y,
@@ -427,29 +650,106 @@ mod windows_impl {
         }
     }
 
-    /// Clear the target, emit `magictoolbar:hide` (renderer plays its exit), and
-    /// hide the OS window after the exit grace — unless a re-show took over.
+    /// Clear the target and ask the renderer to play its exit. The renderer
+    /// calls `magictoolbar_hide_complete` when that animation actually ends.
     fn hide(app: &AppHandle) {
         set_target(None);
-        let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
         if let Err(err) = (MagicToolbarHideEvent {}).emit(app) {
             log::warn!("[magicx] failed to emit magictoolbar:hide: {err}");
         }
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(HIDE_GRACE_MS));
-            if SEQ.load(Ordering::SeqCst) != seq {
-                return;
+    }
+
+    fn install_win_event_hooks() -> Vec<HWINEVENTHOOK> {
+        const RANGES: [(u32, u32); 4] = [
+            (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+            (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
+            (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+            (EVENT_OBJECT_DESTROY, EVENT_OBJECT_LOCATIONCHANGE),
+        ];
+        let mut hooks = Vec::with_capacity(RANGES.len());
+        for (min, max) in RANGES {
+            let hook = unsafe {
+                SetWinEventHook(
+                    min,
+                    max,
+                    None,
+                    Some(win_event_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                )
+            };
+            if hook.0.is_null() {
+                log::warn!("[magicx] toolbar WinEvent hook failed for {min:#x}..={max:#x}");
+            } else {
+                hooks.push(hook);
             }
-            let _ = app.clone().run_on_main_thread(move || {
-                if SEQ.load(Ordering::SeqCst) != seq {
-                    return;
-                }
-                if let Some(window) = app.get_webview_window(LABEL) {
-                    let _ = window.hide();
-                }
-            });
-        });
+        }
+        hooks
+    }
+
+    unsafe extern "system" fn win_event_proc(
+        _hook: HWINEVENTHOOK,
+        event: u32,
+        hwnd: HWND,
+        id_object: i32,
+        id_child: i32,
+        _thread: u32,
+        _time: u32,
+    ) {
+        if event >= EVENT_OBJECT_DESTROY
+            && (id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32)
+        {
+            return;
+        }
+        if event == EVENT_OBJECT_LOCATIONCHANGE && unsafe { GetForegroundWindow() } != hwnd {
+            return;
+        }
+        if !WINDOW_PENDING.swap(true, Ordering::AcqRel) {
+            post_message(WINDOW_CHANGED_MESSAGE);
+        }
+    }
+
+    fn install_mouse_hook() -> Option<HHOOK> {
+        let module = match unsafe { GetModuleHandleW(None) } {
+            Ok(module) => module,
+            Err(err) => {
+                log::warn!("[magicx] failed to resolve toolbar hook module: {err}");
+                return None;
+            }
+        };
+        match unsafe {
+            SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(mouse_hook_proc),
+                Some(HINSTANCE(module.0)),
+                0,
+            )
+        } {
+            Ok(hook) => Some(hook),
+            Err(err) => {
+                log::warn!("[magicx] failed to install toolbar mouse hook: {err}");
+                None
+            }
+        }
+    }
+
+    unsafe extern "system" fn mouse_hook_proc(
+        code: i32,
+        w_param: WPARAM,
+        l_param: LPARAM,
+    ) -> LRESULT {
+        if code == HC_ACTION as i32 && w_param.0 as u32 == WM_MOUSEMOVE {
+            // SAFETY: Windows supplies an `MSLLHOOKSTRUCT` for `WH_MOUSE_LL`
+            // callbacks while this function is executing.
+            let point = unsafe { (*(l_param.0 as *const MSLLHOOKSTRUCT)).pt };
+            CURSOR_X.store(point.x, Ordering::Release);
+            CURSOR_Y.store(point.y, Ordering::Release);
+            if !CURSOR_PENDING.swap(true, Ordering::AcqRel) {
+                post_message(CURSOR_MOVED_MESSAGE);
+            }
+        }
+        unsafe { CallNextHookEx(None, code, w_param, l_param) }
     }
 }
 

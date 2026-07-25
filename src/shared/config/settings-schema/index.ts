@@ -21,7 +21,7 @@ export const appearanceSettingsSchema = z.object({
 export const generalSettingsSchema = z.object({
 	/** Launch the app when the user logs in. */
 	autostart: z.boolean().catch(false).default(false),
-	/** Keep running in the tray when the main window closes. */
+	/** Keep running in the tray when the app window closes. */
 	minimizeToTray: z.boolean().catch(true).default(true),
 });
 
@@ -40,8 +40,9 @@ const accelerator = z
 export const hotkeysSettingsSchema = z.object({
 	/**
 	 * Global accelerator (Tauri token format, e.g. "Ctrl+Shift+Space") that
-	 * toggles main-window visibility. "" = unbound. Stored trimmed (the Rust
-	 * side normalizes too).
+	 * toggles the APP window's visibility. "" = unbound. Stored trimmed (the
+	 * Rust side normalizes too). The key predates the removal of the separate
+	 * `main` window and is kept so persisted bindings survive.
 	 */
 	toggleMain: accelerator,
 	/** Raise brightness one step. Effect wired by the hotkeys-actions agent. */
@@ -171,7 +172,7 @@ export const displaySettingsSchema = z.object({
 	smoothTransition: z.boolean().catch(true).default(true),
 	/** Apply one value to every monitor; when off, use `monitorOverrides`. */
 	syncMonitors: z.boolean().catch(true).default(true),
-	/** Per-monitor overrides keyed by GDI device name (`\\.\DISPLAY1`). */
+	/** Per-monitor overrides keyed by the native backend's durable display id. */
 	monitorOverrides: z
 		.record(z.string(), monitorOverrideSchema)
 		.catch({})

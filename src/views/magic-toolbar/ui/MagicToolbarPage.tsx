@@ -15,7 +15,7 @@ import {
 	toggleDark,
 	toggleGray,
 } from "@/features/magicx";
-import { hasNativeRuntime, subscribeNativeEvent } from "@/shared/api";
+import { hasNativeRuntime, subscribeNativeEventPair } from "@/shared/api";
 import { cn } from "@/shared/lib/cn";
 import { GLASS_SURFACE } from "@/shared/ui/glass-pill";
 import { springs } from "@/shared/lib/springs";
@@ -65,7 +65,7 @@ function EffectButton({
  * is transparent, always-on-top and non-activating (clickable without stealing
  * focus). Its visibility + target effect flags follow the `magictoolbar:show` /
  * `magictoolbar:hide` events; the buttons drive `magicx_toggle_effect` /
- * `magicx_clear_target`, and the backend re-asserts the true flags each tick.
+ * `magicx_clear_target`; backend callbacks push authoritative flag changes.
  */
 export function MagicToolbarPage() {
 	// The OS window is fully transparent — html/body must be too.
@@ -83,16 +83,17 @@ export function MagicToolbarPage() {
 		if (!hasNativeRuntime()) {
 			return;
 		}
-		const offShow = subscribeNativeEvent(events.magictoolbarShow, (event) => {
-			setState(onShow(event.payload.targetDark, event.payload.targetGray));
-		});
-		const offHide = subscribeNativeEvent(events.magictoolbarHide, () => {
-			setState((prev) => onHide(prev));
-		});
-		return () => {
-			offShow();
-			offHide();
-		};
+		return subscribeNativeEventPair(
+			events.magictoolbarShow,
+			(event) => {
+				setState(onShow(event.payload.targetDark, event.payload.targetGray));
+			},
+			events.magictoolbarHide,
+			() => {
+				setState((prev) => onHide(prev));
+			},
+			() => commands.magictoolbarRendererReady(),
+		);
 	}, []);
 
 	const handleDark = () => {
@@ -110,7 +111,11 @@ export function MagicToolbarPage() {
 
 	return (
 		<div className="flex h-dvh w-dvw items-center justify-center overflow-hidden">
-			<AnimatePresence>
+			<AnimatePresence
+				onExitComplete={() =>
+					runCommand(() => commands.magictoolbarHideComplete())
+				}
+			>
 				{state.visible ? (
 					<motion.div
 						animate={{ opacity: 1, y: 0, scale: 1 }}

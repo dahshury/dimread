@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { commands } from "@/bindings";
 import { usePickerSelectionSync } from "@/entities/picker-selection";
+import { hasNativeRuntime } from "@/shared/api";
 import { cn } from "@/shared/lib/cn";
 import { useEscapeToClose } from "@/shared/lib/window-effects";
 import { panelOrigin } from "../lib/panel-math";
@@ -7,8 +9,8 @@ import { usePanelRect } from "../model/use-panel-rect";
 import { PICKER_INLINE_LIST_SLOT, PickerPanel } from "./PickerPanel";
 
 function close(): void {
-	// Routes through the Rust animated close (emits picker:closing, hides
-	// after the fade grace) — never a bare webview hide.
+	// Routes through the Rust animated close; the renderer acknowledges the
+	// actual dropdown-out completion before the native window hides.
 	void commands.closeSelfWindow();
 }
 
@@ -26,12 +28,47 @@ function isInlinePanelList(element: HTMLElement): boolean {
  * and honoring `picker:closing`.
  */
 export function PickerPage() {
+	useEffect(() => {
+		if (!hasNativeRuntime()) {
+			return;
+		}
+		let disposed = false;
+		let firstFrame: number | null = null;
+		let secondFrame: number | null = null;
+
+		void commands.pickerCompositorWarmupStart().then((sequence) => {
+			if (disposed || sequence === null) {
+				return;
+			}
+			firstFrame = requestAnimationFrame(() => {
+				firstFrame = null;
+				secondFrame = requestAnimationFrame(() => {
+					secondFrame = null;
+					if (!disposed) {
+						void commands.pickerCompositorWarmupComplete(sequence);
+					}
+				});
+			});
+		});
+
+		return () => {
+			disposed = true;
+			if (firstFrame !== null) {
+				cancelAnimationFrame(firstFrame);
+			}
+			if (secondFrame !== null) {
+				cancelAnimationFrame(secondFrame);
+			}
+		};
+	}, []);
+
 	// This window both edits and displays the selection; stay in sync with
 	// changes made elsewhere too.
 	usePickerSelectionSync();
 	const {
 		dropdownStateClass,
 		openGeneration,
+		onPanelAnimationEnd,
 		panelInteractive,
 		panelRevealed,
 		warmPanel,
@@ -53,6 +90,7 @@ export function PickerPage() {
 			<div
 				className={cn("t-dropdown absolute flex flex-col", dropdownStateClass)}
 				data-origin={panelOrigin(warmPanel, viewportHeight)}
+				onAnimationEnd={onPanelAnimationEnd}
 				style={{
 					left: warmPanel.x,
 					top: warmPanel.y,

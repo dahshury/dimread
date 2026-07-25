@@ -25,12 +25,6 @@
     "noResults": "No results found.",
     "retry": "Retry"
   },
-  "titleBar": {
-    "appName": "DimRead",
-    "openSettings": "Settings",
-    "minimize": "Minimize",
-    "close": "Close"
-  },
   "mainPage": {
     "title": "DimRead",
     "wordmarkTag": "v0.1",
@@ -90,7 +84,7 @@
     "generalAutostart": "Start at login",
     "generalAutostartCaption": "Register the app to launch when you sign in.",
     "generalMinimizeToTray": "Minimize to tray",
-    "generalMinimizeToTrayCaption": "Closing the main window hides it to the tray instead of quitting.",
+    "generalMinimizeToTrayCaption": "Closing the DimRead window hides it to the tray instead of quitting.",
     "about": "About",
     "aboutTooltip": "App identity, links, and credits.",
     "aboutApp": "Application",
@@ -502,8 +496,8 @@
   },
   "hotkeys": {
     "sectionTitle": "Shortcuts",
-    "toggleMainLabel": "Toggle main window",
-    "toggleMainCaption": "Global shortcut that shows or hides the main window — it works while any app has focus.",
+    "toggleMainLabel": "Show / hide DimRead",
+    "toggleMainCaption": "Global shortcut that shows or hides the DimRead window — it works while any app has focus.",
     "clear": "Clear shortcut",
     "pressKeys": "Press keys…",
     "record": "Record shortcut",
@@ -559,6 +553,7 @@
   "displayTab": {
     "title": "Display",
     "subtitle": "Tune blue-light filtering, brightness and colour temperature.",
+    "quickControlsSectionTitle": "Quick controls",
     "temperature": "Colour temperature",
     "warm": "Warm",
     "cool": "Cool",
@@ -614,6 +609,7 @@
     "modeEditingDesc": "Inverts screen colours for low-light reading and editing.",
     "modeReadingName": "Reading",
     "modeReadingDesc": "Full-screen grayscale, like e-ink, for distraction-free reading.",
+    "modeReadingGrayscaleUnavailable": "Reading temperature and brightness are active, but full-screen grayscale is unavailable on this display backend.",
     "modeCustomName": "Custom",
     "modeCustomDesc": "Your own colour temperature and brightness.",
     "timeSource": "Time source",
@@ -709,7 +705,6 @@
     "modeCustom": "Custom"
   },
   "trayMenu": {
-    "show": "Show DimRead",
     "settings": "Settings",
     "quit": "Quit"
   },

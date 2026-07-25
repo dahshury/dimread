@@ -236,7 +236,9 @@ export function MagicWindowPanel() {
 											onClick={() => clearHotkey(id)}
 											tooltip={tHotkeys("clear")}
 										/>
-									) : null}
+									) : (
+										<span aria-hidden className="size-7 shrink-0" />
+									)}
 								</div>
 							}
 							layout="row"

@@ -1,8 +1,8 @@
 {
   "acknowledgedReviews": [
     {
-      "subject": "widgets/title-bar",
-      "reason": "Window chrome (drag strip + app name + settings/minimize/close) is app-shell identity: kept standalone so the main shell and any frameless window reuse it without touching the page."
+      "subject": "widgets/quick-controls",
+      "reason": "The live display controls (monitor strip, K/% readout, temperature + brightness sliders, auto day/night, the eight preset modes) kept standalone: Settings → Display is its only consumer today, but this block IS the removed main window, and the tray flyout renders the same controls off the same features/display seam — a reusable composite, not a page detail."
     },
     {
       "subject": "features/download-manager",
@@ -10,19 +10,19 @@
     },
     {
       "subject": "features/rules",
-      "reason": "Per-app rules feature (pure rule-model, running-window picker, add/edit dialog, i18n labels) kept standalone: the main-window Options tab is its only consumer today, but it is a self-contained slice reusable by any window (e.g. a future settings-window rules pane) and independently unit-tested — not folded into the page."
+      "reason": "Per-app rules feature (pure rule-model, running-window picker, add/edit dialog, i18n labels) kept standalone: the settings window's Rules panel is its only consumer today, but it is a self-contained slice reusable by any window and independently unit-tested — not folded into the page."
     },
     {
       "subject": "features/display",
-      "reason": "Display control feature (value/patch logic, settings persistence, live-preview driver, monitor + engine-state hooks) kept standalone: the main-window Display panel is its only consumer today, but it is a reusable slice the tray and hotkey actions drive independently — not folded into the page."
+      "reason": "Display control feature (value/patch logic, settings persistence, live-preview driver, monitor + engine-state hooks) kept standalone: three independent surfaces drive it — the quick-controls widget, the tray flyout and the Rust hotkey actions — so it belongs to none of them."
     },
     {
       "subject": "features/hotkey-actions",
-      "reason": "Display hotkey-action catalogue + pure hotkey-patch/validation logic kept standalone: the main-window Options→Hotkeys section is its only frontend consumer today, but the action ids are the shared contract with the Rust registry (armed from settings, fired via hotkey:triggered) and the slice is independently unit-tested — not folded into the page."
+      "reason": "Display hotkey-action catalogue + pure hotkey-patch/validation logic kept standalone: the settings window's Hotkeys panel is its only frontend consumer today, but the action ids are the shared contract with the Rust registry (armed from settings, fired via hotkey:triggered) and the slice is independently unit-tested — not folded into the page."
     },
     {
       "subject": "features/auto-dark",
-      "reason": "Auto Dark feature (autoDark settings persistence through the shared serialized save coordinator) kept standalone: the main-window MagicX → Auto Dark section is its only consumer today, but it is a reusable slice owning the frontend save path for the magicx::theme backend scheduler (Windows app/system theme + taskbar transparency) — paralleling features/display, not folded into the page."
+      "reason": "Auto Dark feature (autoDark settings persistence through the shared serialized save coordinator) kept standalone: the settings window's Auto Dark panel is its only consumer today, but it is a reusable slice owning the frontend save path for the magicx::theme backend scheduler (Windows app/system theme + taskbar transparency) — paralleling features/display, not folded into the page."
     },
     {
       "subject": "entities/picker-selection",

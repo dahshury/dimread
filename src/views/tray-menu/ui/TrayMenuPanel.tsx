@@ -1,8 +1,4 @@
-import {
-	Cancel01Icon,
-	ComputerIcon,
-	Settings01Icon,
-} from "@hugeicons/core-free-icons";
+import { Cancel01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import type { ReactNode } from "react";
 import { useTranslations } from "use-intl";
@@ -134,6 +130,8 @@ export function TrayMenuPanel() {
 
 	const activeMode =
 		DISPLAY_MODES.find((entry) => entry.id === mode) ?? DISPLAY_MODES[0];
+	const readingDegraded =
+		mode === "reading" && state?.grayscaleApplied === false;
 
 	return (
 		// The 2px gutter + the outer rounding clip exist because the OS window is
@@ -211,7 +209,11 @@ export function TrayMenuPanel() {
 								)}
 								key={entry.id}
 								onClick={() => void handleSelectMode(entry.id)}
-								title={t(entry.descKey)}
+								title={
+									entry.id === "reading" && readingDegraded
+										? t("modeReadingGrayscaleUnavailable")
+										: t(entry.descKey)
+								}
 								type="button"
 							>
 								<HugeiconsIcon aria-hidden="true" icon={entry.icon} size={16} />
@@ -223,12 +225,10 @@ export function TrayMenuPanel() {
 
 				<Divider />
 
+				{/* Two rows, not three: there is no separate main window to "Show"
+				    any more — Settings IS the app window, and a plain LEFT click on
+				    the tray icon already surfaces it. */}
 				<div className="flex flex-col gap-0.5 p-1.5">
-					<MenuRow
-						icon={ComputerIcon}
-						label={tTray("show")}
-						onClick={() => runAndClose(() => commands.showMainWindow())}
-					/>
 					<MenuRow
 						icon={Settings01Icon}
 						label={tTray("settings")}

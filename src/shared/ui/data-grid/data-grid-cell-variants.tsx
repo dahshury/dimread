@@ -258,7 +258,6 @@ export function LongTextCell<TData>({
 	};
 
 	const onCancel = () => {
-		// Restore the original value
 		setValue(initialValue ?? "");
 		if (!readOnly) {
 			tableMeta?.onDataUpdate?.({ rowIndex, columnId, value: initialValue });

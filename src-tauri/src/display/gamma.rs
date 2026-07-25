@@ -11,10 +11,9 @@
 //!   2. a brightness factor `0.0..=1.0` scales every channel,
 //!   3. an `invert` flag mirrors the LUT (`out = max - out`) for Editing mode.
 //!
-//! The Win32 I/O ([`read_ramp`] / [`apply_ramp`]) opens a device context on the
-//! GDI device name (`\\.\DISPLAY1`) and calls `Get`/`SetDeviceGammaRamp`. The
-//! engine snapshots each monitor's original ramp at startup and restores it on
-//! exit / pause.
+//! Native I/O ([`read_ramp`] / [`apply_ramp`]) uses GDI on Windows,
+//! CoreGraphics on macOS, and RandR on Linux/X11. The engine snapshots each
+//! monitor's original ramp at startup and restores it on exit / pause.
 
 /// Three 256-entry channel LUTs: `[R, G, B]`, each `[u16; 256]`. Wire-compatible
 /// with the `WORD ramp[3][256]` buffer `Get`/`SetDeviceGammaRamp` expect.
@@ -108,29 +107,71 @@ pub fn identity() -> GammaRamp {
     ramp
 }
 
-/// Read a monitor's current gamma ramp (`None` if the device context or
-/// `GetDeviceGammaRamp` fails, or off-Windows).
+/// Read a monitor's current gamma ramp (`None` if the native display handle or
+/// platform API call fails).
 #[cfg(windows)]
 pub fn read_ramp(device: &str) -> Option<GammaRamp> {
     windows_impl::read_ramp(device)
 }
 
-/// Apply a gamma ramp to a monitor. Returns `true` on success (always `false`
-/// off-Windows).
+#[cfg(target_os = "macos")]
+pub fn read_ramp(device: &str) -> Option<GammaRamp> {
+    super::macos::read_ramp(device)
+}
+
+#[cfg(target_os = "linux")]
+pub fn read_ramp(device: &str) -> Option<GammaRamp> {
+    super::linux::read_ramp(device)
+}
+
+/// Apply a gamma ramp to a monitor. Returns `true` only when the native API
+/// accepted the write.
 #[cfg(windows)]
 pub fn apply_ramp(device: &str, ramp: &GammaRamp) -> bool {
     windows_impl::apply_ramp(device, ramp)
 }
 
-#[cfg(not(windows))]
-pub fn read_ramp(_device: &str) -> Option<GammaRamp> {
-    None
+#[cfg(target_os = "macos")]
+pub fn apply_ramp(device: &str, ramp: &GammaRamp) -> bool {
+    super::macos::apply_ramp(device, ramp)
 }
 
-#[cfg(not(windows))]
-pub fn apply_ramp(_device: &str, _ramp: &GammaRamp) -> bool {
+#[cfg(target_os = "linux")]
+pub fn apply_ramp(device: &str, ramp: &GammaRamp) -> bool {
+    super::linux::apply_ramp(device, ramp)
+}
+
+/// Whether restoring this output means releasing a compositor-owned control
+/// rather than writing a captured LUT back.
+#[cfg(target_os = "linux")]
+pub fn compositor_managed(device: &str) -> bool {
+    super::linux::compositor_managed(device)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn compositor_managed(_device: &str) -> bool {
     false
 }
+
+/// Restore a compositor-managed output to the state captured by its compositor.
+#[cfg(target_os = "linux")]
+pub fn release_ramp(device: &str) -> bool {
+    super::linux::release_ramp(device)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn release_ramp(_device: &str) -> bool {
+    false
+}
+
+/// Forget backend-local restoration state after a display disconnects.
+#[cfg(target_os = "linux")]
+pub fn forget_device(device: &str) {
+    super::linux::forget_device(device);
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn forget_device(_device: &str) {}
 
 #[cfg(windows)]
 mod windows_impl {

@@ -45,6 +45,7 @@ function Motion({ children }: { children: ReactNode }) {
  *  SWITCH, keep it to model the same window moving. */
 function anchor(over: Partial<FocusAnchorEvent> = {}): FocusAnchorEvent {
 	return {
+		sequence: 1,
 		windowId: 1,
 		x: 100,
 		y: 200,
@@ -73,8 +74,17 @@ describe("FocusBlurShade", () => {
 		// defaults (onlyCurrentMonitor: false) in effect — exactly the mode under
 		// test.
 		(
-			window as unknown as { __TAURI_INTERNALS__?: unknown }
-		).__TAURI_INTERNALS__ = {};
+			window as unknown as {
+				__TAURI_INTERNALS__?: { invoke: (command: string) => Promise<unknown> };
+			}
+		).__TAURI_INTERNALS__ = {
+			invoke: (command) => {
+				if (command === "focus_blur_anchor_snapshot") {
+					return Promise.resolve(null);
+				}
+				return Promise.reject(new Error(`unhandled test command: ${command}`));
+			},
+		};
 	});
 
 	afterEach(() => {
@@ -165,7 +175,7 @@ describe("FocusBlurShade", () => {
 		// itself perceived as lag, so a move must land on the new position in the
 		// same frame rather than easing toward it.
 		const { container } = await renderWithAnchor(anchor({ x: 100, y: 200 }));
-		await emitAnchor(anchor({ x: 700, y: 500 }));
+		await emitAnchor(anchor({ sequence: 2, x: 700, y: 500 }));
 		expect(cutoutTransform(container)).toContain("700px");
 		expect(cutoutTransform(container)).toContain("500px");
 	});
@@ -176,7 +186,16 @@ describe("FocusBlurShade", () => {
 		const { container } = await renderWithAnchor(
 			anchor({ windowId: 1, x: 100, y: 200 }),
 		);
-		await emitAnchor(anchor({ windowId: 2, x: 700, y: 500 }));
+		await emitAnchor(anchor({ sequence: 2, windowId: 2, x: 700, y: 500 }));
 		expect(cutoutTransform(container)).not.toContain("700px");
+	});
+
+	test("ignores a stale snapshot/event after a newer live anchor", async () => {
+		const { container } = await renderWithAnchor(
+			anchor({ sequence: 10, x: 700, y: 500 }),
+		);
+		await emitAnchor(anchor({ sequence: 9, x: 100, y: 200 }));
+		expect(cutoutTransform(container)).toContain("700px");
+		expect(cutoutTransform(container)).toContain("500px");
 	});
 });

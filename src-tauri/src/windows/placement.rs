@@ -4,9 +4,10 @@
 //! the pure `compute_*` panel math, and the placement/close paths that anchor
 //! the transparent picker. Ported from WinSTT's placement module.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize};
+use specta::Type;
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize};
 use tauri_specta::Event;
 
@@ -15,11 +16,13 @@ use crate::events::{PickerAnchorEvent, PickerClosingEvent};
 
 // ── Picker placement sequencing ─────────────────────────────────────────────
 
-/// Monotonic open/close counter for the picker. Every open and every hide
-/// bumps it; the delayed re-emits and the delayed hide capture the value at
-/// schedule time and only fire while it's still current — so a close (or a
-/// reopen at a new anchor) during the wait invalidates stale work.
+/// Monotonic open/close counter for the one-time compositor warmup. A real
+/// open invalidates the warmup's eventual hide.
 static PICKER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The renderer-driven compositor warmup runs once per process. Its completion
+/// carries the captured picker sequence so a real open can supersede it.
+static PICKER_WARMUP_STARTED: AtomicBool = AtomicBool::new(false);
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -29,18 +32,6 @@ static PICKER_SEQ: AtomicU64 = AtomicU64::new(0);
 const TASKBAR_MARGIN: f64 = 8.0;
 /// Gap between the popup's edge and the trigger that opened it.
 const ANCHOR_GAP: f64 = 6.0;
-/// How long after the close starts the OS window is actually hidden. MUST stay
-/// longer than the renderer's close fade so the fully-faded (transparent)
-/// frame is composited BEFORE the hide: WebView2 re-presents the last
-/// composited frame when the window is next shown, and if that frame still
-/// holds the visible panel it flashes at the PREVIOUS trigger's position on
-/// the next open. The window ignores cursor events for this whole grace, so
-/// the extra invisible backdrop cannot swallow clicks.
-const PICKER_HIDE_DELAY_MS: u64 = 260;
-/// First-open / long-idle race: the renderer's listener may not have
-/// registered (or a hidden webview needs a beat after show), so the anchor is
-/// re-emitted at these offsets. Duplicate anchors are cheap and idempotent.
-const PICKER_ANCHOR_REEMIT_MS: &[u64] = &[75, 250, 700];
 /// Smallest usable picker panel height before we pin it to the screen top.
 const PICKER_MIN_HEIGHT: f64 = 160.0;
 
@@ -134,17 +125,22 @@ fn client_origin_logical(window: &tauri::WebviewWindow) -> (f64, f64) {
 
 // ── Centering (plain windows) ───────────────────────────────────────────────
 
-/// Center `window` over the main window if it's visible (and `center_on_main`),
-/// else on the primary display work area. Frameless windows have no titlebar
-/// to drag them back, so the result is clamped fully on-screen.
-pub(crate) fn center_window(app: &AppHandle, window: &tauri::WebviewWindow, center_on_main: bool) {
+/// Center `window` over the app window if it's visible (and
+/// `center_on_primary`), else on the primary display work area. Frameless
+/// windows have no titlebar to drag them back, so the result is clamped fully
+/// on-screen.
+pub(crate) fn center_window(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    center_on_primary: bool,
+) {
     let scale = window.scale_factor().unwrap_or(1.0);
     let (w, h) = window.inner_size().map_or((900.0, 640.0), |s| {
         (s.width as f64 / scale, s.height as f64 / scale)
     });
 
-    if center_on_main
-        && let Some(main) = app.get_webview_window("main")
+    if center_on_primary
+        && let Some(main) = app.get_webview_window(crate::windows::PRIMARY_WINDOW)
         && main.is_visible().unwrap_or(false)
     {
         let mscale = main.scale_factor().unwrap_or(1.0);
@@ -242,11 +238,11 @@ fn compute_panel(
 // ── Picker lifecycle ────────────────────────────────────────────────────────
 
 pub(crate) fn close_picker_with_animation(app: &AppHandle, window: &tauri::WebviewWindow) {
-    let seq = PICKER_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    // Mark the grace so nothing re-places (and thereby re-shows) the
-    // still-visible window before the delayed hide lands. Cleared on the next
-    // anchored open.
-    with_picker_state(|s| s.closing = true);
+    PICKER_SEQ.fetch_add(1, Ordering::SeqCst);
+    with_picker_state(|s| {
+        s.closing = true;
+        s.current_panel = None;
+    });
     if let Err(err) = (PickerClosingEvent {}).emit(app) {
         log::warn!("failed to emit picker:closing: {err}");
     }
@@ -255,57 +251,82 @@ pub(crate) fn close_picker_with_animation(app: &AppHandle, window: &tauri::Webvi
     // plays and the transparent post-fade frame is composited. Re-enabled on
     // the next open.
     let _ = window.set_ignore_cursor_events(true);
+}
 
-    let app2 = app.clone();
-    let window2 = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(PICKER_HIDE_DELAY_MS));
-        if PICKER_SEQ.load(Ordering::SeqCst) != seq {
-            return;
+/// Latest panel rect for a race-free subscribe-then-snapshot handshake.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PickerLifecycleSnapshot {
+    #[specta(optional)]
+    anchor: Option<PickerAnchorEvent>,
+    closing: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn picker_anchor_snapshot() -> PickerLifecycleSnapshot {
+    with_picker_state(|state| PickerLifecycleSnapshot {
+        anchor: state.current_panel,
+        closing: state.closing,
+    })
+}
+
+/// Renderer acknowledgement that the dropdown's real CSS exit completed.
+/// A new open clears `closing`, so a late callback cannot hide its window.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn picker_hide_complete(app: AppHandle) {
+    let should_hide = with_picker_state(|state| {
+        if !state.closing {
+            return false;
         }
-        let _ = app2.run_on_main_thread(move || {
-            if PICKER_SEQ.load(Ordering::SeqCst) != seq {
-                return;
-            }
-            let _ = window2.hide();
-            with_picker_state(|s| {
-                s.anchor = None;
-                s.closing = false;
-            });
-        });
+        state.anchor = None;
+        state.current_panel = None;
+        state.closing = false;
+        true
     });
+    if should_hide && let Some(window) = app.get_webview_window("picker") {
+        let _ = window.hide();
+    }
 }
 
 /// Where the picker is parked for its startup compositor warmup — far enough
 /// off-screen that the seed window can never peek into the desktop.
 const PICKER_WARMUP_PARK: f64 = -9999.0;
-/// How long the warmup keeps the window shown off-screen. Long enough for
-/// WebView2 to create its composition surface and present a few frames.
-const PICKER_WARMUP_MS: u64 = 800;
 
-/// One-time compositor warmup at startup. The picker window is pre-CREATED
-/// hidden, but WebView2 only builds its composition surface on the first
-/// show — so the FIRST user open would pay a several-hundred-ms cold-composite
-/// during which the whole open animation elapses invisibly. Show the window
-/// once, parked off-screen and non-focusable, then hide it again so the first
-/// real open behaves like every subsequent one.
-pub(crate) fn warm_picker_compositor(app: &AppHandle, window: &tauri::WebviewWindow) {
+/// Begin the one-time compositor warmup after the picker renderer mounts.
+/// The renderer waits for real animation-frame callbacks before acknowledging
+/// completion, replacing the old arbitrary 800 ms sleep.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn picker_compositor_warmup_start(app: AppHandle) -> Option<u64> {
+    if PICKER_WARMUP_STARTED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let window = app.get_webview_window("picker")?;
+    if with_picker_state(|state| state.anchor.is_some() || state.current_panel.is_some()) {
+        return None;
+    }
     let seq = PICKER_SEQ.load(Ordering::SeqCst);
     let _ = window.set_focusable(false);
     let _ = window.set_position(LogicalPosition::new(PICKER_WARMUP_PARK, PICKER_WARMUP_PARK));
     let _ = window.show();
-    let app2 = app.clone();
-    let window2 = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(PICKER_WARMUP_MS));
-        let _ = app2.run_on_main_thread(move || {
-            let _ = window2.set_focusable(true);
-            // A real open landed during the warmup — the window is theirs now.
-            if PICKER_SEQ.load(Ordering::SeqCst) == seq {
-                let _ = window2.hide();
-            }
-        });
-    });
+    Some(seq)
+}
+
+/// Renderer acknowledgement that the off-screen picker has received actual
+/// animation frames. A real open increments [`PICKER_SEQ`] and therefore owns
+/// the window; a late warmup completion cannot hide it.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn picker_compositor_warmup_complete(app: AppHandle, sequence: u64) {
+    let Some(window) = app.get_webview_window("picker") else {
+        return;
+    };
+    let _ = window.set_focusable(true);
+    if PICKER_SEQ.load(Ordering::SeqCst) == sequence {
+        let _ = window.hide();
+    }
 }
 
 /// Place + show the picker: the window fills the display work area as a
@@ -324,7 +345,7 @@ pub(crate) fn place_picker(app: &AppHandle, window: &tauri::WebviewWindow) {
     };
     // Treat open as a repair/re-anchor operation. This cancels any delayed
     // hide from a close animation before it can race a fresh click.
-    let seq = PICKER_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    PICKER_SEQ.fetch_add(1, Ordering::SeqCst);
     with_picker_state(|s| s.closing = false);
     let work = work_area_for_point(app, (anchor.screen_left, anchor.screen_top));
     let (work_x, work_y, work_w, work_h) = work;
@@ -348,6 +369,7 @@ pub(crate) fn place_picker(app: &AppHandle, window: &tauri::WebviewWindow) {
         width: panel.width,
         height: panel.height,
     };
+    with_picker_state(|state| state.current_panel = Some(payload));
 
     // A close leaves the backdrop click-through; restore input before showing.
     // The startup compositor warmup leaves the window non-focusable — restore
@@ -361,27 +383,6 @@ pub(crate) fn place_picker(app: &AppHandle, window: &tauri::WebviewWindow) {
     if let Err(err) = payload.emit(app) {
         log::warn!("failed to emit picker:anchor: {err}");
     }
-
-    // First-open and long-idle race: re-emit the anchor a few times. Duplicate
-    // anchors are idempotent; the sequence guard cancels stale retries after a
-    // close or re-open.
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        let started = Instant::now();
-        for delay_ms in PICKER_ANCHOR_REEMIT_MS {
-            let target = Duration::from_millis(*delay_ms);
-            let elapsed = started.elapsed();
-            if target > elapsed {
-                std::thread::sleep(target - elapsed);
-            }
-            if PICKER_SEQ.load(Ordering::SeqCst) != seq {
-                return;
-            }
-            if let Err(err) = payload.emit(&app2) {
-                log::warn!("failed to re-emit picker:anchor: {err}");
-            }
-        }
-    });
 }
 
 /// Convert a trigger rect reported in the OPENER window's viewport coords into
@@ -415,7 +416,7 @@ pub(crate) fn resolve_opener(
     if caller.label() != picker {
         return Some(caller.clone());
     }
-    app.get_webview_window("main")
+    app.get_webview_window(crate::windows::PRIMARY_WINDOW)
 }
 
 #[cfg(test)]

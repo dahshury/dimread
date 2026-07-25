@@ -5,19 +5,31 @@
 //! composition time. We feed it a luminance matrix to render everything in
 //! grayscale (e-ink-like Reading mode) and the identity matrix to clear it.
 //!
-//! This is best-effort: if `MagInitialize` fails (API unavailable, session 0,
-//! etc.) we log once and no-op — grayscale simply doesn't engage, and the rest
-//! of the display pipeline (gamma) is unaffected. Non-Windows targets no-op.
+//! This is best-effort: failures are reported to the engine so its live state
+//! never claims grayscale was applied when it was not. macOS and Linux do not
+//! expose a reliable public compositor-wide colour-matrix API; Reading mode
+//! still applies its gamma preset there and reports the missing grayscale
+//! capability explicitly.
 
-/// Enable or disable full-screen grayscale. Idempotent; failures are swallowed
-/// (logged once) so a missing Magnification API never breaks the engine.
+/// Enable or disable full-screen grayscale. Returns whether the requested state
+/// is in effect.
 #[cfg(windows)]
-pub fn set_enabled(enabled: bool) {
-    windows_impl::set_enabled(enabled);
+pub fn set_enabled(enabled: bool) -> bool {
+    windows_impl::set_enabled(enabled)
 }
 
 #[cfg(not(windows))]
-pub fn set_enabled(_enabled: bool) {}
+pub fn set_enabled(enabled: bool) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if enabled && !WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "[grayscale] this platform has no reliable public full-screen colour-matrix API; Reading mode is running without grayscale"
+        );
+    }
+    !enabled
+}
 
 /// Clear the effect regardless of what this process believes is applied.
 ///
@@ -27,12 +39,14 @@ pub fn set_enabled(_enabled: bool) {}
 /// grayscale, so `set_enabled(false)` would no-op. This writes the identity
 /// matrix unconditionally.
 #[cfg(windows)]
-pub fn force_clear() {
-    windows_impl::force_clear();
+pub fn force_clear() -> bool {
+    windows_impl::force_clear()
 }
 
 #[cfg(not(windows))]
-pub fn force_clear() {}
+pub fn force_clear() -> bool {
+    true
+}
 
 #[cfg(windows)]
 mod windows_impl {
@@ -87,26 +101,28 @@ mod windows_impl {
         }
     }
 
-    pub fn force_clear() {
+    pub fn force_clear() -> bool {
         if !ensure_initialized() {
-            return;
+            return false;
         }
         // SAFETY: `IDENTITY` is a valid MAGCOLOREFFECT for the duration of the
         // call; MagSetFullscreenColorEffect copies it.
         let ok = unsafe { MagSetFullscreenColorEffect(&IDENTITY) };
         if ok.as_bool() {
             ACTIVE.store(false, Ordering::SeqCst);
+            true
         } else {
             log::warn!("[grayscale] force_clear: MagSetFullscreenColorEffect failed");
+            false
         }
     }
 
-    pub fn set_enabled(enabled: bool) {
+    pub fn set_enabled(enabled: bool) -> bool {
         if enabled == ACTIVE.load(Ordering::SeqCst) {
-            return;
+            return true;
         }
         if !ensure_initialized() {
-            return;
+            return false;
         }
         let effect = if enabled { &GRAYSCALE } else { &IDENTITY };
         // SAFETY: `effect` is a valid MAGCOLOREFFECT for the duration of the
@@ -114,8 +130,10 @@ mod windows_impl {
         let ok = unsafe { MagSetFullscreenColorEffect(effect) };
         if ok.as_bool() {
             ACTIVE.store(enabled, Ordering::SeqCst);
+            true
         } else {
             log::warn!("[grayscale] MagSetFullscreenColorEffect failed (enabled={enabled})");
+            false
         }
     }
 }

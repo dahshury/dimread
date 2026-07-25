@@ -1,6 +1,6 @@
 //! The display engine — the orchestrator every other display concern funnels
-//! through. This is the STABLE SEAM the phase-2 agents build on; keep the public
-//! function signatures below stable.
+//! through. This is the STABLE SEAM; keep the public function signatures below
+//! stable.
 //!
 //! ## Public API (stable seam)
 //! - [`init`] — capture each monitor's original gamma ramp, then apply the
@@ -8,8 +8,8 @@
 //! - [`refresh`] — recompute the target output from `settings.display` +
 //!   the active rule override + [`scheduler::day_factor`] and apply it to every
 //!   monitor. Call after any settings/override change.
-//! - [`set_rule_override`] — force a mode id (Agent C's rules engine) or clear
-//!   it (`None`); implies a [`refresh`].
+//! - [`set_rule_override`] — force a mode id or clear it (`None`); implies a
+//!   [`refresh`].
 //! - [`current_output`] — the last applied [`DisplayOutput`] (Kelvin / brightness
 //!   percent / mode id / phase) for the UI badge + `display_current`.
 //! - [`preview`] / [`clear_preview`] — live slider-drag: apply raw Kelvin/
@@ -31,9 +31,10 @@
 //! - `settings.display.smooth_transition` animates ramp changes over ~400 ms in a
 //!   worker thread ([`TRANSITION_GEN`] cancels a superseded animation).
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -45,7 +46,8 @@ use super::gamma::{self, GammaRamp};
 use super::grayscale;
 use super::monitors::{self, MonitorInfo};
 use super::scheduler;
-use crate::events::DisplayStateEvent;
+use super::values::DisplayPhase;
+use crate::events::{DisplayStateEvent, DisplayTopologyEvent};
 use crate::settings::{AppSettings, ModePreset};
 
 /// The engine's current output, surfaced to the UI badge, `display_current`, and
@@ -57,6 +59,10 @@ pub struct DisplayOutput {
     pub brightness: u32,
     pub mode: String,
     pub phase: String,
+    /// True only when Reading mode's compositor-wide grayscale matrix was
+    /// successfully installed. Other Reading-mode adjustments may still be
+    /// active when this is false.
+    pub grayscale_applied: bool,
 }
 
 impl Default for DisplayOutput {
@@ -66,6 +72,7 @@ impl Default for DisplayOutput {
             brightness: 100,
             mode: "pause".into(),
             phase: "day".into(),
+            grayscale_applied: false,
         }
     }
 }
@@ -80,14 +87,14 @@ const FALLBACK_PRESET: ModePreset = ModePreset {
 
 struct EngineState {
     app: AppHandle,
-    /// Original ramp per GDI device name, snapshotted at [`init`] and mirrored
-    /// to the [`crate::session_guard`] journal for unclean-shutdown recovery.
+    /// Original ramp per durable native display id, snapshotted at [`init`] and
+    /// mirrored to the [`crate::session_guard`] journal for unclean-shutdown recovery.
     /// `BTreeMap` so the journal it serializes into has a stable key order.
-    originals: BTreeMap<String, GammaRamp>,
+    originals: BTreeMap<String, OriginalRamp>,
     /// Last applied scalar per device (`kelvin`, `brightness_0_1`) — the START of
     /// the next smooth transition.
     applied: HashMap<String, (f64, f64)>,
-    /// Rule-engine forced mode id (Agent C); `None` = follow settings.
+    /// Rule-engine forced mode id; `None` = follow settings.
     rule_override: Option<String>,
     /// True while a full-screen app is foreground and `disable_on_fullscreen` is
     /// set — filtering is suspended (originals restored) until it leaves
@@ -100,13 +107,41 @@ struct EngineState {
     last: DisplayOutput,
 }
 
+#[derive(Clone, Debug)]
+enum OriginalRamp {
+    /// Native APIs where DimRead must write the captured LUT back explicitly.
+    Captured(Box<GammaRamp>),
+    /// Wayland gamma-control: destroying the live control makes the compositor
+    /// restore the exact state it captured when the control was created.
+    CompositorManaged,
+}
+
+fn journal_originals(originals: &BTreeMap<String, OriginalRamp>) -> BTreeMap<String, GammaRamp> {
+    originals
+        .iter()
+        .filter_map(|(device, original)| match original {
+            OriginalRamp::Captured(ramp) => Some((device.clone(), **ramp)),
+            OriginalRamp::CompositorManaged => None,
+        })
+        .collect()
+}
+
 static ENGINE: Mutex<Option<EngineState>> = Mutex::new(None);
 
 /// Monotonic transition generation — bumped on every apply so an in-flight
 /// smooth animation cancels itself when a newer one starts.
 static TRANSITION_GEN: AtomicU64 = AtomicU64::new(0);
 
-/// Serializes every `SetDeviceGammaRamp` write against the smooth-transition
+/// Latched before exit restoration so late scheduler/WinEvent callbacks cannot
+/// start a fresh gamma transition after the original ramps are restored.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Coalescing signal for native hot-plug/reconfiguration callbacks. Native
+/// callbacks must return promptly, so they only enqueue a wake; the worker does
+/// enumeration, original-ramp capture, journalling, and re-application.
+static TOPOLOGY_TX: OnceLock<SyncSender<()>> = OnceLock::new();
+
+/// Serializes every native display-ramp write against the smooth-transition
 /// worker. The generation check alone is check-then-write: the worker could
 /// pass its check, lose the CPU, and land one more dimmed frame AFTER
 /// [`restore_ramps`] put the originals back — on the exit path that strands the
@@ -168,6 +203,10 @@ pub fn init(app: &AppHandle, stale: Option<&crate::session_guard::SessionJournal
     let monitors = monitors::enumerate();
     let mut originals = BTreeMap::new();
     for m in &monitors {
+        if gamma::compositor_managed(&m.id) {
+            originals.insert(m.id.clone(), OriginalRamp::CompositorManaged);
+            continue;
+        }
         let candidate = match stale {
             // Clean boot: whatever is on the device IS the original.
             None => gamma::read_ramp(&m.id).unwrap_or_else(gamma::identity),
@@ -197,19 +236,19 @@ pub fn init(app: &AppHandle, stale: Option<&crate::session_guard::SessionJournal
         if stale.is_some() {
             gamma::apply_ramp(&m.id, &ramp);
         }
-        originals.insert(m.id.clone(), ramp);
+        originals.insert(m.id.clone(), OriginalRamp::Captured(Box::new(ramp)));
     }
     if stale.is_some() {
         // Reading mode's full-screen colour effect is process-scoped, but clear
-        // it unconditionally: it costs one Win32 call and removes any doubt
-        // about whether the Magnification runtime outlived the dead process.
-        grayscale::force_clear();
+        // it unconditionally where supported so a recovered session starts from
+        // a known compositor state.
+        let _ = grayscale::force_clear();
     }
 
     // From here on this process can strand a filter on the display, so publish
     // the originals where the NEXT boot can find them if we never get to run
     // our teardown.
-    crate::session_guard::record_gamma_originals(&originals);
+    crate::session_guard::record_gamma_originals(&journal_originals(&originals));
     {
         let mut guard = ENGINE.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(EngineState {
@@ -226,14 +265,140 @@ pub fn init(app: &AppHandle, stale: Option<&crate::session_guard::SessionJournal
         "[display] engine initialized ({} monitor(s))",
         monitors.len()
     );
+    start_topology_worker();
     refresh();
+}
+
+fn start_topology_worker() {
+    if TOPOLOGY_TX.get().is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    if TOPOLOGY_TX.set(tx).is_err() {
+        return;
+    }
+    if let Err(err) = std::thread::Builder::new()
+        .name("display-topology".into())
+        .spawn(move || {
+            while rx.recv().is_ok() {
+                if SHUTTING_DOWN.load(Ordering::Acquire) {
+                    return;
+                }
+                reconcile_topology();
+            }
+        })
+    {
+        log::warn!("[display] failed to start topology worker: {err}");
+        return;
+    }
+    if !monitors::start_topology_listener(notify_topology_change) {
+        log::warn!("[display] native display-topology listener is unavailable");
+    }
+}
+
+/// Native callbacks call this lightweight seam; duplicate notifications are
+/// coalesced by the capacity-one channel instead of triggering concurrent I/O.
+pub(crate) fn notify_topology_change() {
+    if let Some(tx) = TOPOLOGY_TX.get() {
+        match tx.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => {}
+            Err(TrySendError::Disconnected(())) => {
+                // Resource exhaustion can make the long-lived worker fail to
+                // start. Preserve correctness with a bounded one-shot worker
+                // rather than dropping every future native notification.
+                if let Err(err) = std::thread::Builder::new()
+                    .name("display-topology-fallback".into())
+                    .spawn(reconcile_topology)
+                {
+                    log::warn!("[display] failed to start fallback topology reconcile: {err}");
+                }
+            }
+        }
+    }
+}
+
+fn reconcile_topology() {
+    let monitors = monitors::enumerate();
+    let current_ids: HashSet<String> = monitors.iter().map(|monitor| monitor.id.clone()).collect();
+    let mut originals_changed = false;
+    let mut app = None;
+    let mut journal_snapshot = None;
+
+    with_state(|state| {
+        app = Some(state.app.clone());
+        let _io = lock_ramp_write();
+        TRANSITION_GEN.fetch_add(1, Ordering::SeqCst);
+        state
+            .applied
+            .retain(|device, _| current_ids.contains(device));
+
+        let removed: Vec<String> = state
+            .originals
+            .keys()
+            .filter(|device| !current_ids.contains(*device))
+            .cloned()
+            .collect();
+        for device in removed {
+            state.originals.remove(&device);
+            gamma::forget_device(&device);
+            originals_changed = true;
+        }
+
+        for monitor in &monitors {
+            if state.originals.contains_key(&monitor.id) {
+                continue;
+            }
+            let original = if gamma::compositor_managed(&monitor.id) {
+                OriginalRamp::CompositorManaged
+            } else {
+                OriginalRamp::Captured(Box::new(gamma::read_ramp(&monitor.id).unwrap_or_else(
+                    || {
+                        log::warn!(
+                            "[display] could not capture original ramp for newly connected {}; using identity",
+                            monitor.id
+                        );
+                        gamma::identity()
+                    },
+                )))
+            };
+            state.originals.insert(monitor.id.clone(), original);
+            originals_changed = true;
+        }
+        if originals_changed {
+            journal_snapshot = Some(journal_originals(&state.originals));
+        }
+    });
+
+    if let Some(originals) = journal_snapshot {
+        crate::session_guard::record_gamma_originals(&originals);
+    }
+    if let Some(app) = app {
+        if let Err(err) = DisplayTopologyEvent(monitors).emit(&app) {
+            log::warn!("[display] failed to emit display:topology: {err}");
+        }
+        // Re-apply even for disconnect-only changes so no stale per-monitor
+        // target remains and every connected output reflects current settings.
+        refresh();
+    }
 }
 
 /// Recompute and apply the settings-driven output to every monitor.
 pub fn refresh() {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return;
+    }
     with_state(|state| {
-        // A live preview owns the screen until it is cleared.
+        let phase = scheduler::current_phase();
+        // A live preview owns the gamma output until it is cleared, but the
+        // renderer must still hear a real schedule-boundary phase change. That
+        // lets an implicit transition preview end at sunrise/sunset instead of
+        // pinning the selected endpoint forever.
         if state.previewing {
+            let phase = phase.as_str();
+            if state.last.phase != phase {
+                state.last.phase = phase.to_string();
+                emit_state(&state.app, &state.last);
+            }
             return;
         }
         let settings = crate::settings::store::read_settings(&state.app);
@@ -244,7 +409,6 @@ pub fn refresh() {
             .unwrap_or_else(|| display.mode.clone());
 
         let factor = scheduler::day_factor() as f64;
-        let phase = scheduler::current_phase();
         let monitors = monitors::enumerate();
 
         let preset = preset_for(&settings, &mode);
@@ -261,6 +425,7 @@ pub fn refresh() {
                 brightness: base_brightness.round() as u32,
                 mode,
                 phase: phase.as_str().to_string(),
+                grayscale_applied: false,
             };
             state.last = out.clone();
             emit_state(&state.app, &out);
@@ -276,6 +441,7 @@ pub fn refresh() {
                 brightness: base_brightness.round() as u32,
                 mode,
                 phase: phase.as_str().to_string(),
+                grayscale_applied: false,
             };
             state.last = out.clone();
             emit_state(&state.app, &out);
@@ -330,7 +496,10 @@ pub fn refresh() {
                 .applied
                 .insert(t.device.clone(), (t.to_kelvin, t.to_brightness));
         }
-        grayscale::set_enabled(grayscale_on);
+        let grayscale_applied = grayscale_on && grayscale::set_enabled(true);
+        if !grayscale_on {
+            let _ = grayscale::set_enabled(false);
+        }
         apply_targets(targets, display.smooth_transition);
 
         let out = DisplayOutput {
@@ -338,13 +507,20 @@ pub fn refresh() {
             brightness: base_brightness.round() as u32,
             mode,
             phase: phase.as_str().to_string(),
+            grayscale_applied,
         };
         state.last = out.clone();
         emit_state(&state.app, &out);
     });
 }
 
-/// Force a mode id (Agent C rules) or clear it (`None`); re-applies.
+/// Prevent all future callback-driven refreshes. Called before exit restores
+/// the original monitor ramps; idempotent for the process lifetime.
+pub(crate) fn begin_shutdown() {
+    SHUTTING_DOWN.store(true, Ordering::Release);
+}
+
+/// Force a mode id or clear it (`None`); re-applies.
 pub fn set_rule_override(mode: Option<String>) {
     with_state(|state| state.rule_override = mode);
     refresh();
@@ -352,7 +528,7 @@ pub fn set_rule_override(mode: Option<String>) {
 
 /// Suspend/resume filtering for a foreground full-screen app (FEATURE-PARITY
 /// F1.11), driven by the rules watcher. Only re-applies when the flag actually
-/// flips, so the 700 ms poll doesn't thrash the gamma ramp.
+/// flips, so duplicate native callbacks do not thrash the gamma ramp.
 pub fn set_fullscreen_suspend(suspend: bool) {
     let changed = with_state(|state| {
         if state.fullscreen_suspend == suspend {
@@ -372,16 +548,20 @@ pub fn current_output() -> DisplayOutput {
     with_state(|state| state.last.clone()).unwrap_or_default()
 }
 
-/// Live slider-drag preview: apply raw Kelvin/brightness without persisting.
+/// Live slider-drag preview without persisting.
 ///
 /// Each axis is optional: `None` means "leave that axis at what is currently
-/// APPLIED on each monitor". A drag streams only the axis being dragged —
-/// carrying the renderer's stored value for the other axis would snap the
-/// screen to it whenever it diverges from the applied output (day/night
-/// interpolation mid-transition, per-monitor overrides while editing all
-/// monitors, a rules-forced mode), observed as brightness jumping to 100 %
-/// for the duration of a colour-temperature drag.
-pub fn preview(kelvin: Option<u32>, brightness: Option<u32>, monitor_id: Option<String>) {
+/// APPLIED on each monitor. When `endpoint_phase` is present, supplied values
+/// are day/night ENDPOINT edits and are interpolated through the live schedule
+/// exactly like [`refresh`]. This prevents a raw 100% drag preview from snapping
+/// to (for example) 87% on release during an evening transition. `None` keeps
+/// the deliberate raw off-phase preview used by the Day/Night selector.
+pub fn preview(
+    kelvin: Option<u32>,
+    brightness: Option<u32>,
+    monitor_id: Option<String>,
+    endpoint_phase: Option<DisplayPhase>,
+) {
     with_state(|state| {
         state.previewing = true;
         // Supersede any in-flight smooth-transition animation so it stops
@@ -397,32 +577,109 @@ pub fn preview(kelvin: Option<u32>, brightness: Option<u32>, monitor_id: Option<
             f64::from(state.last.kelvin),
             f64::from(state.last.brightness) / 100.0,
         );
+        let settings = crate::settings::store::read_settings(&state.app);
+        let mode = state
+            .rule_override
+            .as_deref()
+            .unwrap_or(&settings.display.mode);
+        let factor = f64::from(scheduler::day_factor());
+        let invert = mode == "editing";
         let monitors = monitors::enumerate();
+        let mut reported = None;
         for m in &monitors {
             if monitor_id.as_deref().is_some_and(|id| id != m.id) {
                 continue;
             }
             let (applied_kelvin, applied_brightness) =
                 state.applied.get(&m.id).copied().unwrap_or(last_applied);
-            let to_kelvin = kelvin.map_or(applied_kelvin, f64::from);
-            let to_brightness = brightness
-                .map_or(applied_brightness, |b| f64::from(b) / 100.0)
-                .clamp(0.0, 1.0);
-            let ramp = gamma::compose(to_kelvin, to_brightness, false);
+            let (to_kelvin, to_brightness) = endpoint_phase.map_or_else(
+                || {
+                    (
+                        kelvin.map_or(applied_kelvin, f64::from),
+                        brightness.map_or(applied_brightness, |value| f64::from(value) / 100.0),
+                    )
+                },
+                |phase| {
+                    preview_endpoint_output(
+                        preset_for_monitor(&settings, mode, &m.id),
+                        phase,
+                        factor,
+                        kelvin,
+                        brightness,
+                        applied_kelvin,
+                        applied_brightness,
+                    )
+                },
+            );
+            let to_brightness = to_brightness.clamp(0.0, 1.0);
+            let ramp = gamma::compose(to_kelvin, to_brightness, invert);
             gamma::apply_ramp(&m.id, &ramp);
             state
                 .applied
                 .insert(m.id.clone(), (to_kelvin, to_brightness));
+            reported.get_or_insert((to_kelvin, to_brightness));
         }
+        let (reported_kelvin, reported_brightness) = reported.unwrap_or(last_applied);
         let out = DisplayOutput {
-            kelvin: kelvin.unwrap_or(state.last.kelvin),
-            brightness: brightness.unwrap_or(state.last.brightness),
+            kelvin: reported_kelvin.round() as u32,
+            brightness: (reported_brightness * 100.0).round() as u32,
             mode: state.last.mode.clone(),
             phase: state.last.phase.clone(),
+            grayscale_applied: false,
         };
         state.last = out.clone();
         emit_state(&state.app, &out);
     });
+}
+
+fn preset_for_monitor(settings: &AppSettings, mode: &str, monitor_id: &str) -> ModePreset {
+    if settings.display.sync_monitors {
+        return *preset_for(settings, mode);
+    }
+    settings
+        .display
+        .monitor_overrides
+        .get(monitor_id)
+        .map_or_else(ModePreset::default, |override_| ModePreset {
+            kelvin_day: override_.kelvin_day,
+            kelvin_night: override_.kelvin_night,
+            brightness_day: override_.brightness_day,
+            brightness_night: override_.brightness_night,
+        })
+}
+
+fn preview_endpoint_output(
+    mut preset: ModePreset,
+    phase: DisplayPhase,
+    factor: f64,
+    kelvin: Option<u32>,
+    brightness: Option<u32>,
+    applied_kelvin: f64,
+    applied_brightness: f64,
+) -> (f64, f64) {
+    match phase {
+        DisplayPhase::Day => {
+            if let Some(value) = kelvin {
+                preset.kelvin_day = value;
+            }
+            if let Some(value) = brightness {
+                preset.brightness_day = value;
+            }
+        }
+        DisplayPhase::Night => {
+            if let Some(value) = kelvin {
+                preset.kelvin_night = value;
+            }
+            if let Some(value) = brightness {
+                preset.brightness_night = value;
+            }
+        }
+    }
+    let (interpolated_kelvin, interpolated_brightness) = interpolate(&preset, factor);
+    (
+        kelvin.map_or(applied_kelvin, |_| interpolated_kelvin),
+        brightness.map_or(applied_brightness, |_| interpolated_brightness / 100.0),
+    )
 }
 
 /// End a live preview and revert to the settings-driven output.
@@ -450,8 +707,11 @@ fn restore_ramps(state: &mut EngineState) -> bool {
     let _io = lock_ramp_write();
     TRANSITION_GEN.fetch_add(1, Ordering::SeqCst);
     let mut restored = true;
-    for (device, ramp) in &state.originals {
-        restored &= gamma::apply_ramp(device, ramp);
+    for (device, original) in &state.originals {
+        restored &= match original {
+            OriginalRamp::Captured(ramp) => gamma::apply_ramp(device, ramp),
+            OriginalRamp::CompositorManaged => gamma::release_ramp(device),
+        };
         state.applied.remove(device);
     }
     restored
@@ -521,13 +781,20 @@ pub fn display_current() -> DisplayOutput {
     current_output()
 }
 
-/// `display_preview` — live slider-drag: apply raw Kelvin/brightness to one
-/// monitor (or all when `monitor_id` is `None`) without persisting. A `None`
-/// axis keeps that axis at each monitor's currently applied value.
+/// `display_preview` — live slider-drag on one monitor (or all when
+/// `monitor_id` is `None`) without persisting. `endpoint_phase` makes supplied
+/// values follow the same schedule interpolation as their eventual commit;
+/// `None` requests a raw off-phase preview. A `None` axis keeps that axis at
+/// each monitor's currently applied value.
 #[tauri::command]
 #[specta::specta]
-pub fn display_preview(kelvin: Option<u32>, brightness: Option<u32>, monitor_id: Option<String>) {
-    preview(kelvin, brightness, monitor_id);
+pub fn display_preview(
+    kelvin: Option<u32>,
+    brightness: Option<u32>,
+    monitor_id: Option<String>,
+    endpoint_phase: Option<DisplayPhase>,
+) {
+    preview(kelvin, brightness, monitor_id, endpoint_phase);
 }
 
 /// `display_preview_end` — end the live preview and revert to the settings
@@ -565,4 +832,48 @@ pub fn display_set_value(
         clear_preview();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preset() -> ModePreset {
+        ModePreset {
+            kelvin_day: 6500,
+            kelvin_night: 3500,
+            brightness_day: 100,
+            brightness_night: 74,
+        }
+    }
+
+    #[test]
+    fn endpoint_preview_matches_the_output_refresh_will_apply() {
+        let (kelvin, brightness) = preview_endpoint_output(
+            preset(),
+            DisplayPhase::Day,
+            0.5,
+            None,
+            Some(100),
+            5000.0,
+            0.87,
+        );
+        assert_eq!(kelvin, 5000.0, "an untouched axis stays applied");
+        assert_eq!(brightness, 0.87, "100/74 at 50% must preview as 87%");
+    }
+
+    #[test]
+    fn endpoint_preview_interpolates_kelvin_without_moving_brightness() {
+        let (kelvin, brightness) = preview_endpoint_output(
+            preset(),
+            DisplayPhase::Night,
+            0.25,
+            Some(4500),
+            None,
+            5750.0,
+            0.805,
+        );
+        assert_eq!(kelvin, 5000.0);
+        assert_eq!(brightness, 0.805, "an untouched axis stays applied");
+    }
 }

@@ -6,7 +6,13 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { IconSvgElement } from "@hugeicons/react";
-import type { OverlayNotification, OverlayTone } from "@/bindings";
+import { useEffect } from "react";
+import {
+	commands,
+	type OverlayNotification,
+	type OverlayTone,
+} from "@/bindings";
+import { hasNativeRuntime } from "@/shared/api";
 import { useTransparentBody } from "@/shared/lib/window-effects";
 import {
 	DynamicIsland,
@@ -24,6 +30,12 @@ const TONE_PRESENTATION: Record<
 	warning: { icon: Alert02Icon, className: "text-warning" },
 	error: { icon: AlertCircleIcon, className: "text-error" },
 };
+
+function reportOverlayHideComplete(sequence: number): void {
+	if (hasNativeRuntime()) {
+		void commands.overlayHideComplete(sequence);
+	}
+}
 
 function NotificationContent({
 	notification,
@@ -62,16 +74,40 @@ function NotificationContent({
  *
  * Enter/exit is the `t-panel-slide-top` reveal that DynamicIsland applies via
  * its `data-open` wrapper: hidden state = the `empty` (0×0) preset. Rust hides
- * the OS window only after the retract has composited (exit grace).
+ * the renderer reports the actual retract completion before Rust hides the
+ * native window.
  */
 export function OverlayPage() {
 	// The OS window is fully transparent — html/body must be too, or WebView2
 	// paints an opaque page background behind the pill.
 	useTransparentBody();
-	const { notification, visible } = useOverlayNotifications();
+	const { generation, notification, visible } = useOverlayNotifications();
+
+	useEffect(() => {
+		if (
+			generation > 0 &&
+			!visible &&
+			window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+		) {
+			reportOverlayHideComplete(generation);
+		}
+	}, [generation, visible]);
 
 	return (
-		<div className="flex h-dvh items-start justify-center overflow-hidden">
+		<div
+			className="flex h-dvh items-start justify-center overflow-hidden"
+			onTransitionEnd={(event) => {
+				const target = event.target;
+				if (
+					target instanceof HTMLElement &&
+					target.classList.contains("t-panel-slide-top") &&
+					target.dataset["open"] === "false" &&
+					event.propertyName === "transform"
+				) {
+					reportOverlayHideComplete(generation);
+				}
+			}}
+		>
 			<DynamicIslandProvider initialSize="empty">
 				<div aria-live="polite" role="status">
 					<DynamicIsland

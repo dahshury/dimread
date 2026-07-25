@@ -36,6 +36,10 @@ pub(crate) fn restore_system_state() {
     if RESTORED.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Stop callback-driven schedulers/rules from applying a new ramp after the
+    // restore below. In-flight smooth transitions are canceled by restore_all's
+    // generation bump under the ramp-write lock.
+    crate::display::engine::begin_shutdown();
     // ALWAYS put the monitors' original gamma ramps back before we tear down,
     // so a colour/brightness filter never outlives the app.
     let gamma_restored = crate::display::engine::restore_all();

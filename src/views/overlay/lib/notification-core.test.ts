@@ -1,15 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { OverlayNotification } from "@/bindings";
-import {
-	INITIAL_OVERLAY_STATE,
-	overlayReducer,
-	sameNotification,
-} from "./notification-core";
+import { INITIAL_OVERLAY_STATE, overlayReducer } from "./notification-core";
 
 function notification(
 	overrides: Partial<OverlayNotification> = {},
 ): OverlayNotification {
 	return {
+		sequence: 1,
 		title: null,
 		message: "hello",
 		tone: "neutral",
@@ -29,14 +26,18 @@ describe("overlayReducer", () => {
 		expect(next.notification?.message).toBe("hello");
 	});
 
-	it("replaces the visible notification (no queue) and restarts the clock", () => {
+	it("replaces the visible notification (no queue)", () => {
 		const first = overlayReducer(INITIAL_OVERLAY_STATE, {
 			type: "notify",
 			notification: notification(),
 		});
 		const second = overlayReducer(first, {
 			type: "notify",
-			notification: notification({ message: "replaced", tone: "error" }),
+			notification: notification({
+				sequence: 2,
+				message: "replaced",
+				tone: "error",
+			}),
 		});
 		expect(second.visible).toBe(true);
 		expect(second.notification?.message).toBe("replaced");
@@ -55,52 +56,26 @@ describe("overlayReducer", () => {
 		expect(dup).toBe(first);
 	});
 
-	it("expires only the current generation", () => {
+	it("ignores stale dismiss events", () => {
 		const first = overlayReducer(INITIAL_OVERLAY_STATE, {
 			type: "notify",
 			notification: notification(),
 		});
-		const stale = overlayReducer(first, { type: "expired", generation: 0 });
+		const stale = overlayReducer(first, { type: "dismiss", sequence: 0 });
 		expect(stale.visible).toBe(true);
-
-		const expired = overlayReducer(first, {
-			type: "expired",
-			generation: first.generation,
-		});
-		expect(expired.visible).toBe(false);
-		// Content stays for the exit render.
-		expect(expired.notification?.message).toBe("hello");
 	});
 
-	it("dismiss hides but keeps content and cancels pending expiry", () => {
+	it("dismiss hides but keeps content", () => {
 		const first = overlayReducer(INITIAL_OVERLAY_STATE, {
 			type: "notify",
 			notification: notification(),
 		});
-		const dismissed = overlayReducer(first, { type: "dismiss" });
+		const dismissed = overlayReducer(first, { type: "dismiss", sequence: 2 });
 		expect(dismissed.visible).toBe(false);
 		expect(dismissed.notification?.message).toBe("hello");
-		// The generation moved on: the old expiry is now a no-op.
-		const after = overlayReducer(dismissed, {
-			type: "expired",
-			generation: first.generation,
-		});
-		expect(after).toBe(dismissed);
-
 		// Dismiss while hidden is a no-op.
-		expect(overlayReducer(dismissed, { type: "dismiss" })).toBe(dismissed);
-	});
-});
-
-describe("sameNotification", () => {
-	it("compares every displayed field", () => {
-		expect(sameNotification(notification(), notification())).toBe(true);
-		expect(
-			sameNotification(notification(), notification({ tone: "success" })),
-		).toBe(false);
-		expect(
-			sameNotification(notification(), notification({ title: "Hi" })),
-		).toBe(false);
-		expect(sameNotification(null, notification())).toBe(false);
+		expect(overlayReducer(dismissed, { type: "dismiss", sequence: 2 })).toBe(
+			dismissed,
+		);
 	});
 });

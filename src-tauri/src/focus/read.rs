@@ -16,31 +16,27 @@
 //!   2. Registers **Escape** as a global shortcut (via the global-shortcut
 //!      plugin) so the user can quit the preview from anywhere without focusing
 //!      the click-through overlay.
-//!   3. Spawns a **cursor-poll thread** sampling `GetCursorPos` at ~30 Hz and
-//!      emitting `focus:cursor { x, y }` ([`crate::events::FocusCursorEvent`])
-//!      only when the pointer actually moved, so the renderer slides the clear
-//!      band with the cursor. The thread exits when [`stop`] clears [`ACTIVE`]
-//!      or a newer [`start`] supersedes its [`GENERATION`].
+//!   3. Installs a `WH_MOUSE_LL` callback on a dedicated Windows message-loop
+//!      thread. Mouse moves wake a separate emitter thread, which publishes
+//!      `focus:cursor { x, y }` ([`crate::events::FocusCursorEvent`]) without
+//!      doing Tauri work inside the time-sensitive hook callback. One initial
+//!      `GetCursorPos` read snaps the band into place immediately.
 //!
 //! [`stop`] hides the overlay (unless Blur is taking it over), unregisters
-//! Escape, and lets the poll thread wind down.
+//! Escape, posts `WM_QUIT` to the hook thread, and joins the emitter during
+//! hook teardown.
 //!
-//! Off-Windows the cursor sampling is a no-op, so the crate still builds and the
+//! Off-Windows the cursor tracker is a no-op, so the crate still builds and the
 //! seam stays inert (no band motion) rather than wrong.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 
 use tauri::{AppHandle, PhysicalPosition, PhysicalSize};
-use tauri_specta::Event as _;
-
-use crate::events::FocusCursorEvent;
 
 /// Whether Focus Read currently owns the overlay.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Bumped on every [`start`]/[`stop`] so a superseded cursor-poll thread winds
-/// down even across a rapid stop→start (each thread captures its generation and
-/// exits when the current one moves past it).
+/// Bumped on every [`start`]/[`stop`] so a superseded cursor tracker cannot emit
+/// even across a rapid stop→start.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Whether THIS slice armed the global Escape shortcut (so [`stop`] only
 /// unregisters an Escape it actually owns — never one bound by the user).
@@ -48,8 +44,6 @@ static ESC_ARMED: AtomicBool = AtomicBool::new(false);
 
 /// The shared full-virtual-screen tint window (see `windows::WINDOW_SPECS`).
 const FOCUS_OVERLAY_LABEL: &str = "focus-overlay";
-/// Cursor sampling period (~30 Hz).
-const POLL_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Per-sub-engine init hook. No-op in this slice (all state is lazy). Called
 /// from [`super::init`].
@@ -72,7 +66,7 @@ pub fn toggle() -> bool {
 }
 
 /// Force Focus Read on. Stops Focus Blur first (they share the overlay), sets
-/// the flag, shows the overlay + arms Escape + spawns the cursor poll, then
+/// the flag, shows the overlay + arms Escape + starts the cursor tracker, then
 /// emits `focus:state`.
 pub fn start() {
     // Mutually exclusive with Blur — release the overlay before we claim it.
@@ -84,7 +78,7 @@ pub fn start() {
     if let Some(app) = super::app() {
         show_overlay(&app);
         register_escape(&app);
-        spawn_cursor_poll(app, generation);
+        start_cursor_tracker(app, generation);
     }
     super::emit_state();
 }
@@ -94,9 +88,9 @@ pub fn stop() {
     if !ACTIVE.swap(false, Ordering::SeqCst) {
         return;
     }
-    // Supersede the running poll thread (belt-and-suspenders alongside the
-    // `is_active()` guard it already checks).
+    // Supersede queued hook work before asking the message loop to exit.
     GENERATION.fetch_add(1, Ordering::SeqCst);
+    stop_cursor_tracker();
     if let Some(app) = super::app() {
         unregister_escape(&app);
         // Hide the shared overlay unless Blur is taking it over.
@@ -179,58 +173,343 @@ fn unregister_escape(app: &AppHandle) {
     }
 }
 
-// ── Cursor poll ──────────────────────────────────────────────────────────────
+// ── Cursor tracker ───────────────────────────────────────────────────────────
 
-/// Spawn the ~30 Hz `GetCursorPos` sampler. It emits `focus:cursor` only on a
-/// real move and exits as soon as Read is stopped or superseded.
-fn spawn_cursor_poll(app: AppHandle, generation: u64) {
-    std::thread::spawn(move || {
-        let mut last: Option<(i32, i32)> = None;
-        loop {
-            if !is_active() || GENERATION.load(Ordering::SeqCst) != generation {
-                break;
-            }
-            if let Some(position) = cursor_position()
-                && cursor_moved(last, position)
-            {
-                last = Some(position);
-                let (x, y) = position;
-                if let Err(err) = (FocusCursorEvent { x, y }).emit(&app) {
-                    log::warn!("[focus-read] failed to emit focus:cursor: {err}");
-                }
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        }
-    });
-}
+#[cfg(windows)]
+use windows_impl::{start_cursor_tracker, stop_cursor_tracker};
 
-/// Whether the cursor position changed since the last emitted sample (the first
-/// sample, with no prior value, always counts as a move so the band snaps to the
+#[cfg(not(windows))]
+fn start_cursor_tracker(_app: AppHandle, _generation: u64) {}
+
+#[cfg(not(windows))]
+fn stop_cursor_tracker() {}
+
+/// Whether the cursor position changed since the last emitted event (the first
+/// event, with no prior value, always counts as a move so the band snaps to the
 /// pointer immediately on start).
 fn cursor_moved(last: Option<(i32, i32)>, current: (i32, i32)) -> bool {
     last != Some(current)
 }
 
-/// Read the global cursor position in physical screen pixels.
 #[cfg(windows)]
-fn cursor_position() -> Option<(i32, i32)> {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+mod windows_impl {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    let mut point = POINT::default();
-    // SAFETY: `GetCursorPos` writes the cursor position into the out-param; no
-    // pointers are retained past the call.
-    if unsafe { GetCursorPos(&mut point) }.is_ok() {
-        Some((point.x, point.y))
-    } else {
-        None
+    use tauri::AppHandle;
+    use tauri_specta::Event as _;
+    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, HC_ACTION, HHOOK, MSG,
+        MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
+        TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEMOVE, WM_QUIT,
+    };
+
+    use crate::events::FocusCursorEvent;
+
+    /// The published hook thread, tagged with its activation generation so an
+    /// old thread cannot clear or replace a rapid restart's live tracker.
+    #[derive(Default)]
+    struct TrackerSlot {
+        generation: u64,
+        thread_id: u32,
     }
-}
 
-/// Off-Windows the cursor sampler is inert (the seam stays a no-op).
-#[cfg(not(windows))]
-fn cursor_position() -> Option<(i32, i32)> {
-    None
+    static TRACKER: Mutex<TrackerSlot> = Mutex::new(TrackerSlot {
+        generation: 0,
+        thread_id: 0,
+    });
+
+    /// Latest callback position plus a park token for the emitter. Packing both
+    /// signed coordinates into one atomic prevents torn x/y pairs without making
+    /// the low-level hook acquire a lock.
+    struct CursorSignal {
+        packed_position: AtomicU64,
+        dirty: AtomicBool,
+        shutdown: AtomicBool,
+    }
+
+    impl CursorSignal {
+        fn new() -> Self {
+            Self {
+                packed_position: AtomicU64::new(0),
+                dirty: AtomicBool::new(false),
+                shutdown: AtomicBool::new(false),
+            }
+        }
+
+        fn update(&self, position: (i32, i32), emitter: &std::thread::Thread) {
+            self.packed_position
+                .store(pack_position(position), Ordering::Release);
+            self.dirty.store(true, Ordering::Release);
+            emitter.unpark();
+        }
+
+        fn take_position(&self) -> Option<(i32, i32)> {
+            self.dirty
+                .swap(false, Ordering::AcqRel)
+                .then(|| unpack_position(self.packed_position.load(Ordering::Acquire)))
+        }
+
+        fn shut_down(&self, emitter: &std::thread::Thread) {
+            self.shutdown.store(true, Ordering::Release);
+            emitter.unpark();
+        }
+    }
+
+    /// State accessed only by the hook callback on its owning message-loop
+    /// thread. The callback performs atomics + `unpark` and returns immediately;
+    /// Tauri event emission happens on the separate worker.
+    struct HookState {
+        signal: Arc<CursorSignal>,
+        emitter: std::thread::Thread,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn start_cursor_tracker(app: AppHandle, generation: u64) {
+        let spawned = std::thread::Builder::new()
+            .name("focus-read-hook".into())
+            .spawn(move || hook_thread(app, generation));
+        if let Err(err) = spawned {
+            log::warn!("[focus-read] failed to start mouse hook thread: {err}");
+        }
+    }
+
+    pub(super) fn stop_cursor_tracker() {
+        let thread_id = {
+            let mut tracker = TRACKER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let thread_id = tracker.thread_id;
+            *tracker = TrackerSlot::default();
+            thread_id
+        };
+        if thread_id == 0 {
+            return;
+        }
+        // SAFETY: posting WM_QUIT is valid even if the target exited after the
+        // registry lookup; failure just means teardown already completed.
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    fn hook_thread(app: AppHandle, generation: u64) {
+        // Create the queue before publishing the thread id, otherwise stop could
+        // race an early PostThreadMessageW against the first GetMessageW.
+        let mut queue_probe = MSG::default();
+        // SAFETY: `queue_probe` is a valid out-param; PM_NOREMOVE only ensures
+        // the calling thread owns a message queue.
+        unsafe {
+            let _ = PeekMessageW(&mut queue_probe, None, 0, 0, PM_NOREMOVE);
+        }
+
+        let hook = match install_hook() {
+            Ok(hook) => hook,
+            Err(err) => {
+                log::warn!("[focus-read] failed to install low-level mouse hook: {err}");
+                return;
+            }
+        };
+
+        let signal = Arc::new(CursorSignal::new());
+        let emitter_signal = Arc::clone(&signal);
+        let emitter = match std::thread::Builder::new()
+            .name("focus-read-emitter".into())
+            .spawn(move || emitter_loop(app, generation, &emitter_signal))
+        {
+            Ok(emitter) => emitter,
+            Err(err) => {
+                log::warn!("[focus-read] failed to start cursor emitter: {err}");
+                unhook(hook);
+                return;
+            }
+        };
+        let emitter_thread = emitter.thread().clone();
+        STATE.set(Some(HookState {
+            signal: Arc::clone(&signal),
+            emitter: emitter_thread.clone(),
+        }));
+
+        // SAFETY: always succeeds and returns the calling thread's id.
+        let thread_id = unsafe { GetCurrentThreadId() };
+        if !publish_tracker(generation, thread_id) {
+            finish_hook_thread(hook, signal, emitter_thread, emitter);
+            return;
+        }
+
+        // The hook only reports future movement, so seed the current position
+        // once to preserve the old tracker's immediate snap-on-start behavior.
+        if let Some(position) = cursor_position() {
+            signal.update(position, &emitter_thread);
+        }
+        pump_messages();
+
+        clear_tracker(generation, thread_id);
+        finish_hook_thread(hook, signal, emitter_thread, emitter);
+    }
+
+    fn install_hook() -> windows::core::Result<HHOOK> {
+        // SAFETY: NULL names the current executable module. Its handle remains
+        // valid for the process lifetime and contains the static callback.
+        let module = unsafe { GetModuleHandleW(None) }?;
+        // SAFETY: `low_level_mouse_proc` is static, the current module stays
+        // loaded, and this thread pumps messages until the hook is removed.
+        unsafe {
+            SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(low_level_mouse_proc),
+                Some(HINSTANCE(module.0)),
+                0,
+            )
+        }
+    }
+
+    fn publish_tracker(generation: u64, thread_id: u32) -> bool {
+        let mut tracker = TRACKER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !super::is_active() || super::GENERATION.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        *tracker = TrackerSlot {
+            generation,
+            thread_id,
+        };
+        true
+    }
+
+    fn clear_tracker(generation: u64, thread_id: u32) {
+        let mut tracker = TRACKER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracker.generation == generation && tracker.thread_id == thread_id {
+            *tracker = TrackerSlot::default();
+        }
+    }
+
+    fn finish_hook_thread(
+        hook: HHOOK,
+        signal: Arc<CursorSignal>,
+        emitter_thread: std::thread::Thread,
+        emitter: std::thread::JoinHandle<()>,
+    ) {
+        unhook(hook);
+        STATE.set(None);
+        signal.shut_down(&emitter_thread);
+        if emitter.join().is_err() {
+            log::warn!("[focus-read] cursor emitter panicked during teardown");
+        }
+    }
+
+    fn unhook(hook: HHOOK) {
+        // SAFETY: the handle came from SetWindowsHookExW and this is its sole
+        // teardown path.
+        if let Err(err) = unsafe { UnhookWindowsHookEx(hook) } {
+            log::warn!("[focus-read] failed to remove low-level mouse hook: {err}");
+        }
+    }
+
+    fn pump_messages() {
+        let mut msg = MSG::default();
+        loop {
+            // SAFETY: `msg` is a live out-param. Retrieving messages on the hook
+            // thread is what dispatches low-level mouse callbacks.
+            let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+            if result.0 <= 0 {
+                return;
+            }
+            // SAFETY: GetMessageW initialized `msg`.
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    fn emitter_loop(app: AppHandle, generation: u64, signal: &CursorSignal) {
+        let mut last = None;
+        loop {
+            std::thread::park();
+            if signal.shutdown.load(Ordering::Acquire)
+                || !super::is_active()
+                || super::GENERATION.load(Ordering::SeqCst) != generation
+            {
+                return;
+            }
+            let Some(position) = signal.take_position() else {
+                continue;
+            };
+            if !super::cursor_moved(last, position) {
+                continue;
+            }
+            last = Some(position);
+            let (x, y) = position;
+            if let Err(err) = (FocusCursorEvent { x, y }).emit(&app) {
+                log::warn!("[focus-read] failed to emit focus:cursor: {err}");
+            }
+        }
+    }
+
+    unsafe extern "system" fn low_level_mouse_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if code == HC_ACTION as i32 && wparam.0 == WM_MOUSEMOVE as usize {
+            // SAFETY: for HC_ACTION on a WH_MOUSE_LL callback, Windows defines
+            // lParam as a valid pointer to MSLLHOOKSTRUCT for this call.
+            let event = unsafe { (lparam.0 as *const MSLLHOOKSTRUCT).as_ref() };
+            if let Some(event) = event {
+                let _ = STATE.try_with(|slot| {
+                    if let Ok(slot) = slot.try_borrow()
+                        && let Some(state) = slot.as_ref()
+                    {
+                        state
+                            .signal
+                            .update((event.pt.x, event.pt.y), &state.emitter);
+                    }
+                });
+            }
+        }
+        // SAFETY: forwarding every event preserves the rest of the hook chain;
+        // the hook handle is intentionally omitted because this API ignores it.
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    fn cursor_position() -> Option<(i32, i32)> {
+        let mut point = POINT::default();
+        // SAFETY: `point` is a live out-param and no pointer escapes the call.
+        unsafe { GetCursorPos(&mut point) }
+            .is_ok()
+            .then_some((point.x, point.y))
+    }
+
+    fn pack_position((x, y): (i32, i32)) -> u64 {
+        ((x as u32 as u64) << 32) | y as u32 as u64
+    }
+
+    fn unpack_position(packed: u64) -> (i32, i32) {
+        ((packed >> 32) as u32 as i32, packed as u32 as i32)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{pack_position, unpack_position};
+
+        #[test]
+        fn packed_cursor_position_round_trips_signed_coordinates() {
+            for position in [(0, 0), (-1, 1), (i32::MIN, i32::MAX), (i32::MAX, i32::MIN)] {
+                assert_eq!(unpack_position(pack_position(position)), position);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

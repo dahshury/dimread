@@ -23,7 +23,7 @@
 //! share the single `focus-overlay` tint window). This is enforced in
 //! [`read::start`] / [`blur::start`] so a single seam call keeps the invariant.
 //!
-//! All the runtime machinery (the cursor-poll thread for Read, the
+//! All the runtime machinery (the mouse-hook tracker for Read, the
 //! foreground-window tracker for Blur, the actual overlay show/hide) is
 //! implemented by the phase-2 slices; the foundation ships no-op-safe flag
 //! tracking + the event emit so an un-wired build is inert rather than wrong.

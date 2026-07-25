@@ -4,22 +4,23 @@
 //! (`MONITORINFOEXW.szDevice` gives the GDI device name, e.g. `\\.\DISPLAY1`,
 //! which is the STABLE per-monitor id the rest of the display engine keys on)
 //! → `EnumDisplayDevicesW` for the human-readable monitor string.
-//!
-//! Non-Windows targets compile with an empty enumeration (the crate still
-//! builds; the display engine no-ops there).
+//! macOS uses CoreGraphics display UUIDs; Linux/X11 uses stable RandR output
+//! connector names and resolves the current CRTC only for each native call.
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
 /// A physical monitor as seen by the display engine.
 ///
-/// `id` is the GDI device name (`\\.\DISPLAY1`) — the key used everywhere else
-/// (gamma DCs, per-monitor override maps, `display_preview`). It is stable
-/// across a session and is what `display_list_monitors` returns to the UI.
+/// `id` is a stable, backend-owned identifier — the key used everywhere else
+/// (native gamma handles, per-monitor override maps, `display_preview`). It is
+/// stable across a session and is what `display_list_monitors` returns to the
+/// UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorInfo {
-    /// GDI device name, e.g. `\\.\DISPLAY1`. The engine's per-monitor key.
+    /// Native backend id, e.g. `\\.\DISPLAY1`, `macos:uuid:…`, or
+    /// `x11-output:edid-<hash>:DP-1`.
     pub id: String,
     /// 0-based enumeration index (paint order convenience for the UI strip).
     pub index: u32,
@@ -29,14 +30,37 @@ pub struct MonitorInfo {
     pub is_primary: bool,
 }
 
+/// Register the native display-topology callback used by the engine's
+/// reconciliation worker. Windows topology notifications are delivered by the
+/// scheduler's hidden message window, so no second native hook is needed there.
+#[cfg(windows)]
+pub fn start_topology_listener(_callback: fn()) -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+pub fn start_topology_listener(callback: fn()) -> bool {
+    super::macos::start_topology_listener(callback)
+}
+
+#[cfg(target_os = "linux")]
+pub fn start_topology_listener(callback: fn()) -> bool {
+    super::linux::start_topology_listener(callback)
+}
+
 #[cfg(windows)]
 pub fn enumerate() -> Vec<MonitorInfo> {
     windows_impl::enumerate()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub fn enumerate() -> Vec<MonitorInfo> {
-    Vec::new()
+    super::macos::enumerate()
+}
+
+#[cfg(target_os = "linux")]
+pub fn enumerate() -> Vec<MonitorInfo> {
+    super::linux::enumerate()
 }
 
 #[cfg(windows)]

@@ -1,13 +1,5 @@
 import type { PickerAnchorEvent } from "@/bindings";
 
-/**
- * Duration of the panel's close FADE. Keep in sync with
- * `--dropdown-close-dur` in `src/app/styles/globals.css`; the Rust side hides
- * the OS window a beat LATER (260ms grace in `windows/placement.rs`) so the
- * fully-faded transparent frame is composited before the hide.
- */
-export const PICKER_CLOSE_MS = 120;
-
 /** Window-local rect (CSS px) of the visible panel inside the full-workarea
  *  transparent backdrop. Mirrors the Rust-side default footprint so the warm
  *  (hidden) mount lays out at a plausible size before the first anchor. */

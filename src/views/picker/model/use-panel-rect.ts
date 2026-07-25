@@ -1,13 +1,18 @@
-import { useEffect, useRef, useState } from "react";
-import type { PickerAnchorEvent } from "@/bindings";
-import { NATIVE_EVENTS, on, onCast } from "@/shared/api";
+import {
+	type AnimationEvent as ReactAnimationEvent,
+	type AnimationEventHandler,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
+import { commands, events, type PickerAnchorEvent } from "@/bindings";
+import { hasNativeRuntime, subscribeNativeEventPair } from "@/shared/api";
 import {
 	DEFAULT_PANEL_RECT,
 	dropdownStateClass,
 	normalizePanelRect,
 	type PanelPhase,
 	type PanelRect,
-	PICKER_CLOSE_MS,
 } from "../lib/panel-math";
 
 interface PanelRectState {
@@ -16,11 +21,19 @@ interface PanelRectState {
 	/** Bumps every time the panel fully closes — fold into the body's `key`
 	 *  so transient in-picker UI (the search query) resets between opens. */
 	openGeneration: number;
+	/** Completes a close from the dropdown's real CSS lifecycle. */
+	onPanelAnimationEnd: AnimationEventHandler<HTMLDivElement>;
 	panelInteractive: boolean;
 	panelRevealed: boolean;
 	/** Rect to lay the panel out at — the real anchor when up, the default
 	 *  footprint while warm-mounted invisible. */
 	warmPanel: PanelRect;
+}
+
+function acknowledgePickerHide(): void {
+	if (hasNativeRuntime()) {
+		void commands.pickerHideComplete();
+	}
 }
 
 /**
@@ -40,10 +53,8 @@ export function usePanelRect(): PanelRectState {
 
 	const panelRef = useRef<PanelRect | null>(null);
 	const phaseRef = useRef<PanelPhase>("hidden");
-	const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const revealRafRef = useRef<number | null>(null);
 	const revealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-	const generationRef = useRef(0);
 
 	// Stable helper identities (state-initializer trick — same pattern the
 	// WinSTT hook uses so the effects below never re-subscribe).
@@ -55,12 +66,6 @@ export function usePanelRect(): PanelRectState {
 		phaseRef.current = next;
 		setPhaseState(next);
 	});
-	const [clearCloseTimer] = useState(() => () => {
-		if (closeTimerRef.current !== null) {
-			clearTimeout(closeTimerRef.current);
-			closeTimerRef.current = null;
-		}
-	});
 	const [clearRevealWait] = useState(() => () => {
 		if (revealRafRef.current !== null) {
 			cancelAnimationFrame(revealRafRef.current);
@@ -71,53 +76,71 @@ export function usePanelRect(): PanelRectState {
 			revealTimerRef.current = null;
 		}
 	});
+	const [finishClose] = useState(() => () => {
+		if (phaseRef.current !== "closing") {
+			return;
+		}
+		setPanel(null);
+		setPhase("hidden");
+		setOpenGeneration((generation) => generation + 1);
+		acknowledgePickerHide();
+	});
+	const [onPanelExitEvent] = useState<AnimationEventHandler<HTMLDivElement>>(
+		() => (event: ReactAnimationEvent<HTMLDivElement>) => {
+			if (
+				event.target === event.currentTarget &&
+				event.animationName === "dropdown-out"
+			) {
+				finishClose();
+			}
+		},
+	);
 
 	useEffect(
 		() => () => {
-			clearCloseTimer();
 			clearRevealWait();
 		},
-		[clearCloseTimer, clearRevealWait],
+		[clearRevealWait],
 	);
 
-	// picker:anchor — position + reveal. Duplicate anchors (Rust re-emits a few
-	// times to cover the first-open listener race) are idempotent: an already
-	// revealed panel just tracks the rect without restarting the animation.
-	useEffect(
-		() =>
-			onCast<PickerAnchorEvent>(NATIVE_EVENTS.PICKER_ANCHOR, (payload) => {
-				generationRef.current += 1;
-				clearCloseTimer();
-				setPanel(normalizePanelRect(payload));
-				if (phaseRef.current === "open" || phaseRef.current === "pre-open") {
-					return;
-				}
-				setPhase("pre-open");
-				clearRevealWait();
-				const reveal = () => {
-					clearRevealWait();
-					if (phaseRef.current === "pre-open") {
-						setPhase("open");
-					}
-				};
-				revealRafRef.current = requestAnimationFrame(() => {
-					revealRafRef.current = requestAnimationFrame(() => {
-						revealRafRef.current = null;
-						reveal();
-					});
-				});
-				// Safety net: if rAF never fires (throttled webview), reveal anyway.
-				revealTimerRef.current = setTimeout(reveal, 400);
-			}),
-		[clearCloseTimer, clearRevealWait, setPanel, setPhase],
-	);
+	const [applyAnchor] = useState(() => (payload: PickerAnchorEvent) => {
+		// WebView suspension can suppress animationend. A new native
+		// anchor is the authoritative boundary between opens, so finish the
+		// old generation here before laying out the new one.
+		if (phaseRef.current === "closing") {
+			setOpenGeneration((generation) => generation + 1);
+		}
+		setPanel(normalizePanelRect(payload));
+		if (phaseRef.current === "open" || phaseRef.current === "pre-open") {
+			return;
+		}
+		setPhase("pre-open");
+		clearRevealWait();
+		const reveal = () => {
+			clearRevealWait();
+			if (phaseRef.current === "pre-open") {
+				setPhase("open");
+			}
+		};
+		revealRafRef.current = requestAnimationFrame(() => {
+			revealRafRef.current = requestAnimationFrame(() => {
+				revealRafRef.current = null;
+				reveal();
+			});
+		});
+		// Safety net: if rAF never fires (throttled webview), reveal anyway.
+		revealTimerRef.current = setTimeout(reveal, 400);
+	});
 
-	// picker:closing — play the fade, then drop to hidden. Closed before the
-	// reveal gate fired → the panel was never visible; drop straight to hidden
-	// instead of flashing it in via the out-animation.
+	// Install both live listeners before reading the cached anchor. This closes
+	// the first-show/long-idle race without repeated delayed event emissions.
 	useEffect(() => {
-		const unlisten = on(NATIVE_EVENTS.PICKER_CLOSING, () => {
+		if (!hasNativeRuntime()) {
+			return;
+		}
+		const handleClosing = () => {
 			if (panelRef.current === null) {
+				acknowledgePickerHide();
 				return;
 			}
 			if (phaseRef.current === "pre-open") {
@@ -125,34 +148,38 @@ export function usePanelRect(): PanelRectState {
 				setPanel(null);
 				setPhase("hidden");
 				setOpenGeneration((generation) => generation + 1);
+				acknowledgePickerHide();
 				return;
 			}
-			const closeGeneration = generationRef.current;
-			clearCloseTimer();
 			setPhase("closing");
-			closeTimerRef.current = setTimeout(() => {
-				closeTimerRef.current = null;
-				if (
-					generationRef.current !== closeGeneration ||
-					phaseRef.current !== "closing"
-				) {
+			if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+				finishClose();
+			}
+		};
+		return subscribeNativeEventPair(
+			events.pickerAnchor,
+			(event) => applyAnchor(event.payload),
+			events.pickerClosing,
+			handleClosing,
+			async (isDisposed) => {
+				const snapshot = await commands.pickerAnchorSnapshot();
+				if (isDisposed()) {
 					return;
 				}
-				setPanel(null);
-				setPhase("hidden");
-				setOpenGeneration((generation) => generation + 1);
-			}, PICKER_CLOSE_MS);
-		});
-		return () => {
-			clearCloseTimer();
-			unlisten();
-		};
-	}, [clearCloseTimer, clearRevealWait, setPanel, setPhase]);
+				if (snapshot.closing) {
+					handleClosing();
+				} else if (snapshot.anchor) {
+					applyAnchor(snapshot.anchor);
+				}
+			},
+		);
+	}, [applyAnchor, clearRevealWait, finishClose, setPanel, setPhase]);
 
 	const panelRevealed = panel !== null;
 	return {
 		dropdownStateClass: dropdownStateClass(phase),
 		openGeneration,
+		onPanelAnimationEnd: onPanelExitEvent,
 		panelInteractive: panelRevealed && phase === "open",
 		panelRevealed,
 		warmPanel: panel ?? DEFAULT_PANEL_RECT,

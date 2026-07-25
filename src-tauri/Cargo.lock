@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "dimread"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -869,6 +869,7 @@ dependencies = [
  "log",
  "once_cell",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "specta",
@@ -890,8 +891,11 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "windows",
  "winreg 0.55.0",
+ "x11-dl",
 ]
 
 [[package]]

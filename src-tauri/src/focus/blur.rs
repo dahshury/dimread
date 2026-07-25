@@ -32,12 +32,10 @@
 //!
 //! A `SetWinEventHook` with `WINEVENT_OUTOFCONTEXT` delivers its callbacks on a
 //! thread that pumps messages, so the tracker thread owns a real message loop.
-//! On top of it sits a slow [`windows_impl::WATCHDOG_INTERVAL_MS`] timer, which
-//! is NOT the tracking mechanism — it re-reads `include_taskbar`, refreshes the
-//! cached monitor list (display hot-plug) and re-emits as a safety net for the
-//! changes WinEvents can miss (notably windows of elevated processes). Keeping
-//! the settings read and `EnumDisplayMonitors` on that slow path is what lets the
-//! hot path stay two Win32 calls wide.
+//! That same loop owns a hidden top-level Win32 window for `WM_DISPLAYCHANGE`
+//! and `WM_SETTINGCHANGE` work-area broadcasts. Settings edits wake it through
+//! the process-wide `settings:changed` callback. There is no timer/watchdog:
+//! when the desktop is idle the tracker thread stays blocked in `GetMessageW`.
 //!
 //! Every emitted anchor carries the `HWND` as `window_id` so the renderer can
 //! distinguish a MOVE (snap the cutout) from a SWITCH (glide it) — a spring
@@ -52,9 +50,10 @@
 //! elevated (admin) apps can't be inspected by a non-elevated process, so those
 //! never receive a cutout — surfaced as a tooltip hint in the panel.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Listener};
 
 /// Whether Focus Blur currently owns the overlay.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -64,37 +63,54 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// the current one moves past it). Without this the first tracker could outlive
 /// the second and both would emit `focus:anchor`.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Monotonic ordering for the cached/event anchor handshake. A renderer can
+/// safely apply the snapshot after subscribing without overwriting an anchor
+/// event that arrived while the command was in flight.
+static ANCHOR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Latest emitted anchor. The overlay renderer reads this after registering its
+/// event listener, closing the startup gap where the tracker's immediate first
+/// event could otherwise arrive before React subscribed.
+static LAST_ANCHOR: Mutex<Option<crate::events::FocusAnchorEvent>> = Mutex::new(None);
+/// One-shot guard for the persisted-state restore. The overlay can navigate or
+/// reload later in the process lifetime; those page loads must not resurrect
+/// Blur after the user has explicitly turned it off.
+static AUTOSTART_CHECKED: AtomicBool = AtomicBool::new(false);
 
 /// The shared tint window's label (from `WINDOW_SPECS`), hosted by both Focus
 /// sub-engines.
 const OVERLAY_LABEL: &str = "focus-overlay";
 
-/// Delay before the boot auto-start check so the settings store + the prewarmed
-/// overlay webview are up (and subscribed to `focus:anchor`) first.
-const AUTOSTART_DELAY_MS: u64 = 1500;
-
 /// Per-sub-engine init hook. Restores the persisted `enabled` state across
-/// restarts (CareUEyes parity): if Focus Blur was left on, start it once the
-/// store + overlay are ready. Called from [`super::init`] (after the app handle
-/// is captured). [`start`] otherwise lazily shows the overlay + tracker.
-pub fn init(_app: &AppHandle) {
-    let spawned = std::thread::Builder::new()
-        .name("focus-blur-autostart".into())
-        .spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(AUTOSTART_DELAY_MS));
-            let Some(app) = super::app() else {
-                return;
-            };
-            if crate::settings::store::read_settings(&app)
-                .focus_blur
-                .enabled
-                && !is_active()
-            {
-                start();
-            }
-        });
-    if let Err(err) = spawned {
-        log::warn!("[focus-blur] failed to schedule auto-start: {err}");
+/// restarts (CareUEyes parity). The actual restore is callback-driven by
+/// [`on_page_load`], once the overlay renderer has finished loading; [`start`]
+/// otherwise lazily shows the overlay + tracker.
+pub fn init(app: &AppHandle) {
+    #[cfg(windows)]
+    let _ = app.listen_any("settings:changed", |_event| {
+        windows_impl::request_environment_refresh();
+    });
+}
+
+/// Handle Tauri's page-load callback. Persisted Focus Blur is restored exactly
+/// once, when the `focus-overlay` renderer reports `Finished`, instead of
+/// guessing renderer readiness with a startup sleep.
+pub(crate) fn on_page_load(label: &str, event: tauri::webview::PageLoadEvent) {
+    if label != OVERLAY_LABEL
+        || event != tauri::webview::PageLoadEvent::Finished
+        || AUTOSTART_CHECKED.swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let Some(app) = super::app() else {
+        log::warn!("[focus-blur] overlay loaded before the focus engine was initialized");
+        return;
+    };
+    if crate::settings::store::read_settings(&app)
+        .focus_blur
+        .enabled
+        && !is_active()
+    {
+        start();
     }
 }
 
@@ -123,6 +139,9 @@ pub fn start() {
     if ACTIVE.swap(true, Ordering::SeqCst) {
         return;
     }
+    *LAST_ANCHOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     show_overlay();
     #[cfg(windows)]
@@ -147,11 +166,13 @@ pub fn stop() {
     // `is_active()` guard it already checks) so a rapid stop→start can't leave a
     // zombie tracker from the previous activation alive.
     GENERATION.fetch_add(1, Ordering::SeqCst);
-    // The tracker now blocks in `GetMessageW` rather than sleeping between polls,
-    // so it has to be woken to notice: without this it would idle until its next
-    // watchdog tick.
+    // The tracker blocks in `GetMessageW`, so stopping explicitly posts
+    // `WM_QUIT` to wake and terminate that event loop.
     #[cfg(windows)]
     windows_impl::stop_tracker();
+    *LAST_ANCHOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     hide_overlay();
     super::emit_state();
 }
@@ -183,6 +204,37 @@ fn show_overlay() {
     let _ = window.set_always_on_top(true);
 }
 
+/// Refit an already-active overlay after a native display topology change.
+/// This intentionally does not create or show a window when Blur is inactive.
+fn resize_overlay() {
+    if !is_active() {
+        return;
+    }
+    let Some(app) = super::app() else {
+        return;
+    };
+    let Some(window) = tauri::Manager::get_webview_window(&app, OVERLAY_LABEL) else {
+        return;
+    };
+    let (left, top, width, height) = crate::windows::virtual_screen_bounds();
+    let _ = window.set_position(tauri::PhysicalPosition::new(left, top));
+    let _ = window.set_size(tauri::PhysicalSize::new(width.max(1), height.max(1)));
+}
+
+/// Snapshot the latest cached Blur anchor. Renderers call this only after their
+/// `focus:anchor` listener is installed (subscribe-then-snapshot handshake).
+#[tauri::command]
+#[specta::specta]
+pub fn focus_blur_anchor_snapshot() -> Option<crate::events::FocusAnchorEvent> {
+    if !is_active() {
+        return None;
+    }
+    LAST_ANCHOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// Hide the shared overlay — unless Focus Read is (still) using it.
 fn hide_overlay() {
     if super::read::is_active() {
@@ -207,8 +259,7 @@ fn hide_overlay() {
 /// full-screen, NON-maximized `XamlExplorerHostIslandWindow` owned by
 /// explorer.exe, so without this exclusion the tracker anchors on it and emits a
 /// whole-screen cutout — the shade visibly vanishes for the duration of every
-/// Alt+Tab. Kept in sync with the same table in [`crate::rules`] (plan 09 step 1
-/// folds both into `focus/mask.rs`).
+/// Alt+Tab. Kept in sync with the same table in [`crate::rules`].
 #[cfg(any(windows, test))]
 fn is_shell_class(class: &str) -> bool {
     matches!(
@@ -255,6 +306,7 @@ fn to_local_anchor(
     let (ml, mt, mr, mb) = monitor;
     let (ox, oy) = origin;
     crate::events::FocusAnchorEvent {
+        sequence: 0,
         window_id,
         x: wl - ox,
         y: wt - oy,
@@ -281,39 +333,51 @@ fn to_local_anchor(
 mod windows_impl {
     use std::cell::RefCell;
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
 
     use tauri::AppHandle;
     use tauri_specta::Event as _;
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, TRUE, WPARAM};
     use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
         MonitorFromWindow,
     };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND,
-        EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
-        EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect,
-        GetWindowThreadProcessId, KillTimer, MSG, OBJID_WINDOW, PostThreadMessageW, SetTimer,
-        TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT, WM_TIMER,
+        CHILDID_SELF, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+        EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+        EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+        GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowThreadProcessId,
+        MSG, OBJID_WINDOW, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, RegisterClassW,
+        TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, WM_SETTINGCHANGE, WNDCLASSW,
     };
-    use windows::core::BOOL;
+    use windows::core::{BOOL, w};
 
     use super::{is_shell_class, to_local_anchor};
     use crate::events::FocusAnchorEvent;
 
-    /// Safety-net cadence for the things WinEvents do not reliably report:
-    /// `include_taskbar` edits, display hot-plug, and geometry changes on windows
-    /// we cannot hook (elevated processes). This is deliberately slow — it is a
-    /// watchdog, NOT the tracking mechanism, which is push-based.
-    pub(super) const WATCHDOG_INTERVAL_MS: u32 = 500;
+    /// Private thread message posted by the process-wide `settings:changed`
+    /// listener. Unlike `WM_SETTINGCHANGE`, this represents DimRead settings,
+    /// not Windows system settings.
+    const WM_DIMREAD_SETTINGS_CHANGED: u32 = WM_APP + 1;
 
-    /// Tracker-thread id, so [`stop_tracker`] can post `WM_QUIT` to its message
-    /// loop. 0 when no tracker is running.
-    static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+    #[derive(Clone, Copy, Default)]
+    struct TrackerSlot {
+        generation: u64,
+        thread_id: u32,
+    }
+
+    /// Generation-tagged tracker identity. The tag prevents a late thread from
+    /// overwriting or clearing the slot belonging to a newer activation.
+    static TRACKER: Mutex<TrackerSlot> = Mutex::new(TrackerSlot {
+        generation: 0,
+        thread_id: 0,
+    });
 
     /// Mutable tracker state. Lives in a thread-local because the WinEvent
     /// callback and the message loop are the same thread by construction
@@ -325,11 +389,11 @@ mod windows_impl {
         /// Previous emission — the dedupe key. The event derives `Eq` and covers
         /// the monitor list, so a display hot-plug compares unequal and re-emits.
         last: Option<FocusAnchorEvent>,
-        /// Cached monitor rects; refreshed on the watchdog tick so the hot path
-        /// never calls `EnumDisplayMonitors`.
+        /// Cached monitor rects; refreshed by native display/settings messages
+        /// so the WinEvent hot path never calls `EnumDisplayMonitors`.
         monitors: Vec<(i32, i32, i32, i32)>,
-        /// Cached `settings.focus_blur.include_taskbar`, likewise refreshed on
-        /// the watchdog tick rather than read per event.
+        /// Cached `settings.focus_blur.include_taskbar`, likewise refreshed by
+        /// the settings-change callback rather than read per WinEvent.
         include_taskbar: bool,
     }
 
@@ -351,11 +415,17 @@ mod windows_impl {
     }
 
     /// Ask the running tracker's message loop to exit. Idempotent: a no-op when
-    /// no tracker is running. The thread ALSO guards on `is_active()`/generation
-    /// at every watchdog tick, so a lost `WM_QUIT` costs at most one tick rather
-    /// than leaking the thread.
+    /// no tracker is running. The callbacks also guard on
+    /// `is_active()`/generation so already-queued events cannot emit stale data.
     pub(super) fn stop_tracker() {
-        let thread_id = HOOK_THREAD_ID.swap(0, Ordering::SeqCst);
+        let thread_id = {
+            let mut tracker = TRACKER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let thread_id = tracker.thread_id;
+            *tracker = TrackerSlot::default();
+            thread_id
+        };
         if thread_id == 0 {
             return;
         }
@@ -363,6 +433,25 @@ mod windows_impl {
         // that thread is still alive — it fails with an error we ignore.
         unsafe {
             let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// Wake the tracker for an authoritative settings broadcast. A settings
+    /// event before the tracker publishes its queue is harmless because startup
+    /// reads the current snapshot before installing hooks.
+    pub(super) fn request_environment_refresh() {
+        let thread_id = TRACKER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .thread_id;
+        if thread_id == 0 {
+            return;
+        }
+        // SAFETY: the message carries no pointers and targets the queue created
+        // by `PeekMessageW` before the tracker slot is published.
+        unsafe {
+            let _ =
+                PostThreadMessageW(thread_id, WM_DIMREAD_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
         }
     }
 
@@ -378,31 +467,38 @@ mod windows_impl {
             monitors: all_monitor_rects(include_taskbar),
             include_taskbar,
         }));
+        // Force creation of the thread message queue before publishing its id.
+        // This closes the start→immediate-stop race where PostThreadMessageW can
+        // otherwise fail because GetMessageW has not created the queue yet.
+        let mut seed_message = MSG::default();
+        // SAFETY: a no-remove peek with a live out-param only initializes and
+        // observes this thread's queue.
+        unsafe {
+            let _ = PeekMessageW(&mut seed_message, None, 0, 0, PM_NOREMOVE);
+        }
         // SAFETY: always succeeds; returns the calling thread's id.
         let thread_id = unsafe { GetCurrentThreadId() };
-        HOOK_THREAD_ID.store(thread_id, Ordering::SeqCst);
+        if !publish_tracker(generation, thread_id) {
+            STATE.set(None);
+            return;
+        }
 
         let hooks = install_hooks();
         if hooks.is_empty() {
             log::warn!(
-                "[focus-blur] no WinEvent hooks installed — tracking falls back to the {WATCHDOG_INTERVAL_MS} ms watchdog"
+                "[focus-blur] no WinEvent hooks installed — foreground tracking unavailable"
             );
         }
+        let notification_window = create_notification_window();
         // Don't make the user wait for the first OS event to see a cutout.
         sync_anchor();
+        pump_messages();
 
-        // SAFETY: a NULL hwnd creates a thread timer; the returned id is the one
-        // WM_TIMER carries in wParam and the one KillTimer needs.
-        let timer = unsafe { SetTimer(None, 0, WATCHDOG_INTERVAL_MS, None) };
-        if timer == 0 {
-            log::warn!("[focus-blur] failed to install the tracker watchdog timer");
-        }
-        pump_messages(generation, timer);
-
-        if timer != 0 {
-            // SAFETY: NULL hwnd + the id SetTimer returned, as the API requires.
+        if let Some(window) = notification_window {
+            // SAFETY: the hidden window was created on this tracker thread and
+            // is destroyed exactly once before the thread exits.
             unsafe {
-                let _ = KillTimer(None, timer);
+                let _ = DestroyWindow(window);
             }
         }
         for hook in hooks {
@@ -417,7 +513,89 @@ mod windows_impl {
         // generation guard (rather than `stop_tracker`) may already have been
         // superseded, and clearing unconditionally would strand the live tracker
         // with no way to be woken.
-        let _ = HOOK_THREAD_ID.compare_exchange(thread_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+        clear_tracker(generation, thread_id);
+    }
+
+    fn publish_tracker(generation: u64, thread_id: u32) -> bool {
+        let mut tracker = TRACKER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !super::is_active() || super::GENERATION.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        *tracker = TrackerSlot {
+            generation,
+            thread_id,
+        };
+        true
+    }
+
+    fn clear_tracker(generation: u64, thread_id: u32) {
+        let mut tracker = TRACKER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracker.generation == generation && tracker.thread_id == thread_id {
+            *tracker = TrackerSlot::default();
+        }
+    }
+
+    /// Create the hidden top-level window that receives reliable display and
+    /// work-area broadcasts. A message-only window is intentionally not used:
+    /// Windows does not deliver broadcast messages to message-only windows.
+    fn create_notification_window() -> Option<HWND> {
+        // SAFETY: static class strings and callback remain valid for the process;
+        // the returned window is owned and destroyed by this thread.
+        unsafe {
+            let module = GetModuleHandleW(None).ok()?;
+            let class_name = w!("DimReadFocusBlurEnvironmentListener");
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(environment_wnd_proc),
+                hInstance: module.into(),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            // RegisterClassW returning zero is also expected on later tracker
+            // activations because the process class already exists.
+            let _ = RegisterClassW(&class);
+            match CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                w!(""),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(module.into()),
+                None,
+            ) {
+                Ok(window) => Some(window),
+                Err(err) => {
+                    log::warn!("[focus-blur] failed to create environment listener window: {err}");
+                    None
+                }
+            }
+        }
+    }
+
+    unsafe extern "system" fn environment_wnd_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_DISPLAYCHANGE {
+            super::resize_overlay();
+            refresh_environment();
+        } else if message == WM_SETTINGCHANGE {
+            // Includes SPI_SETWORKAREA and taskbar placement/size changes.
+            refresh_environment();
+        }
+        // SAFETY: messages retain their default window semantics after our
+        // read-only notification handling.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
     }
 
     /// Install the hooks that make tracking push-based. Split into narrow ranges
@@ -425,8 +603,8 @@ mod windows_impl {
     /// unrelated accessibility events the system emits.
     ///
     /// `WINEVENT_SKIPOWNPROCESS` keeps our own windows (the overlay included) from
-    /// waking the callback at all — `compute_anchor` still re-checks the pid,
-    /// because the watchdog path queries the foreground window directly.
+    /// waking the callback at all; `compute_anchor` still re-checks the pid to
+    /// reject a foreground switch racing the queued event.
     fn install_hooks() -> Vec<HWINEVENTHOOK> {
         const RANGES: [(u32, u32); 4] = [
             // Focus moved to a different window.
@@ -503,11 +681,16 @@ mod windows_impl {
             if !super::is_active() || super::GENERATION.load(Ordering::SeqCst) != state.generation {
                 return None;
             }
-            let event = compute_anchor(state.include_taskbar, &state.monitors)?;
-            if state.last.as_ref() == Some(&event) {
+            let geometry = compute_anchor(state.include_taskbar, &state.monitors)?;
+            if state.last.as_ref() == Some(&geometry) {
                 return None;
             }
-            state.last = Some(event.clone());
+            state.last = Some(geometry.clone());
+            let mut event = geometry;
+            event.sequence = super::ANCHOR_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
+            *super::LAST_ANCHOR
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(event.clone());
             Some(event)
         });
         let (Some(event), Some(app)) = (emitted, crate::focus::app()) else {
@@ -518,10 +701,9 @@ mod windows_impl {
         }
     }
 
-    /// Watchdog tick: re-read `include_taskbar`, re-enumerate the monitors, then
-    /// re-sync. Keeping both off the event path is what lets a drag recompute
-    /// with two Win32 calls instead of a settings read plus a monitor
-    /// enumeration.
+    /// Re-read `include_taskbar`, re-enumerate monitors, then re-sync. This only
+    /// runs for a settings callback or a native display/work-area notification;
+    /// it is never timer-driven.
     fn refresh_environment() {
         STATE.with_borrow_mut(|slot| {
             let Some(state) = slot.as_mut() else {
@@ -542,20 +724,17 @@ mod windows_impl {
     /// Pump the tracker thread's message queue. `GetMessageW` is what delivers
     /// the out-of-context WinEvent callbacks, so this loop IS the tracker.
     /// Returns on `WM_QUIT`, on a queue error, or when the generation guard trips.
-    fn pump_messages(generation: u64, timer: usize) {
+    fn pump_messages() {
         let mut msg = MSG::default();
         loop {
             // SAFETY: `msg` is a live out-param; a NULL hwnd retrieves messages
-            // for the whole thread (which is where thread timers land).
+            // for the whole thread (including our settings and shutdown posts).
             let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
             // 0 is WM_QUIT, -1 is an error — both end the loop.
             if result.0 <= 0 {
                 return;
             }
-            if msg.message == WM_TIMER && msg.wParam.0 == timer {
-                if !super::is_active() || super::GENERATION.load(Ordering::SeqCst) != generation {
-                    return;
-                }
+            if msg.message == WM_DIMREAD_SETTINGS_CHANGED {
                 refresh_environment();
                 continue;
             }

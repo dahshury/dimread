@@ -14,7 +14,8 @@ tools/windows/tauri-build.ps1       vcvars64 + optional LLVM + `bun run tauri bu
 tools/windows/tauri-portable.ps1    dist/DimRead.exe + DimRead-portable{,.zip}
 tools/linux/tauri-bundles.sh        appimage,deb,rpm → dist/linux/
 tools/macos/tauri-bundles.sh        app,dmg (+ .app.tar.gz) → dist/macos/<arch>/
-tools/assets/generate-icons.py      programmatic placeholder mark → icons/ + tray PNGs
+tools/assets/dimread_mark.py        the brand mark, drawn procedurally (Pillow)
+tools/assets/generate-icons.py      mark → app icons + the 32-PNG tray state family
 .github/workflows/ci.yml            frontend gate
 .github/workflows/rust-ci.yml       rust gate + cross-platform matrix + linux bundle gate
 .github/workflows/release.yml       tag/dispatch release pipeline + publish job
@@ -87,13 +88,25 @@ README.md
   auto `--prerelease` for versions with a pre-release segment). macOS x86_64
   cross-compiles on the arm64 `macos-latest` runner (`--target
   x86_64-apple-darwin`) instead of the deprecated Intel `macos-13` pool.
-- **Icons**: `generate-icons.py` draws the mark programmatically (no source
-  image): zinc-gradient rounded square + white diamond-ring glyph; tray PNGs
-  are the bare glyph at 64px in light/dark ink, written to the exact
-  `include_bytes!` paths in tray.rs (`icons/tray-on-{dark,light}.png`).
-  numpy is only used for the gradient. WinSTT's mascot-derived pipeline and
-  the 8-state tray set (idle/recording/transcribing × themes) are gone —
-  this tray has a single state per theme.
+- **Icons**: `generate-icons.py` draws everything from the procedural mark in
+  `tools/assets/dimread_mark.py` (Pillow only — no source image, no numpy).
+  One geometry: a rounded reading surface, a light band along its lower edge,
+  and the active mode's glyph KNOCKED OUT of the surface above it.
+  - App icons get the mark on a dark squircle tile.
+  - Tray icons get the bare mark on transparency — **no tile**. A tile costs
+    ~30 % of a 16 px budget and is a dark smudge on a dark taskbar.
+  - The tray set is 8 modes × day/night × light/dark taskbar = **32 PNGs** at
+    64 px, written to the exact `include_bytes!` paths in tray.rs
+    (`icons/tray/<mode>-<phase>-on-<theme>.png`). The band carries the
+    day/night state (pale cool vs amber); the surface colour only changes for
+    taskbar contrast.
+  - `contact-sheet.png` in `tools/assets/icon-preview/` renders every state at
+    32/20/16 px over both taskbar tones. Look at it after touching a glyph —
+    small-size legibility is the whole job and 512 px tells you nothing.
+
+  This supersedes both the earlier `dimread-icon-master.png` pipeline (deleted)
+  and the single-state-per-theme tray it fed. WinSTT's mascot-derived pipeline
+  is still gone.
 
 ## Verification (2026-07-16)
 

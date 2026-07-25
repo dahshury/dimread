@@ -14,6 +14,15 @@ function touchEvent(type: string, clientY: number) {
 	return event;
 }
 
+function transitionEvent(
+	type: "transitionend" | "transitioncancel",
+	propertyName: string,
+) {
+	const event = new Event(type, { bubbles: true });
+	Object.defineProperty(event, "propertyName", { value: propertyName });
+	return event;
+}
+
 function setScrollMetrics(
 	element: HTMLElement,
 	metrics: { clientHeight: number; scrollHeight: number; scrollTop: number },
@@ -56,6 +65,58 @@ describe("installTouchRubberBand", () => {
 
 		expect(scroller.style.translate).toStartWith("0 ");
 		expect(scroller.style.translate).not.toContain("0px");
+	});
+
+	test("restores styles when the translate release transition ends", () => {
+		installTouchRubberBand();
+		const scroller = document.createElement("div");
+		scroller.style.overflowY = "auto";
+		scroller.style.transition = "opacity 100ms linear";
+		scroller.style.translate = "3px 4px";
+		const content = document.createElement("div");
+		scroller.append(content);
+		document.body.append(scroller);
+		setScrollMetrics(scroller, {
+			clientHeight: 100,
+			scrollHeight: 400,
+			scrollTop: 0,
+		});
+
+		content.dispatchEvent(touchEvent("touchstart", 100));
+		content.dispatchEvent(touchEvent("touchmove", 150));
+		content.dispatchEvent(touchEvent("touchend", 150));
+
+		expect(scroller.style.transition).toContain("translate 420ms");
+		expect(scroller.style.translate).toBe("0 0.00px");
+
+		scroller.dispatchEvent(transitionEvent("transitionend", "opacity"));
+		expect(scroller.style.transition).toContain("translate 420ms");
+
+		scroller.dispatchEvent(transitionEvent("transitionend", "translate"));
+		expect(scroller.style.transition).toBe("opacity 100ms linear");
+		expect(scroller.style.translate).toBe("3px 4px");
+	});
+
+	test("restores styles when the translate release transition is canceled", () => {
+		installTouchRubberBand();
+		const scroller = document.createElement("div");
+		scroller.style.overflowY = "auto";
+		const content = document.createElement("div");
+		scroller.append(content);
+		document.body.append(scroller);
+		setScrollMetrics(scroller, {
+			clientHeight: 100,
+			scrollHeight: 400,
+			scrollTop: 0,
+		});
+
+		content.dispatchEvent(touchEvent("touchstart", 100));
+		content.dispatchEvent(touchEvent("touchmove", 150));
+		content.dispatchEvent(touchEvent("touchcancel", 150));
+		scroller.dispatchEvent(transitionEvent("transitioncancel", "translate"));
+
+		expect(scroller.style.transition).toBe("");
+		expect(scroller.style.translate ?? "").toBe("");
 	});
 
 	test("skips scroll areas that are managed by the local ScrollArea behavior", () => {

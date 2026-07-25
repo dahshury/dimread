@@ -12,7 +12,7 @@ import { hasNativeRuntime, subscribeNativeEvent } from "@/shared/api";
  * Focus Read shade (FEATURE-PARITY F8.1) — a full-window dim with a clear
  * horizontal band that tracks the cursor. Two full-height shade panes are pushed
  * apart by the band using transform-only CSS variables (`--band-top` /
- * `--band-bottom`), so the reading ruler follows the pointer at the poll rate
+ * `--band-bottom`), so the reading ruler follows native pointer callbacks
  * without any per-frame React re-render or layout.
  *
  * The backend (`focus::read`) sizes the `focus-overlay` window to the whole

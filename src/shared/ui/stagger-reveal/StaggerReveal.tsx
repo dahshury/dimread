@@ -2,34 +2,43 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { cn } from "@/shared/lib/cn";
 
-const DEFAULT_STAGGER_DURATION_MS = 500;
-const DEFAULT_STAGGER_DELAY_MS = 40;
-const STAGGER_SETTLE_BUFFER_MS = 50;
+const REVEAL_TRANSITION_PROPERTIES = new Set([
+	"filter",
+	"opacity",
+	"transform",
+]);
 
-function cssDurationToMs(value: string, fallbackMs: number): number {
-	const trimmed = value.trim();
-	if (!trimmed) {
-		return fallbackMs;
-	}
-	const first = trimmed.split(",")[0]?.trim() ?? "";
-	const amount = Number.parseFloat(first);
+function cssTimeToMs(value: string): number {
+	const amount = Number.parseFloat(value);
 	if (!Number.isFinite(amount)) {
-		return fallbackMs;
+		return 0;
 	}
-	return first.endsWith("ms") ? amount : amount * 1000;
+	return value.trim().endsWith("ms") ? amount : amount * 1000;
 }
 
-function revealDurationMs(element: HTMLElement): number {
-	const style = getComputedStyle(element);
-	const duration = cssDurationToMs(
-		style.getPropertyValue("--stagger-dur"),
-		DEFAULT_STAGGER_DURATION_MS,
+function hasRevealTransition(root: HTMLElement): boolean {
+	return Array.from(root.querySelectorAll<HTMLElement>(".t-stagger-line")).some(
+		(element) => {
+			const style = getComputedStyle(element);
+			const properties = style.transitionProperty
+				.split(",")
+				.map((value) => value.trim());
+			const durations = style.transitionDuration.split(",");
+			const delays = style.transitionDelay.split(",");
+
+			return properties.some((property, index) => {
+				if (property !== "all" && !REVEAL_TRANSITION_PROPERTIES.has(property)) {
+					return false;
+				}
+
+				const duration = cssTimeToMs(
+					durations[index % durations.length] ?? "0s",
+				);
+				const delay = cssTimeToMs(delays[index % delays.length] ?? "0s");
+				return duration > 0 && duration + delay > 0;
+			});
+		},
 	);
-	const delay = cssDurationToMs(
-		style.getPropertyValue("--stagger-stagger"),
-		DEFAULT_STAGGER_DELAY_MS,
-	);
-	return duration + delay + STAGGER_SETTLE_BUFFER_MS;
 }
 
 export function StaggerReveal({
@@ -61,21 +70,72 @@ export function StaggerReveal({
 			return;
 		}
 
-		let completeTimer = 0;
+		const runningTransitions = new Map<EventTarget, Set<string>>();
+		let completed = false;
+
+		const complete = () => {
+			if (completed || !root.classList.contains("t-stagger")) {
+				return;
+			}
+			completed = true;
+			onCompleteRef.current?.();
+		};
+
+		const isRevealEvent = (
+			event: TransitionEvent,
+		): event is TransitionEvent & { target: HTMLElement } => {
+			const target = event.target;
+			return (
+				target instanceof HTMLElement &&
+				target.classList.contains("t-stagger-line") &&
+				REVEAL_TRANSITION_PROPERTIES.has(event.propertyName)
+			);
+		};
+
+		const trackTransition = (event: TransitionEvent) => {
+			if (!isRevealEvent(event)) {
+				return;
+			}
+			const properties = runningTransitions.get(event.target) ?? new Set();
+			properties.add(event.propertyName);
+			runningTransitions.set(event.target, properties);
+		};
+
+		const settleTransition = (event: TransitionEvent) => {
+			if (!isRevealEvent(event)) {
+				return;
+			}
+			const properties = runningTransitions.get(event.target);
+			if (!properties?.delete(event.propertyName)) {
+				return;
+			}
+			if (properties.size === 0) {
+				runningTransitions.delete(event.target);
+			}
+			if (runningTransitions.size === 0) {
+				complete();
+			}
+		};
+
+		root.addEventListener("transitionrun", trackTransition);
+		root.addEventListener("transitionend", settleTransition);
+		root.addEventListener("transitioncancel", settleTransition);
 		root.classList.remove("is-hiding");
 		root.classList.remove("is-shown");
 		void root.offsetHeight;
 
 		const frame = window.requestAnimationFrame(() => {
 			root.classList.add("is-shown");
-			completeTimer = window.setTimeout(() => {
-				onCompleteRef.current?.();
-			}, revealDurationMs(root));
+			if (!hasRevealTransition(root)) {
+				complete();
+			}
 		});
 
 		return () => {
 			window.cancelAnimationFrame(frame);
-			window.clearTimeout(completeTimer);
+			root.removeEventListener("transitionrun", trackTransition);
+			root.removeEventListener("transitionend", settleTransition);
+			root.removeEventListener("transitioncancel", settleTransition);
 		};
 	}, [active]);
 

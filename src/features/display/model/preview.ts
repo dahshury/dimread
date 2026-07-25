@@ -1,4 +1,4 @@
-import { commands } from "@/bindings";
+import { commands, type DisplayPhase } from "@/bindings";
 import { hasNativeRuntime } from "@/shared/api";
 
 /**
@@ -16,6 +16,7 @@ interface PreviewValue {
 	brightness: number | null;
 	kelvin: number | null;
 	monitorId: string | null;
+	phase: DisplayPhase | null;
 }
 
 let frame: number | null = null;
@@ -29,7 +30,12 @@ function flush(): void {
 	const value = pending;
 	pending = null;
 	void commands
-		.displayPreview(value.kelvin, value.brightness, value.monitorId)
+		.displayPreview(
+			value.kelvin,
+			value.brightness,
+			value.monitorId,
+			value.phase,
+		)
 		.catch(() => undefined);
 }
 
@@ -42,11 +48,12 @@ export function previewDisplay(
 	kelvin: number | null,
 	brightness: number | null,
 	monitorId: string | null,
+	phase: DisplayPhase | null,
 ): void {
 	if (!hasNativeRuntime()) {
 		return;
 	}
-	pending = { kelvin, brightness, monitorId };
+	pending = { kelvin, brightness, monitorId, phase };
 	if (frame !== null) {
 		return;
 	}

@@ -61,7 +61,6 @@ export const PICKER_GROUP_ORDER: readonly PickerGroupId[] = [
 ];
 
 export const PICKER_ITEMS: readonly PickerItem[] = [
-	// Productivity
 	{
 		id: "task-forge",
 		name: "Task Forge",
@@ -118,7 +117,6 @@ export const PICKER_ITEMS: readonly PickerItem[] = [
 		group: "productivity",
 		icon: Notification01Icon,
 	},
-	// Development
 	{
 		id: "code-prism",
 		name: "Code Prism",
@@ -182,7 +180,6 @@ export const PICKER_ITEMS: readonly PickerItem[] = [
 		group: "development",
 		icon: Rocket01Icon,
 	},
-	// Appearance
 	{
 		id: "theme-weaver",
 		name: "Theme Weaver",
@@ -225,7 +222,6 @@ export const PICKER_ITEMS: readonly PickerItem[] = [
 		group: "appearance",
 		icon: MagicWand01Icon,
 	},
-	// Integrations
 	{
 		id: "web-bridge",
 		name: "Web Bridge",

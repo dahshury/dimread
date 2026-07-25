@@ -23,15 +23,15 @@ One click, straight to the file — no scrolling through the releases page.
 <!-- DOWNLOAD_BADGES:START -->
 
 <p align="center">
-  <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead.exe"><img alt="Download DimRead for Windows" src="https://img.shields.io/badge/Download--Windows%20(portable)-0A66C2?style=for-the-badge&logo=windows11&logoColor=white&labelColor=0A66C2"></a>
+  <a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead.exe"><img alt="Download DimRead for Windows" src="https://img.shields.io/badge/Download--Windows%20(portable)-0A66C2?style=for-the-badge&logo=windows11&logoColor=white&labelColor=0A66C2"></a>
   &nbsp;
-  <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_aarch64.dmg"><img alt="Download DimRead for macOS" src="https://img.shields.io/badge/Download--macOS-111111?style=for-the-badge&logo=apple&logoColor=white&labelColor=111111"></a>
+  <a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead_0.0.2-alpha_aarch64.dmg"><img alt="Download DimRead for macOS" src="https://img.shields.io/badge/Download--macOS-111111?style=for-the-badge&logo=apple&logoColor=white&labelColor=111111"></a>
   &nbsp;
-  <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_amd64.AppImage"><img alt="Download DimRead for Linux" src="https://img.shields.io/badge/Download--Linux-F5B700?style=for-the-badge&logo=linux&logoColor=black&labelColor=F5B700"></a>
+  <a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead_0.0.2-alpha_amd64.AppImage"><img alt="Download DimRead for Linux" src="https://img.shields.io/badge/Download--Linux-F5B700?style=for-the-badge&logo=linux&logoColor=black&labelColor=F5B700"></a>
 </p>
 
 <p align="center">
-  <sub><a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead-portable.zip">Windows portable (.zip)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_x64-x86_64.dmg">macOS (Intel)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead_0.0.1-alpha_amd64.deb">Debian / Ubuntu (.deb)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.1-alpha/DimRead-0.0.1-alpha-1.x86_64.rpm">Fedora / RHEL (.rpm)</a> · <a href="https://github.com/dahshury/dimread/releases/tag/v0.0.1-alpha">All v0.0.1-alpha assets</a></sub>
+  <sub><a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead-portable.zip">Windows portable (.zip)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead_0.0.2-alpha_x64-x86_64.dmg">macOS (Intel)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead_0.0.2-alpha_amd64.deb">Debian / Ubuntu (.deb)</a> · <a href="https://github.com/dahshury/dimread/releases/download/v0.0.2-alpha/DimRead-0.0.2-alpha-1.x86_64.rpm">Fedora / RHEL (.rpm)</a> · <a href="https://github.com/dahshury/dimread/releases/tag/v0.0.2-alpha">All v0.0.2-alpha assets</a></sub>
 </p>
 
 <!-- DOWNLOAD_BADGES:END -->
@@ -41,7 +41,7 @@ One click, straight to the file — no scrolling through the releases page.
 > writes. The portable `.zip` needs the Microsoft Edge **WebView2** runtime,
 > which ships with Windows 11 and most Windows 10 installs.
 >
-> This is a **0.0.1 alpha** pre-release. Builds are unsigned, so the OS may warn
+> This is a **0.0.2 alpha** pre-release. Builds are unsigned, so the OS may warn
 > on first launch — see [First-run notes](#first-run-notes) below.
 
 ## What it looks like

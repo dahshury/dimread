@@ -1,5 +1,6 @@
 import {
 	type RefObject,
+	type TransitionEventHandler,
 	useEffect,
 	useEffectEvent,
 	useRef,
@@ -8,36 +9,25 @@ import {
 
 type SettingsWindowMotionPhase = "closed" | "resetting" | "open" | "closing";
 
-/** Request the native hide slightly BEFORE the fade-out completes — the tail
- *  is visually gone already and the head start absorbs the IPC + OS hide
- *  latency that would otherwise hold a faded window on screen. */
-const CLOSE_HIDE_OVERLAP_MS = 40;
+/** Why the window is leaving the screen — see {@link useSettingsWindowMotion}.
+ *
+ *  `close` is a real close (the X button, Alt+F4): the backend may quit the app.
+ *  `dismiss` is Escape: always just hide. The animation is identical; only the
+ *  ending differs, so the intent rides along with `requestClose` and comes back
+ *  out in `onClosed` rather than living in a ref in the caller (a ref the
+ *  caller would have to write during render, which React Compiler refuses to
+ *  optimize around). */
+export type WindowExitIntent = "close" | "dismiss";
+
+/** Last-resort recovery if a suspended WebView suppresses transition events.
+ * Normal closure is driven by the shell's real transition callback. */
+const CLOSE_EVENT_FAILSAFE_MS = 1000;
 
 /** If the content-ready gate hasn't opened this long after a reveal was
  *  requested, reveal anyway: a stalled hydration must degrade to "window
  *  appears with whatever is there", never "window never appears" (the OS
  *  window is transparent — until the reveal the user sees NOTHING). */
 const REVEAL_FAILSAFE_MS = 1500;
-
-function modalCloseDurationMs(): number {
-	const reducedMotion = window.matchMedia?.(
-		"(prefers-reduced-motion: reduce)",
-	).matches;
-	if (reducedMotion) {
-		return 0;
-	}
-	const raw = window
-		.getComputedStyle(document.documentElement)
-		.getPropertyValue("--modal-close-dur")
-		.trim();
-	if (raw.endsWith("ms")) {
-		return Number.parseFloat(raw) || 150;
-	}
-	if (raw.endsWith("s")) {
-		return (Number.parseFloat(raw) || 0.15) * 1000;
-	}
-	return 150;
-}
 
 function settingsMotionClassName(phase: SettingsWindowMotionPhase): string {
 	switch (phase) {
@@ -67,20 +57,27 @@ const loadTauriWindowApi = () => import("@tauri-apps/api/window");
  *  - the window is hide-on-close and the renderer stays alive, so re-opens
  *    replay the enter animation from the `visibilitychange`/focus signals
  *    (WebView2 suspends a hidden webview and resumes it on show);
- *  - `requestClose` plays the fade, then asks the backend to hide slightly
- *    before it completes.
+ *  - `requestClose` / `requestDismiss` play the same fade, then the transition
+ *    callback hands the matching {@link WindowExitIntent} to `onClosed`.
+ *
+ * Both exits are returned as ZERO-ARGUMENT callbacks rather than one function
+ * taking an intent: they are wired straight into event handlers, which would
+ * otherwise pass their event object in as the intent.
  */
 export function useSettingsWindowMotion(
-	onClosed: () => void,
+	onClosed: (intent: WindowExitIntent) => void,
 	contentReady: boolean,
 ): {
 	motionClassName: string;
+	onShellTransitionEnd: TransitionEventHandler<HTMLDivElement>;
 	requestClose: () => void;
+	requestDismiss: () => void;
 	shellRef: RefObject<HTMLDivElement | null>;
 } {
 	const shellRef = useRef<HTMLDivElement | null>(null);
 	const [phase, setPhase] = useState<SettingsWindowMotionPhase>("closed");
 	const phaseRef = useRef<SettingsWindowMotionPhase>("closed");
+	const intentRef = useRef<WindowExitIntent>("close");
 	const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const openFrameRef = useRef<number | null>(null);
 	const contentReadyRef = useRef(contentReady);
@@ -112,6 +109,19 @@ export function useSettingsWindowMotion(
 			failsafeTimerRef.current = null;
 		}
 	});
+
+	const completeClose = () => {
+		if (phaseRef.current !== "closing") {
+			return;
+		}
+		if (closeTimerRef.current !== null) {
+			clearTimeout(closeTimerRef.current);
+			closeTimerRef.current = null;
+		}
+		phaseRef.current = "closed";
+		setPhase("closed");
+		onClosed(intentRef.current);
+	};
 
 	const playOpen = useEffectEvent(() => {
 		clearCloseTimer();
@@ -223,12 +233,13 @@ export function useSettingsWindowMotion(
 		// Effect events are stable; the listeners are mount-only.
 	}, []);
 
-	// Plain function (returned to the parent's close handler); touches only
-	// refs + the stable setPhase setter.
-	const requestClose = () => {
+	// Plain function (wrapped below into the parent's two exit handlers);
+	// touches only refs + the stable setPhase setter.
+	const requestExit = (intent: WindowExitIntent) => {
 		if (phaseRef.current === "closing" || phaseRef.current === "closed") {
 			return;
 		}
+		intentRef.current = intent;
 		pendingRevealRef.current = false;
 		if (failsafeTimerRef.current !== null) {
 			clearTimeout(failsafeTimerRef.current);
@@ -240,20 +251,28 @@ export function useSettingsWindowMotion(
 		}
 		phaseRef.current = "closing";
 		setPhase("closing");
-		closeTimerRef.current = setTimeout(
-			() => {
-				closeTimerRef.current = null;
-				phaseRef.current = "closed";
-				setPhase("closed");
-				onClosed();
-			},
-			Math.max(0, modalCloseDurationMs() - CLOSE_HIDE_OVERLAP_MS),
-		);
+		if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+			completeClose();
+			return;
+		}
+		closeTimerRef.current = setTimeout(completeClose, CLOSE_EVENT_FAILSAFE_MS);
 	};
 
+	const onShellTransitionEnd: TransitionEventHandler<HTMLDivElement> = (
+		event,
+	) => {
+		if (
+			event.target === event.currentTarget &&
+			event.propertyName === "transform"
+		) {
+			completeClose();
+		}
+	};
 	return {
 		motionClassName: settingsMotionClassName(phase),
-		requestClose,
+		onShellTransitionEnd,
+		requestClose: () => requestExit("close"),
+		requestDismiss: () => requestExit("dismiss"),
 		shellRef,
 	};
 }

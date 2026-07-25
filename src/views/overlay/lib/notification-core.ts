@@ -4,13 +4,10 @@ import type { OverlayNotification } from "@/bindings";
  * Pure state core for the overlay pill. Semantics (mirroring the Rust side in
  * `src-tauri/src/overlay`):
  *   - `notify` REPLACES the current notification (no queue — last wins) and
- *     restarts the visible window; byte-identical repeats while visible are
- *     idempotent because the backend re-emits the same event a few times to
- *     cover the first-show listener race.
+ *     restarts the visible window; sequence numbers make delayed event and
+ *     snapshot delivery safe in either order.
  *   - `dismiss` starts the exit (visible → false) but KEEPS the notification
  *     so the retracting pill still renders its content.
- *   - `expired` only applies when its generation is still current — a newer
- *     notify invalidates a stale timer.
  */
 
 export interface OverlayState {
@@ -27,21 +24,7 @@ export const INITIAL_OVERLAY_STATE: OverlayState = {
 
 export type OverlayAction =
 	| { type: "notify"; notification: OverlayNotification }
-	| { type: "dismiss" }
-	| { type: "expired"; generation: number };
-
-export function sameNotification(
-	a: OverlayNotification | null,
-	b: OverlayNotification,
-): boolean {
-	return (
-		a !== null &&
-		(a.title ?? null) === (b.title ?? null) &&
-		a.message === b.message &&
-		a.tone === b.tone &&
-		a.durationMs === b.durationMs
-	);
-}
+	| { type: "dismiss"; sequence: number };
 
 export function overlayReducer(
 	state: OverlayState,
@@ -49,31 +32,19 @@ export function overlayReducer(
 ): OverlayState {
 	switch (action.type) {
 		case "notify":
-			// Duplicate delivery of the CURRENT visible notification (backend
-			// re-emit) — keep the state identity so the expiry timer isn't
-			// restarted and the content doesn't re-render.
-			if (
-				state.visible &&
-				sameNotification(state.notification, action.notification)
-			) {
+			if (action.notification.sequence <= state.generation) {
 				return state;
 			}
 			return {
-				generation: state.generation + 1,
+				generation: action.notification.sequence,
 				notification: action.notification,
 				visible: true,
 			};
 		case "dismiss":
-			if (!state.visible) {
+			if (action.sequence <= state.generation) {
 				return state;
 			}
-			// Bump the generation so a pending expiry can't fire again later.
-			return { ...state, generation: state.generation + 1, visible: false };
-		case "expired":
-			if (action.generation !== state.generation || !state.visible) {
-				return state;
-			}
-			return { ...state, visible: false };
+			return { ...state, generation: action.sequence, visible: false };
 		default:
 			return state;
 	}

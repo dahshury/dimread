@@ -70,10 +70,6 @@ function DefaultFallback({
 	);
 }
 
-/**
- * Error boundary component that catches React errors in child components.
- * Provides fallback UI and error logging.
- */
 export class ErrorBoundary extends Component<
 	ErrorBoundaryProps,
 	ErrorBoundaryState
@@ -98,10 +94,7 @@ export class ErrorBoundary extends Component<
 		console.error("[ErrorBoundary] Caught error:", formatErrorForLog(error));
 		console.error("[ErrorBoundary] Component stack:", componentStack);
 
-		// Update state with error info
 		this.setState({ errorInfo: componentStack });
-
-		// Call custom error handler if provided
 		this.props.onError?.(error, componentStack);
 	}
 

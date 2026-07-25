@@ -6,7 +6,18 @@ from WinSTT (`E:\DL\Projects\WinSTT`). Delete once absorbed.
 
 ## What was built, per window
 
-### Main window (`src/views/main/`, `src/widgets/status-bar/`)
+### ~~Main window~~ — REMOVED
+
+> **Superseded.** There is no `main` window any more. DimRead is a tray app with
+> ONE top-level window: the settings window (`windows::PRIMARY_WINDOW`, served
+> from the ROOT `index.html`). The live controls this section describes now live
+> in `src/widgets/quick-controls/` and render at the top of Settings → Display —
+> the same components, just re-parented. A tray LEFT click, the `toggleMain`
+> hotkey and the flyout's Settings row all surface that one window. The
+> `widgets/status-bar/` and `widgets/title-bar/` slices below went with it.
+>
+> Everything from here to the picker section is kept only as a record of what
+> the removed window contained.
 
 - `views/main/ui/MainPage.tsx` — 480×180 frameless layout: a hero area
   (whole area is a `titlebar-drag` region) with the "DimRead" wordmark

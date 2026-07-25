@@ -89,7 +89,9 @@ export function HotkeysPanel() {
 										onClick={() => clearCombo(id)}
 										tooltip={tHotkeys("clear")}
 									/>
-								) : null}
+								) : (
+									<span aria-hidden className="size-7 shrink-0" />
+								)}
 							</div>
 						}
 						layout="row"
