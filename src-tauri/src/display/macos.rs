@@ -338,7 +338,10 @@ fn resolve_display(device: &str) -> Option<CGDirectDisplayId> {
             .find(|display| hardware_identity(*display) == identity);
     }
 
-    let session_id = device.strip_prefix(SESSION_PREFIX)?.parse().ok()?;
+    let session_id = device
+        .strip_prefix(SESSION_PREFIX)?
+        .parse::<CGDirectDisplayId>()
+        .ok()?;
     active_displays()
         .into_iter()
         .find(|display| *display == session_id)

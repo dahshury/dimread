@@ -36,4 +36,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The former standalone `main` window and its duplicate title/status chrome.
 - The two generic tray icons superseded by mode- and phase-aware variants.
 
+### Fixed
+
+- Corrected target-specific Rust compilation for Linux and macOS by keeping
+  Win32 listeners behind platform guards and using the native CoreGraphics
+  display-ID type during macOS monitor resolution.
+
 [0.0.2-alpha]: https://github.com/dahshury/dimread/compare/v0.0.1-alpha...v0.0.2-alpha

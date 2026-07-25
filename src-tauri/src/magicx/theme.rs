@@ -45,8 +45,10 @@
 //! Everything Win32 is `cfg(windows)`-gated; off-Windows the seam compiles and is
 //! inert (it never touches any registry).
 
+#[cfg(windows)]
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, OnceLock};
+#[cfg(any(windows, test))]
 use std::time::Duration;
 
 use tauri::AppHandle;
@@ -125,9 +127,6 @@ pub(crate) fn notify_system_change() {
     request_wake();
 }
 
-#[cfg(not(windows))]
-pub(crate) fn notify_system_change() {}
-
 /// Deadline-driven Auto Dark worker. Fixed targets have no timer at all; an
 /// automatic target sleeps directly to its next sunrise/sunset boundary.
 #[cfg(windows)]
@@ -163,6 +162,7 @@ fn next_theme_delay() -> Option<Duration> {
     ))
 }
 
+#[cfg(any(windows, test))]
 fn duration_until_next_boundary(sunrise: f64, sunset: f64, now_minutes: f64) -> Duration {
     let next_delta = [sunrise, sunset]
         .into_iter()
@@ -331,6 +331,7 @@ fn local_now_minutes() -> f64 {
     f64::from(now.hour()) * 60.0 + f64::from(now.minute()) + f64::from(now.second()) / 60.0
 }
 
+#[cfg(windows)]
 fn local_now_minutes_precise() -> f64 {
     use chrono::Timelike;
     let now = chrono::Local::now();

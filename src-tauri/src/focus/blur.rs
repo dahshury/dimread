@@ -53,7 +53,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tauri::{AppHandle, Listener};
+use tauri::AppHandle;
+#[cfg(windows)]
+use tauri::Listener;
 
 /// Whether Focus Blur currently owns the overlay.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -66,6 +68,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Monotonic ordering for the cached/event anchor handshake. A renderer can
 /// safely apply the snapshot after subscribing without overwriting an anchor
 /// event that arrived while the command was in flight.
+#[cfg(windows)]
 static ANCHOR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Latest emitted anchor. The overlay renderer reads this after registering its
 /// event listener, closing the startup gap where the tracker's immediate first
@@ -84,9 +87,9 @@ const OVERLAY_LABEL: &str = "focus-overlay";
 /// restarts (CareUEyes parity). The actual restore is callback-driven by
 /// [`on_page_load`], once the overlay renderer has finished loading; [`start`]
 /// otherwise lazily shows the overlay + tracker.
-pub fn init(app: &AppHandle) {
+pub fn init(_app: &AppHandle) {
     #[cfg(windows)]
-    let _ = app.listen_any("settings:changed", |_event| {
+    let _ = _app.listen_any("settings:changed", |_event| {
         windows_impl::request_environment_refresh();
     });
 }
@@ -206,6 +209,7 @@ fn show_overlay() {
 
 /// Refit an already-active overlay after a native display topology change.
 /// This intentionally does not create or show a window when Blur is inactive.
+#[cfg(windows)]
 fn resize_overlay() {
     if !is_active() {
         return;

@@ -187,6 +187,7 @@ fn stop_cursor_tracker() {}
 /// Whether the cursor position changed since the last emitted event (the first
 /// event, with no prior value, always counts as a move so the band snaps to the
 /// pointer immediately on start).
+#[cfg(any(windows, test))]
 fn cursor_moved(last: Option<(i32, i32)>, current: (i32, i32)) -> bool {
     last != Some(current)
 }
