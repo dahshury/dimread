@@ -210,15 +210,17 @@ impl OutputState {
         self.description
             .as_deref()
             .filter(|description| !description.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                let hardware = format!("{} {}", self.make.trim(), self.model.trim());
-                if hardware.trim().is_empty() {
-                    self.name.clone().unwrap_or_else(|| "Wayland output".into())
-                } else {
-                    hardware.trim().to_owned()
-                }
-            })
+            .map_or_else(
+                || {
+                    let hardware = format!("{} {}", self.make.trim(), self.model.trim());
+                    if hardware.trim().is_empty() {
+                        self.name.clone().unwrap_or_else(|| "Wayland output".into())
+                    } else {
+                        hardware.trim().to_owned()
+                    }
+                },
+                str::to_owned,
+            )
     }
 }
 

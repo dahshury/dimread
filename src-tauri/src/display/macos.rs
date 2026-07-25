@@ -242,14 +242,6 @@ pub fn apply_ramp(device: &str, ramp: &GammaRamp) -> bool {
     }
 }
 
-/// Restore a previously captured transfer table.
-///
-/// This is deliberately the same operation as applying a composed ramp: the
-/// caller supplies the exact [`GammaRamp`] it captured with [`read_ramp`].
-pub fn restore_ramp(device: &str, original: &GammaRamp) -> bool {
-    apply_ramp(device, original)
-}
-
 /// Register a process-lifetime listener for native display-topology changes.
 ///
 /// CoreGraphics invokes this callback when displays are connected,

@@ -85,28 +85,27 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Capture the handle and start the theme scheduler. Idempotent — a second call
 /// (or a second window) is a no-op. Called from [`super::init`].
 pub fn init(app: &AppHandle) {
-    if APP.set(app.clone()).is_err() {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        use tauri::Listener;
-
-        let (wake_tx, wake_rx) = mpsc::sync_channel(1);
-        let _ = WAKE_TX.set(wake_tx);
-        let _ = app.listen_any("settings:changed", |_event| request_wake());
-
-        if let Err(err) = std::thread::Builder::new()
-            .name("autodark-scheduler".into())
-            .spawn(move || scheduler_loop(wake_rx))
+    if APP.set(app.clone()).is_ok() {
+        #[cfg(windows)]
         {
-            log::warn!("[autodark] failed to start deadline worker: {err}");
-        }
-        if let Err(err) = std::thread::Builder::new()
-            .name("autodark-registry-events".into())
-            .spawn(registry_notification_loop)
-        {
-            log::warn!("[autodark] failed to start registry listener: {err}");
+            use tauri::Listener;
+
+            let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+            let _ = WAKE_TX.set(wake_tx);
+            let _ = app.listen_any("settings:changed", |_event| request_wake());
+
+            if let Err(err) = std::thread::Builder::new()
+                .name("autodark-scheduler".into())
+                .spawn(move || scheduler_loop(wake_rx))
+            {
+                log::warn!("[autodark] failed to start deadline worker: {err}");
+            }
+            if let Err(err) = std::thread::Builder::new()
+                .name("autodark-registry-events".into())
+                .spawn(registry_notification_loop)
+            {
+                log::warn!("[autodark] failed to start registry listener: {err}");
+            }
         }
     }
 }
