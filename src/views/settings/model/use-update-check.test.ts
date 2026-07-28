@@ -5,14 +5,25 @@ import { act, renderHook, waitFor } from "@testing-library/react";
  * `commands.updateCheck` is the hook's only collaborator. Mocking the generated
  * bindings module keeps the test off the IPC bridge while still exercising the
  * tauri-specta `Result` envelope the real command returns.
+ *
+ * The mock is ADDITIVE — the real module is spread back in and only
+ * `updateCheck` is replaced. `mock.module` is process-wide and permanent in bun,
+ * so a replacement object leaves every test file loaded after this one with a
+ * `commands` missing every other command. That is not hypothetical: a bare
+ * `{commands: {updateCheck}, events: {}}` here broke the nine `FocusBlurShade`
+ * tests on Linux CI and nowhere else, because the suites load in a different
+ * order per platform.
  */
 let respond: () => Promise<unknown>;
 
+const actualBindings = await import("@/bindings");
+
 mock.module("@/bindings", () => ({
+	...actualBindings,
 	commands: {
+		...actualBindings.commands,
 		updateCheck: () => respond(),
 	},
-	events: {},
 }));
 
 const { useUpdateCheck } = await import("./use-update-check");
