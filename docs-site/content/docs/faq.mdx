@@ -1,0 +1,208 @@
+---
+title: FAQ
+description: Short answers on privacy, colour accuracy, HDR, sleep and Remote Desktop, hotkeys, and the per-platform gaps, each pointing at the page that owns the detail.
+---
+
+Every answer below is one or two sentences and a link to the page that covers the
+topic properly. If your screen is not changing at all, start at
+[Troubleshooting](/docs/troubleshooting) instead.
+
+## About the app
+
+**Does anything leave my machine?**
+
+No, with one exception: pressing **Check for updates** on Settings → About sends
+a single request to GitHub's releases API and compares the newest published
+version with the one you are running. There is no telemetry, no account and no
+activation, and sun times are computed offline — see [About](/docs/about). On
+Windows, the `DimRead.exe` installer also fetches Microsoft's WebView2
+bootstrapper if that runtime is missing.
+
+**Is DimRead open source?**
+
+Yes, under the MIT licence, at `github.com/dahshury/dimread`. The About tab links
+the repository, these docs and the releases page.
+
+**Does it cost anything?**
+
+No. There is no paid tier and nothing to buy — the Credits section on the About
+tab puts it as "no account, no activation, no telemetry".
+
+**Are the builds signed?**
+
+No. The v0.0.3-alpha Windows builds are not code-signed and the macOS builds are
+ad-hoc signed but not notarized, so Windows shows SmartScreen and macOS shows
+Gatekeeper's "unknown developer" block once, on first launch. The Linux packages
+raise no such prompt — the AppImage only needs `chmod +x`. The exact
+click-through per platform is in [Getting Started](/docs#first-launch).
+
+**Is it an Electron app?**
+
+No. DimRead is built on Tauri v2 and React 19; the About tab reports the running
+Tauri version next to the app version.
+
+## Display and modes
+
+**Does DimRead change my monitor's colour profile?**
+
+No. It writes the GPU's gamma ramp for the current session — your ICC profile on
+disk is untouched. DimRead captures whatever ramp it found at startup, an ICC
+calibration curve included, and writes it back when you select **Pause** or quit.
+See [Display](/docs/display).
+
+**Is it safe for colour-critical work?**
+
+No — while the filter is on, everything you see goes through a warmed, dimmed
+LUT, so judge colour with **Pause** selected or with that monitor switched out of
+filtering. Your files are unaffected either way: the ramp is applied at scan-out,
+so screenshots and screen captures come out clean.
+
+**Does it work with HDR?**
+
+No. There is no HDR-aware path — DimRead writes one gamma ramp per display
+whatever the colour pipeline is doing, and macOS turns HDR off on a display while
+a gamma table is applied to it.
+
+**Does it fight Night Light, redshift or f.lux?**
+
+Yes on Windows, macOS and X11: the gamma ramp is one global slot per display and
+DimRead does no arbitration, so whichever tool wrote it last wins — run one at a
+time. On wlroots Wayland the compositor grants gamma control to a single client,
+so a running `gammastep` or `wlsunset` locks DimRead out of that output and only
+a log line records it. macOS **Night Shift** is the exception: it writes below
+CoreGraphics, so it composes with DimRead's ramp rather than fighting it.
+
+**Does the filter survive sleep?**
+
+Yes. On Windows DimRead re-applies the ramp on the system's resume and
+clock-change broadcasts; on macOS and Linux it re-applies on the app's resume
+event and whenever a DimRead window takes focus, which is a slower trigger.
+
+**Does it work over Remote Desktop?**
+
+Not currently. DimRead has no remote-session path — it enumerates whatever
+monitors the session reports and asks the display driver to write a gamma ramp;
+if a virtual display driver rejects that write, the sliders move, nothing changes
+on screen, and DimRead does not surface the rejection. See
+[Diagnostics](/docs/diagnostics).
+
+**Can it dim below my monitor's own minimum brightness?**
+
+Yes — that is the point of it. Brightness here is software dimming of the gamma
+LUT, not backlight control, so it goes darker than the panel's own control
+allows, down to a 10% floor by default or 0% with
+[wide brightness range](/docs/display#wide-brightness-range) enabled. It can
+never make a screen *brighter* than the backlight already is.
+
+**Does Reading mode's grayscale work everywhere?**
+
+No, it is Windows-only — full-screen grayscale uses the Windows Magnification
+API. On macOS and Linux, Reading still applies its 5500 K / 85% preset and the
+mode description tells you grayscale is unavailable.
+
+## Schedule
+
+**Does DimRead track my location?**
+
+No. It reads your system timezone and looks up that zone's reference city in a
+418-zone IANA table compiled into the app — no geolocation API, no permission
+prompt, no IP lookup. You can also pick a zone yourself or type coordinates, on
+[Schedule](/docs/schedule).
+
+**Does the schedule need an internet connection?**
+
+No, never. Sunrise and sunset come from the NOAA solar equations built into the
+app, accurate to about a minute at mid latitudes.
+
+**Will the schedule follow me if I travel?**
+
+Yes, with **Time source** set to Automatic — sun times are recomputed from the
+current clock, timezone and DST offset on every evaluation, and nothing is cached
+across midnight. On Windows a clock change wakes DimRead at once; on macOS and
+Linux there is no native clock-change notification, so it catches up on the next
+resume, window focus or schedule deadline.
+
+## Hotkeys
+
+**Do hotkeys work when the settings window is closed?**
+
+Yes. They are OS-level global shortcuts held by the running app, so the window
+can be hidden or closed to the tray. See [Hotkeys](/docs/hotkeys).
+
+**Are any hotkeys bound out of the box?**
+
+No. All twelve bindings ship empty; record the ones you want on Settings →
+Hotkeys and they arm on save, with no restart.
+
+**Do global hotkeys work on Wayland?**
+
+No. The shortcut plugin grabs through XWayland, so registration reports success
+and the key never fires — the binding looks correct and does nothing.
+
+## Window effects
+
+**Do Focus Read, Focus Blur and Magic Window work on macOS and Linux?**
+
+No. All three depend on Win32 trackers: off Windows the overlay window appears
+but nothing follows the cursor or the focused window, and the per-window Magic
+Window backend is an inert no-op. See [Window effects](/docs/window-effects).
+
+**Does Focus Blur highlight windows from apps running as administrator?**
+
+No, and the app says so on the toggle: "Windows from apps running as
+administrator can't be detected, so they won't be highlighted."
+
+## Per-platform
+
+### Windows
+
+**Does DimRead need administrator rights, or write to the registry?**
+
+No to both. The installer runs per-user with no elevation prompt and installs
+portable by default, into `Desktop\DimRead` unless you pick another folder,
+keeping settings, logs and window state in a `Data\` folder beside the
+executable. Two opt-in features do write under `HKCU`: **Start at login** adds a
+`Run` value named `DimRead`, and **System theme** on Settings → Schedule sets
+`Themes\Personalize\SystemUsesLightTheme`. A portable install has no uninstaller,
+so remove that `Run` value by hand if you delete the folder.
+
+### macOS
+
+**Does it run on Intel Macs?**
+
+Yes. There is a separate Intel disk image alongside the Apple Silicon one, and
+the minimum system version is macOS 10.15.
+
+**Does DimRead ask for any system permissions?**
+
+No. There is no Accessibility, Screen Recording or Location prompt anywhere in
+the shipped code — the display backend uses public CoreGraphics only, and sun
+times come from your timezone rather than CoreLocation.
+
+### Linux
+
+**Does it work on Wayland?**
+
+No, not on GNOME or KDE Wayland sessions: neither implements the
+`zwlr_gamma_control_manager_v1` protocol DimRead needs, and DimRead refuses to
+fall back to XWayland RandR because that would tint only XWayland surfaces while
+claiming to control the display. X11 sessions and wlroots compositors (sway,
+Hyprland, river) do work — see
+[Nothing happens on Wayland](/docs/troubleshooting#nothing-happens-on-wayland).
+
+**Do I need anything installed for the tray icon?**
+
+Yes, an AppIndicator host: the `.deb` declares `libayatana-appindicator3-1` and
+the `.rpm` declares `libayatana-appindicator-gtk3`. The AppImage cannot declare
+dependencies at all, so install one of those packages first or DimRead's only
+visible surface never appears.
+
+## Where to go next
+
+- **[Troubleshooting](/docs/troubleshooting)** — symptom-shaped fixes, including
+  the platform gaps named above.
+- **[Diagnostics](/docs/diagnostics)** — where the log, the settings file and the
+  recovery journal live.
+- **[Display](/docs/display)** — the sliders, the eight modes, and per-monitor
+  targeting.
+- **[About](/docs/about)** — version, update checks, licence and credits.

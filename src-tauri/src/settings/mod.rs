@@ -209,12 +209,22 @@ pub struct DisplaySettings {
     /// Suspend filtering while a full-screen app (e.g. a game) is foreground
     /// (FEATURE-PARITY F1.11). On by default, like CareUEyes.
     pub disable_on_fullscreen: bool,
-    /// Animate colour/brightness changes over ~400 ms.
+    /// Ease colour/brightness changes towards their target (~400 ms for a mode
+    /// switch) instead of snapping — including live slider drags.
     pub smooth_transition: bool,
     /// Apply one value to every monitor; when off, use `monitor_overrides`.
     pub sync_monitors: bool,
     /// Per-monitor overrides keyed by the display backend's durable monitor id.
     pub monitor_overrides: HashMap<String, MonitorOverride>,
+    /// Monitor ids that opt OUT of filtering entirely — the engine restores
+    /// their original ramp and leaves them alone.
+    ///
+    /// Deliberately independent of `sync_monitors`/`monitor_overrides`: those
+    /// choose WHAT VALUES a monitor gets, this chooses WHETHER it participates,
+    /// and a user wanting one untouched screen must not have to leave sync mode
+    /// to get it. Ids of unplugged displays are kept rather than pruned, so a
+    /// monitor that is exiled stays exiled across a dock/undock cycle.
+    pub excluded_monitors: Vec<String>,
     /// The eight editable preset modes keyed by mode id.
     pub modes: HashMap<String, ModePreset>,
 }
@@ -229,6 +239,7 @@ impl Default for DisplaySettings {
             smooth_transition: true,
             sync_monitors: true,
             monitor_overrides: HashMap::new(),
+            excluded_monitors: Vec::new(),
             modes: default_modes(),
         }
     }
@@ -239,9 +250,16 @@ impl Default for DisplaySettings {
 #[serde(rename_all = "camelCase", default)]
 pub struct DayNightSettings {
     pub enabled: bool,
-    /// Derive sun times from `latitude`/`longitude` instead of the manual
-    /// `sunrise`/`sunset` strings.
+    /// Compute sun times from a location instead of the manual `sunrise`/
+    /// `sunset` strings. WHICH location is [`Self::location_source`]'s job.
     pub use_location: bool,
+    /// Where the coordinates come from when `use_location` is set — one of
+    /// [`LOCATION_SOURCE_IDS`]. See `crate::display::location::resolve`.
+    pub location_source: String,
+    /// IANA zone id chosen in the picker (`location_source == "timezone"`).
+    /// Empty falls back to the detected system zone.
+    pub timezone: String,
+    /// Hand-entered coordinates (`location_source == "manual"`).
     pub latitude: f64,
     pub longitude: f64,
     /// Manual sunrise time, "HH:MM" (used when `use_location` is off).
@@ -252,11 +270,23 @@ pub struct DayNightSettings {
     pub transition_minutes: u32,
 }
 
+/// The three ways `day_night` can arrive at a latitude/longitude, in the order
+/// the panel presents them. Single source of truth for the roster: the Zod
+/// schema in `src/shared/config/settings-schema/index.ts` mirrors it, and
+/// `crate::display::location` matches on exactly these ids.
+pub const LOCATION_SOURCE_IDS: [&str; 3] = ["auto", "timezone", "manual"];
+
 impl Default for DayNightSettings {
     fn default() -> Self {
         Self {
             enabled: true,
             use_location: false,
+            // Auto, so selecting "time based on location" is immediately
+            // correct: 0°, 0° is the Gulf of Guinea, and a fresh install that
+            // silently scheduled an equatorial 06:00/18:00 day was the whole
+            // reason the location mode looked broken.
+            location_source: "auto".to_string(),
+            timezone: String::new(),
             latitude: 0.0,
             longitude: 0.0,
             sunrise: "07:00".to_string(),
@@ -400,8 +430,14 @@ impl Default for MagicxSettings {
 pub struct AutoDarkSettings {
     /// Windows system-theme schedule: `light`|`dark`|`auto`|`disable`.
     pub system_theme: String,
+    /// Take the `auto` schedule's boundaries from [`DayNightSettings`] — the same
+    /// sun times the colour filter runs on — instead of the pair below. On by
+    /// default: two schedules that answer "when is it night?" differently is a
+    /// bug the user has to notice, and only the day/night section can resolve a
+    /// real location. The manual pair stays as the opt-out.
+    pub use_day_night_schedule: bool,
     /// Sunrise for the SYSTEM theme's `auto` (day→night) schedule, `"HH:MM"`.
-    /// Decoupled from the Display-tab blue-light schedule.
+    /// Used only when `use_day_night_schedule` is off.
     pub system_sunrise: String,
     /// Sunset for the SYSTEM theme's `auto` schedule, `"HH:MM"`.
     pub system_sunset: String,
@@ -413,6 +449,7 @@ impl Default for AutoDarkSettings {
     fn default() -> Self {
         Self {
             system_theme: "disable".to_string(),
+            use_day_night_schedule: true,
             system_sunrise: "07:00".to_string(),
             system_sunset: "19:00".to_string(),
             taskbar_transparent: false,
@@ -501,6 +538,46 @@ pub(crate) fn normalize_settings(settings: &mut AppSettings) {
     settings.focus_read.transparency = settings.focus_read.transparency.min(100);
     settings.focus_read.height = settings.focus_read.height.clamp(20, 4000);
     settings.focus_blur.transparency = settings.focus_blur.transparency.min(100);
+    // An unrecognised location source must not silently mean "manual" — that is
+    // how a settings file from a newer build would end up scheduling 0°, 0° sun
+    // times. Unknown falls back to the source that needs no stored input.
+    if !LOCATION_SOURCE_IDS.contains(&settings.day_night.location_source.as_str()) {
+        settings.day_night.location_source = LOCATION_SOURCE_IDS[0].to_string();
+    }
+    settings.day_night.timezone = settings.day_night.timezone.trim().to_string();
+    settings.day_night.latitude = settings.day_night.latitude.clamp(-90.0, 90.0);
+    settings.day_night.longitude = settings.day_night.longitude.clamp(-180.0, 180.0);
+}
+
+/// Adopt coordinates a PRE-`location_source` settings file stored.
+///
+/// Before the location source existed, `useLocation: true` could only mean "use
+/// my stored latitude/longitude". Parsing such a file now yields the new
+/// `"auto"` default, which would silently discard coordinates the user typed —
+/// so a file that predates the field and actually carries coordinates is pinned
+/// to `"manual"`. A file sitting at the 0°, 0° sentinel is deliberately NOT
+/// pinned: that is the broken state this feature exists to fix, and those users
+/// want detection.
+pub(crate) fn migrate_legacy_location_source(value: &mut serde_json::Value) {
+    let Some(day_night) = value.get_mut("dayNight").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    if day_night.contains_key("locationSource") {
+        return;
+    }
+    let uses_location = day_night
+        .get("useLocation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let coordinate = |key: &str| {
+        day_night
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0)
+    };
+    if uses_location && (coordinate("latitude") != 0.0 || coordinate("longitude") != 0.0) {
+        day_night.insert("locationSource".into(), "manual".into());
+    }
 }
 
 /// Merge a partial patch over the current tree, section-wholesale.
@@ -663,6 +740,65 @@ mod tests {
         assert_eq!(settings.day_night.transition_minutes, 60);
         assert!(!settings.rules.enabled);
         assert!(settings.rules.items.is_empty());
+        // Detection, not the 0°, 0° sentinel — a fresh install that switches to
+        // location-based times must get real sun times without typing anything.
+        assert_eq!(settings.day_night.location_source, "auto");
+        assert!(settings.day_night.timezone.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_location_source_normalizes_to_detection() {
+        let mut settings = AppSettings::default();
+        settings.day_night.location_source = "geolocation-api".to_string();
+        normalize_settings(&mut settings);
+        assert_eq!(settings.day_night.location_source, "auto");
+    }
+
+    #[test]
+    fn out_of_range_coordinates_are_clamped() {
+        let mut settings = AppSettings::default();
+        settings.day_night.latitude = 1_000.0;
+        settings.day_night.longitude = -1_000.0;
+        normalize_settings(&mut settings);
+        assert_eq!(settings.day_night.latitude, 90.0);
+        assert_eq!(settings.day_night.longitude, -180.0);
+    }
+
+    #[test]
+    fn a_pre_location_source_file_keeps_coordinates_the_user_typed() {
+        let mut value = serde_json::json!({
+            "dayNight": { "useLocation": true, "latitude": 51.5074, "longitude": -0.1278 }
+        });
+        migrate_legacy_location_source(&mut value);
+        let settings: DayNightSettings =
+            serde_json::from_value(value["dayNight"].clone()).expect("parses");
+        assert_eq!(settings.location_source, "manual");
+        assert_eq!(settings.latitude, 51.5074);
+    }
+
+    #[test]
+    fn a_pre_location_source_file_stuck_at_zero_gets_detection_instead() {
+        // 0°, 0° is the sentinel of the broken state, not a location anyone
+        // chose — those users are exactly who auto-detection is for.
+        let mut value = serde_json::json!({
+            "dayNight": { "useLocation": true, "latitude": 0.0, "longitude": 0.0 }
+        });
+        migrate_legacy_location_source(&mut value);
+        let settings: DayNightSettings =
+            serde_json::from_value(value["dayNight"].clone()).expect("parses");
+        assert_eq!(settings.location_source, "auto");
+    }
+
+    #[test]
+    fn migration_never_overrides_an_explicit_choice() {
+        let mut value = serde_json::json!({
+            "dayNight": {
+                "useLocation": true, "locationSource": "auto",
+                "latitude": 51.5074, "longitude": -0.1278,
+            }
+        });
+        migrate_legacy_location_source(&mut value);
+        assert_eq!(value["dayNight"]["locationSource"], "auto");
     }
 
     #[test]
@@ -690,6 +826,8 @@ mod tests {
         assert_eq!(settings.magicx.toolbar_align, "center");
         assert_eq!(settings.magicx.toolbar_delay_ms, 400);
         assert_eq!(settings.auto_dark.system_theme, "disable");
+        // The system theme follows the day/night schedule unless opted out.
+        assert!(settings.auto_dark.use_day_night_schedule);
         assert_eq!(settings.auto_dark.system_sunrise, "07:00");
         assert_eq!(settings.auto_dark.system_sunset, "19:00");
         assert!(!settings.auto_dark.taskbar_transparent);

@@ -861,15 +861,17 @@ dependencies = [
 
 [[package]]
 name = "dimread"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 dependencies = [
  "anyhow",
  "chrono",
  "futures-util",
+ "iana-time-zone",
  "log",
  "once_cell",
  "reqwest",
  "rustix",
+ "semver",
  "serde",
  "serde_json",
  "specta",

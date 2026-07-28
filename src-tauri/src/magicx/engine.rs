@@ -130,6 +130,13 @@ fn forget(hwnd: Hwnd) {
     });
 }
 
+/// [`forget`] for the sibling capture backend, which lives outside this module
+/// (`magicx::engine_wgc`) and so cannot reach the private helper.
+#[cfg(all(windows, not(test)))]
+pub(crate) fn forget_hwnd(hwnd: Hwnd) {
+    forget(hwnd);
+}
+
 // ── Colour matrices (5×5 `MAGCOLOREFFECT`, row-major: `[R G B A 1] × M`) ───────
 //
 // Same layout the full-screen Reading-mode grayscale uses (`display::grayscale`):

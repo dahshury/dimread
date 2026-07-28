@@ -6,11 +6,15 @@ export {
 	brightnessRange,
 	buildBrightnessPatch,
 	buildKelvinPatch,
+	buildMonitorEnabledPatch,
 	clampBrightness,
 	clampKelvin,
+	countEnabledMonitors,
+	defaultBrightnessFor,
 	defaultKelvinFor,
 	type EditPhase,
 	isAllMonitors,
+	isMonitorEnabled,
 	KELVIN_RANGE_DEFAULT,
 	KELVIN_RANGE_WIDE,
 	KELVIN_STEP,
@@ -26,6 +30,10 @@ export {
 	patchDisplaySettings,
 } from "./model/persist-display";
 export { endDisplayPreview, previewDisplay } from "./model/preview";
+export {
+	type DayNightLocation,
+	useDayNightLocation,
+} from "./model/use-day-night-location";
 export {
 	type DisplaySliderControls,
 	useDisplaySliders,

@@ -18,9 +18,15 @@
 //!
 //! ## How the schedule resolves
 //! `"light"` → light, `"dark"` → dark, `"disable"` → left untouched, and
-//! `"auto"` → light during the day / dark after sunset, using
-//! `system_sunrise`/`system_sunset` against the wall clock (decoupled from the
-//! Display-tab blue-light schedule).
+//! `"auto"` → light during the day / dark after sunset.
+//!
+//! WHICH day/night window `"auto"` runs on is [`AutoDarkSettings::use_day_night_schedule`]:
+//! on (the default) it reuses the day/night section's boundaries — the very sun
+//! times the colour filter runs on, resolved location and all — via
+//! [`crate::display::scheduler::current_schedule_times`]; off it falls back to
+//! this section's own `system_sunrise`/`system_sunset` pair. Two schedules that
+//! answer "when is it night?" differently is a bug the user has to notice, so
+//! sharing is the default and the manual pair is the opt-out.
 //!
 //! On an actual change the resolved dark flag is written to
 //! `HKCU\...\Themes\Personalize` (`SystemUsesLightTheme`, where `1` = light and
@@ -154,11 +160,23 @@ fn next_theme_delay() -> Option<Duration> {
         return None;
     }
     let now_minutes = local_now_minutes_precise();
-    Some(duration_until_next_boundary(
-        parse_hhmm(&settings.system_sunrise),
-        parse_hhmm(&settings.system_sunset),
-        now_minutes,
-    ))
+    Some(match effective_window(&settings) {
+        // Polar day/night: nothing changes until the date does. The shared
+        // schedule's astronomy is recomputed per date, so a midnight wake is
+        // also what re-derives tomorrow's boundaries.
+        ThemeWindow::Fixed { .. } => until_next_local_midnight(now_minutes),
+        ThemeWindow::Rises { sunrise, sunset } => {
+            duration_until_next_boundary(sunrise, sunset, now_minutes)
+                .min(until_next_local_midnight(now_minutes))
+        }
+    })
+}
+
+/// Wake at the date rollover: the shared schedule's sun times are computed for
+/// TODAY, so tomorrow's boundaries only exist after midnight.
+#[cfg(any(windows, test))]
+fn until_next_local_midnight(now_minutes: f64) -> Duration {
+    Duration::from_secs_f64(((1440.0 - now_minutes) * 60.0).max(0.05))
 }
 
 #[cfg(any(windows, test))]
@@ -215,7 +233,7 @@ pub fn apply_now() {
     };
     let settings = crate::settings::store::read_settings(app).auto_dark;
     let now_minutes = local_now_minutes();
-    let resolved = resolve(&settings, now_minutes);
+    let resolved = resolve(&settings, effective_window(&settings), now_minutes);
 
     let mut last = LAST_THEME
         .lock()
@@ -279,14 +297,49 @@ fn resolve_target(target: &str, day: bool) -> Option<bool> {
     }
 }
 
+/// The daytime window an `"auto"` target is evaluated against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThemeWindow {
+    /// A sunrise/sunset pair in local minutes-of-day.
+    Rises { sunrise: f64, sunset: f64 },
+    /// Polar day or polar night: no boundary today, the phase is simply this.
+    Fixed { day: bool },
+}
+
+/// This section's own `"HH:MM"` pair — the window used when the day/night
+/// schedule is opted out of, and the fallback whenever it cannot be read.
+fn own_window(settings: &AutoDarkSettings) -> ThemeWindow {
+    ThemeWindow::Rises {
+        sunrise: parse_hhmm(&settings.system_sunrise),
+        sunset: parse_hhmm(&settings.system_sunset),
+    }
+}
+
+/// The window to resolve against right now, honouring
+/// [`AutoDarkSettings::use_day_night_schedule`]. Falls back to [`own_window`]
+/// when the display scheduler has no settings handle yet (early boot), so the
+/// theme is never left unscheduled.
+fn effective_window(settings: &AutoDarkSettings) -> ThemeWindow {
+    use crate::display::scheduler::ScheduleTimes;
+
+    if !settings.use_day_night_schedule {
+        return own_window(settings);
+    }
+    match crate::display::scheduler::current_schedule_times() {
+        Some(ScheduleTimes::Rises { sunrise, sunset }) => ThemeWindow::Rises { sunrise, sunset },
+        Some(ScheduleTimes::AlwaysUp) => ThemeWindow::Fixed { day: true },
+        Some(ScheduleTimes::AlwaysDown) => ThemeWindow::Fixed { day: false },
+        None => own_window(settings),
+    }
+}
+
 /// Resolve the system theme target for a settings snapshot at the current
-/// wall-clock minute-of-day, against its own sunrise/sunset window.
-fn resolve(settings: &AutoDarkSettings, now_minutes: f64) -> ResolvedTheme {
-    let system_day = is_day_by_clock(
-        parse_hhmm(&settings.system_sunrise),
-        parse_hhmm(&settings.system_sunset),
-        now_minutes,
-    );
+/// wall-clock minute-of-day, against the supplied daytime window.
+fn resolve(settings: &AutoDarkSettings, window: ThemeWindow, now_minutes: f64) -> ResolvedTheme {
+    let system_day = match window {
+        ThemeWindow::Fixed { day } => day,
+        ThemeWindow::Rises { sunrise, sunset } => is_day_by_clock(sunrise, sunset, now_minutes),
+    };
     ResolvedTheme {
         system: resolve_target(&settings.system_theme, system_day),
     }
@@ -730,9 +783,14 @@ fn get_taskbar_accent() -> Option<AccentPolicy> {
 mod tests {
     use super::*;
 
+    /// A settings snapshot on its OWN window — the shared day/night schedule
+    /// needs a live `AppHandle`, so the pure resolver is exercised through
+    /// [`own_window`] and the sharing itself is covered by
+    /// `shared_window_overrides_the_sections_own_pair` below.
     fn settings(system: &str) -> AutoDarkSettings {
         AutoDarkSettings {
             system_theme: system.to_string(),
+            use_day_night_schedule: false,
             system_sunrise: "07:00".to_string(),
             system_sunset: "19:00".to_string(),
             taskbar_transparent: false,
@@ -761,29 +819,34 @@ mod tests {
         assert_eq!(resolve_target("bogus", true), None);
     }
 
+    /// Resolve a snapshot against whichever window its own settings imply.
+    fn resolve_own(settings: &AutoDarkSettings, now_minutes: f64) -> ResolvedTheme {
+        resolve(settings, own_window(settings), now_minutes)
+    }
+
     #[test]
     fn resolve_maps_the_system_target() {
         // Default 07:00..19:00 window.
         const NOON: f64 = 720.0; // day
         const ONE_AM: f64 = 60.0; // night
         assert_eq!(
-            resolve(&settings("auto"), NOON),
+            resolve_own(&settings("auto"), NOON),
             ResolvedTheme {
                 system: Some(false),
             }
         );
         assert_eq!(
-            resolve(&settings("auto"), ONE_AM),
+            resolve_own(&settings("auto"), ONE_AM),
             ResolvedTheme { system: Some(true) }
         );
         assert_eq!(
-            resolve(&settings("light"), ONE_AM),
+            resolve_own(&settings("light"), ONE_AM),
             ResolvedTheme {
                 system: Some(false),
             }
         );
         assert_eq!(
-            resolve(&settings("disable"), ONE_AM),
+            resolve_own(&settings("disable"), ONE_AM),
             ResolvedTheme { system: None }
         );
     }
@@ -797,9 +860,64 @@ mod tests {
         auto.system_sunset = "22:00".to_string();
         let eight_pm = 20.0 * 60.0;
         assert_eq!(
-            resolve(&auto, eight_pm),
+            resolve_own(&auto, eight_pm),
             ResolvedTheme {
                 system: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn shared_window_overrides_the_sections_own_pair() {
+        // The whole point of `use_day_night_schedule`: the day/night section's
+        // boundaries decide, and this section's HH:MM pair stops mattering.
+        let auto = settings("auto");
+        let shared = ThemeWindow::Rises {
+            sunrise: 6.0 * 60.0,
+            sunset: 22.0 * 60.0,
+        };
+        let eight_pm = 20.0 * 60.0;
+        // 20:00 is night on the own 07:00..19:00 pair, day on the shared one.
+        assert_eq!(
+            resolve_own(&auto, eight_pm),
+            ResolvedTheme { system: Some(true) }
+        );
+        assert_eq!(
+            resolve(&auto, shared, eight_pm),
+            ResolvedTheme {
+                system: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn a_polar_window_pins_the_theme_without_a_boundary() {
+        let auto = settings("auto");
+        // Polar day → light all "day"; polar night → dark, whatever the clock says.
+        assert_eq!(
+            resolve(&auto, ThemeWindow::Fixed { day: true }, 60.0),
+            ResolvedTheme {
+                system: Some(false),
+            }
+        );
+        assert_eq!(
+            resolve(&auto, ThemeWindow::Fixed { day: false }, 720.0),
+            ResolvedTheme { system: Some(true) }
+        );
+    }
+
+    #[test]
+    fn opting_out_of_the_shared_schedule_keeps_the_own_window() {
+        // `effective_window` needs no AppHandle on this branch, so it is
+        // directly testable: opted out ⇒ exactly the section's own pair.
+        let mut auto = settings("auto");
+        auto.system_sunrise = "05:30".to_string();
+        auto.system_sunset = "21:15".to_string();
+        assert_eq!(
+            effective_window(&auto),
+            ThemeWindow::Rises {
+                sunrise: 5.0 * 60.0 + 30.0,
+                sunset: 21.0 * 60.0 + 15.0,
             }
         );
     }
@@ -833,6 +951,20 @@ mod tests {
     #[test]
     fn degenerate_clock_window_is_never_day() {
         assert!(!is_day_by_clock(420.0, 420.0, 720.0));
+    }
+
+    #[test]
+    fn theme_deadline_also_wakes_at_the_date_rollover() {
+        // Polar day/night has no boundary to wait for, so the only thing that
+        // changes the answer is the date — and the shared schedule recomputes
+        // its astronomy per date.
+        assert_eq!(
+            until_next_local_midnight(1380.0),
+            Duration::from_secs(60 * 60)
+        );
+        // Never a zero-length sleep: a scheduler that wakes instantly at 23:59:59.9
+        // would spin until the clock rolled over.
+        assert!(until_next_local_midnight(1440.0) > Duration::ZERO);
     }
 
     #[test]

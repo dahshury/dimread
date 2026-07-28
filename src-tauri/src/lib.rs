@@ -36,6 +36,7 @@ pub mod session_guard;
 pub mod settings;
 pub mod tray;
 pub mod tray_menu;
+pub mod update;
 mod window_state;
 pub mod windows;
 

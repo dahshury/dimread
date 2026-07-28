@@ -2,6 +2,7 @@ import {
 	Delete02Icon,
 	PencilEdit02Icon,
 	PlusSignIcon,
+	FullScreenIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState } from "react";
@@ -10,6 +11,7 @@ import type { Rule } from "@/bindings";
 import {
 	flushPendingSettings,
 	patchSettingsSection,
+	SettingSection,
 	useSettingsStore,
 } from "@/entities/setting";
 import {
@@ -79,13 +81,25 @@ function RuleRow({
 }
 
 /**
- * Settings → Rules (FEATURE-PARITY F4): an enable switch plus the per-app rule
- * list. Edits persist through the shared, revision-checked settings saver
- * (`entities/setting`).
+ * Settings → App rules: everything that re-aims the filter at the FOREGROUND
+ * WINDOW, built-in behaviour first and the user's own list second.
+ *
+ * The built-in entry is "disable for full-screen apps" (F1.11). It used to sit
+ * with the engine toggles on the Display tab, which hid what it actually is:
+ * `display::engine` documents it as driven by the same rules watcher that runs
+ * this tab's list, so it is this feature's zeroth rule, not a display option.
+ *
+ * The custom list is FEATURE-PARITY F4 — an enable switch plus one row per rule.
+ * Both halves persist through the shared, revision-checked settings saver
+ * (`entities/setting`), writing the `display` and `rules` sections respectively.
  */
 export function RulesPanel() {
 	const t = useTranslations("rulesTab");
+	const tOptions = useTranslations("optionsTab");
 	const rules = useSettingsStore((state) => state.settings.rules);
+	const disableOnFullscreen = useSettingsStore(
+		(state) => state.settings.display.disableOnFullscreen,
+	);
 	const { matchKindLabel, modeOptions } = useRuleLabels();
 
 	const [dialogOpen, setDialogOpen] = useState(false);
@@ -120,6 +134,27 @@ export function RulesPanel() {
 
 	return (
 		<div className="flex flex-col gap-3">
+			<SettingSection
+				description={t("builtInCaption")}
+				icon={FullScreenIcon}
+				title={t("builtIn")}
+			>
+				<FormControl
+					caption={tOptions("fullscreenDetectionCaption")}
+					label={tOptions("fullscreenDetection")}
+					labelAddon={
+						<Toggle
+							aria-label={tOptions("fullscreenDetection")}
+							checked={disableOnFullscreen}
+							onCheckedChange={(next) =>
+								patchSettingsSection("display", { disableOnFullscreen: next })
+							}
+						/>
+					}
+					layout="row"
+				/>
+			</SettingSection>
+
 			<FormControl
 				caption={t("subtitle")}
 				label={t("enable")}

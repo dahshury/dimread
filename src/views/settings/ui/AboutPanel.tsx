@@ -1,18 +1,29 @@
 import {
+	Alert02Icon,
 	Book02Icon,
+	CheckmarkCircle02Icon,
+	CloudDownloadIcon,
 	GithubIcon,
-	GlobeIcon,
 	InformationCircleIcon,
 	Link01Icon,
+	RefreshIcon,
+	Tag01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { useEffect, useState } from "react";
 import { useTranslations } from "use-intl";
 import { SettingSection } from "@/entities/setting";
 import { hasNativeRuntime } from "@/shared/api";
+import { PRODUCT_LINKS } from "@/shared/config/product-links";
+import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { FormControl } from "@/shared/ui/form-control";
+import { Spinner } from "@/shared/ui/spinner";
+import {
+	type UpdateCheckState,
+	useUpdateCheck,
+} from "../model/use-update-check";
 
 interface AppInfo {
 	name: string;
@@ -83,8 +94,153 @@ function LinkButton({
 	);
 }
 
-/** About tab: app identity (name/version via @tauri-apps/api/app), external
- *  links through the opener plugin, and the template credits. */
+/** The check's outcome as one line of copy plus the icon that frames it. */
+interface UpdateReadout {
+	icon: IconSvgElement | null;
+	message: string;
+	tone: "muted" | "success" | "accent" | "error";
+}
+
+/** Map the checker's state onto the single status line the panel shows. */
+function useUpdateReadout(
+	state: UpdateCheckState,
+	available: boolean,
+): UpdateReadout | null {
+	const t = useTranslations("settings");
+
+	if (!available) {
+		return {
+			icon: InformationCircleIcon,
+			message: t("aboutUpdateUnavailable"),
+			tone: "muted",
+		};
+	}
+	switch (state.phase) {
+		case "idle":
+			return null;
+		case "checking":
+			return { icon: null, message: t("aboutUpdateChecking"), tone: "muted" };
+		case "error":
+			return {
+				icon: Alert02Icon,
+				message: t("aboutUpdateError", { reason: state.message }),
+				tone: "error",
+			};
+		default:
+			break;
+	}
+	switch (state.check.status) {
+		case "upToDate":
+			return {
+				icon: CheckmarkCircle02Icon,
+				message: t("aboutUpdateUpToDate", {
+					version: state.check.latestVersion,
+				}),
+				tone: "success",
+			};
+		case "updateAvailable":
+			return {
+				icon: CloudDownloadIcon,
+				message: t("aboutUpdateAvailable", {
+					version: state.check.latestVersion,
+				}),
+				tone: "accent",
+			};
+		default:
+			return {
+				icon: InformationCircleIcon,
+				message: t("aboutUpdateAhead", {
+					current: state.check.currentVersion,
+					latest: state.check.latestVersion,
+				}),
+				tone: "muted",
+			};
+	}
+}
+
+const READOUT_TONE: Record<UpdateReadout["tone"], string> = {
+	accent: "text-accent",
+	error: "text-error",
+	muted: "text-foreground-muted",
+	success: "text-success",
+};
+
+/**
+ * Updates section: a manual "check for updates" button backed by the
+ * `update_check` command.
+ *
+ * There is no in-app installer — DimRead's releases are unsigned, so the
+ * Tauri updater (which requires a minisign keypair) is not wired up. What this
+ * does instead is honest: ask the GitHub releases API what the newest published
+ * version is, say how the running build compares, and hand over the download
+ * for THIS platform when there is one.
+ */
+function UpdatesSection() {
+	const t = useTranslations("settings");
+	const { available, check, state } = useUpdateCheck();
+	const readout = useUpdateReadout(state, available);
+	const checking = state.phase === "checking";
+	const result = state.phase === "result" ? state.check : null;
+	const outdated = result?.status === "updateAvailable";
+
+	return (
+		<SettingSection
+			description={t("aboutUpdatesCaption")}
+			icon={RefreshIcon}
+			title={t("aboutUpdates")}
+		>
+			<div className="flex flex-wrap items-center gap-3 pt-2">
+				<Button
+					className="h-8 gap-1.5 rounded-md border border-border bg-surface-3 px-3 text-foreground-secondary text-sm transition-colors hover:bg-surface-4"
+					disabled={!available || checking}
+					onClick={check}
+				>
+					{checking ? (
+						<Spinner className="size-3.5" />
+					) : (
+						<HugeiconsIcon icon={RefreshIcon} size={14} />
+					)}
+					{t("aboutCheckUpdates")}
+				</Button>
+				{readout ? (
+					<p
+						className={cn(
+							"flex items-center gap-1.5 text-body-sm",
+							READOUT_TONE[readout.tone],
+						)}
+						role="status"
+					>
+						{readout.icon ? (
+							<HugeiconsIcon icon={readout.icon} size={14} />
+						) : null}
+						{readout.message}
+					</p>
+				) : null}
+			</div>
+			{outdated && result ? (
+				<div className="flex flex-wrap gap-2 pt-3">
+					{result.downloadUrl && result.downloadName ? (
+						<Button
+							className="h-8 gap-1.5 rounded-md bg-accent px-3 text-on-accent text-sm transition-colors hover:bg-accent-hover"
+							onClick={() => openExternal(result.downloadUrl ?? "")}
+						>
+							<HugeiconsIcon icon={CloudDownloadIcon} size={14} />
+							{t("aboutUpdateDownload", { name: result.downloadName })}
+						</Button>
+					) : null}
+					<LinkButton
+						icon={Tag01Icon}
+						label={t("aboutUpdateReleaseNotes")}
+						url={result.releaseUrl}
+					/>
+				</div>
+			) : null}
+		</SettingSection>
+	);
+}
+
+/** About tab: app identity (name/version via @tauri-apps/api/app), the update
+ *  check, external links through the opener plugin, and the credits. */
 export function AboutPanel() {
 	const t = useTranslations("settings");
 	const info = useAppInfo();
@@ -114,22 +270,24 @@ export function AboutPanel() {
 				</FormControl>
 			</SettingSection>
 
+			<UpdatesSection />
+
 			<SettingSection icon={Link01Icon} title={t("aboutLinks")}>
 				<div className="flex flex-wrap gap-2 pt-2">
 					<LinkButton
 						icon={GithubIcon}
 						label={t("aboutLinkSource")}
-						url="https://github.com/dahshury"
+						url={PRODUCT_LINKS.repository}
 					/>
 					<LinkButton
 						icon={Book02Icon}
-						label={t("aboutLinkTauriDocs")}
-						url="https://v2.tauri.app"
+						label={t("aboutLinkDocs")}
+						url={PRODUCT_LINKS.docs}
 					/>
 					<LinkButton
-						icon={GlobeIcon}
-						label={t("aboutLinkWinstt")}
-						url="https://github.com/dahshury/WinSTT"
+						icon={Tag01Icon}
+						label={t("aboutLinkReleases")}
+						url={PRODUCT_LINKS.releases}
 					/>
 				</div>
 			</SettingSection>

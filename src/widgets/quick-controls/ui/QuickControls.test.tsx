@@ -27,6 +27,12 @@ describe("QuickControls", () => {
 		expect(screen.getByText("Dimmer")).toBeDefined();
 		expect(screen.getByText("Brighter")).toBeDefined();
 		expect(screen.getAllByRole("slider").length).toBeGreaterThanOrEqual(2);
+		expect(
+			screen.getByRole("button", { name: "Reset colour temperature" }),
+		).toBeDefined();
+		expect(
+			screen.getByRole("button", { name: "Reset brightness" }),
+		).toBeDefined();
 	});
 
 	test("shows the default mode's values and mode grid", () => {
@@ -43,8 +49,14 @@ describe("QuickControls", () => {
 		expect(
 			screen.getByRole("switch", { name: "Auto day/night" }),
 		).toBeDefined();
-		expect(screen.getByRole("button", { name: "Day" })).toBeDefined();
-		expect(screen.getByRole("button", { name: "Night" })).toBeDefined();
+		expect(
+			(screen.getByRole("button", { name: "Day" }) as HTMLButtonElement)
+				.disabled,
+		).toBe(true);
+		expect(
+			(screen.getByRole("button", { name: "Night" }) as HTMLButtonElement)
+				.disabled,
+		).toBe(true);
 	});
 
 	test("leaves the numeric schedule to the Day & Night panel", () => {

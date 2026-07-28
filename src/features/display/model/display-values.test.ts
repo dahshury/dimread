@@ -5,10 +5,14 @@ import {
 	BRIGHTNESS_RANGE,
 	buildBrightnessPatch,
 	buildKelvinPatch,
+	buildMonitorEnabledPatch,
 	clampBrightness,
 	clampKelvin,
+	countEnabledMonitors,
+	defaultBrightnessFor,
 	defaultKelvinFor,
 	isAllMonitors,
+	isMonitorEnabled,
 	KELVIN_RANGE_DEFAULT,
 	KELVIN_RANGE_WIDE,
 	kelvinRange,
@@ -18,6 +22,9 @@ import {
 } from "./display-values";
 
 const MON = "\\\\.\\DISPLAY2";
+const OTHER_MON = "\\\\.\\DISPLAY1";
+/** An id left in settings for a display that is no longer enumerated. */
+const UNPLUGGED_MON = "\\\\.\\DISPLAY9";
 
 function makeDisplay(
 	overrides: Partial<DisplaySettings> = {},
@@ -30,6 +37,7 @@ function makeDisplay(
 		smoothTransition: true,
 		syncMonitors: true,
 		monitorOverrides: {},
+		excludedMonitors: [],
 		modes: {
 			office: {
 				kelvinDay: 5500,
@@ -246,5 +254,54 @@ describe("defaultKelvinFor", () => {
 
 	test("returns the neutral default for a specific monitor", () => {
 		expect(defaultKelvinFor("health", MON, "day")).toBe(5500);
+	});
+});
+
+describe("defaultBrightnessFor", () => {
+	test("returns the seeded default for the mode/phase (all monitors)", () => {
+		expect(defaultBrightnessFor("health", ALL_MONITORS, "day")).toBe(90);
+		expect(defaultBrightnessFor("health", ALL_MONITORS, "night")).toBe(80);
+	});
+
+	test("returns the neutral default for a specific monitor", () => {
+		expect(defaultBrightnessFor("health", MON, "night")).toBe(90);
+	});
+});
+
+describe("monitor participation", () => {
+	test("a monitor with no exclusion entry participates", () => {
+		expect(isMonitorEnabled(makeDisplay(), MON)).toBe(true);
+	});
+
+	test("a listed monitor is opted out", () => {
+		const display = makeDisplay({ excludedMonitors: [MON] });
+		expect(isMonitorEnabled(display, MON)).toBe(false);
+		expect(isMonitorEnabled(display, OTHER_MON)).toBe(true);
+	});
+
+	test("opting out appends the id", () => {
+		const patch = buildMonitorEnabledPatch(makeDisplay(), MON, false);
+		expect(patch.excludedMonitors).toEqual([MON]);
+	});
+
+	test("opting back in removes the id, leaving other exclusions alone", () => {
+		const display = makeDisplay({
+			excludedMonitors: [OTHER_MON, MON],
+		});
+		const patch = buildMonitorEnabledPatch(display, MON, true);
+		expect(patch.excludedMonitors).toEqual([OTHER_MON]);
+	});
+
+	test("opting out twice does not duplicate the id", () => {
+		const display = makeDisplay({ excludedMonitors: [MON] });
+		const patch = buildMonitorEnabledPatch(display, MON, false);
+		expect(patch.excludedMonitors).toEqual([MON]);
+	});
+
+	test("counts only the participating monitors of the given roster", () => {
+		const display = makeDisplay({ excludedMonitors: [MON, UNPLUGGED_MON] });
+		// The id of an unplugged display stays in settings but is not counted:
+		// the roster passed in is the enumerated hardware.
+		expect(countEnabledMonitors(display, [OTHER_MON, MON])).toBe(1);
 	});
 });

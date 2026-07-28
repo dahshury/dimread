@@ -1,0 +1,167 @@
+---
+title: App rules
+description: Switch display modes automatically from the foreground app, pause the filter for full-screen games, and understand exactly which rule wins.
+---
+
+A rule says "when this app is in front, use that mode". A colour-critical editor
+gets **Pause** so colours are true; VLC gets **Movie**; a terminal gets **Office**.
+DimRead watches which window has focus and forces the rule's mode until the
+focus moves to something that doesn't match. Everything lives in
+**Settings → App rules**.
+
+The tab also owns the one rule you don't have to write — the full-screen
+exception, which pauses filtering while a game or video is full-screen.
+
+<Screenshot
+	alt="The DimRead settings window on the App rules tab, showing the built-in full-screen toggle, the Enable custom rules switch, and a list of rules each with a match-kind badge, a pattern, and a mode select."
+	caption="Settings → App rules. The built-in full-screen exception sits above your own list."
+	priority
+	src="settings-app-rules.webp"
+/>
+
+## Built-in
+
+*"Always active — it needs no rule of its own."*
+
+### Disable filtering for full-screen apps
+
+Turns the filter off automatically while a full-screen app or game is in the
+foreground, then restores it the moment you leave full-screen. **Default: on.**
+A window has to stay full-screen for **700 ms** before suspension engages, so a
+window that only covers the monitor while you drag or resize it doesn't flash the
+screen; releasing is immediate.
+
+Maximized windows don't count as full-screen, and neither do the Windows shell
+surfaces (the desktop, the taskbar, the Alt+Tab switcher). Turn it off if you
+want the filter to stay on during full-screen video.
+
+**Note:** full-screen suspend outranks your rules. A rule forcing **Game** plus
+a genuinely full-screen game means *no filtering at all*, not game filtering.
+
+## Rules
+
+### Enable custom rules
+
+The master switch for your own list — *"Switch modes automatically when a chosen
+app is in the foreground."* **Default: off.** Turning it off keeps every rule
+stored but stops the matcher entirely and clears any override that is currently
+in force, so the screen returns to the mode you picked by hand.
+
+### Add rule
+
+**Add rule** opens a four-field dialog. **Confirm** stays disabled until the
+pattern has at least one non-whitespace character.
+
+- **Match by** — `Process name`, `Window class` or `Window title`. Defaults to
+  **Process name**, which is the one to use unless a single executable hosts
+  several things you want to treat differently.
+- **Finder tool** — a searchable dropdown of your open windows, listed as
+  `process · title`. Picking one fills in **Pattern** for you, correctly shaped
+  for the match kind you chose; switching the match kind re-derives it. The
+  reload button next to the label re-enumerates. This is a dropdown, not a
+  drag-crosshair — you don't point at a window, you pick it from the list.
+- **Pattern** — the text to match, placeholder `e.g. photoshop.exe`. Always
+  editable, even after the picker fills it. Leading and trailing whitespace is
+  trimmed on save.
+- **Mode** — one of the eight display modes, defaulting to **Pause**. A rule
+  applies your *current* preset for that mode, so editing the Office preset in
+  [Display](/docs/display) changes what every Office rule does.
+
+### The rule row
+
+Each saved rule shows its match-kind badge, its pattern, an inline **Mode**
+select (change the mode without opening the dialog), **Edit**, and **Remove**.
+Deletion is immediate — there is no confirmation and no undo. Every change is
+persisted about 400 ms after your last click and takes effect straight away; no
+restart, ever.
+
+## How matching works
+
+| Match by | What it's compared against | Comparison | Case |
+| --- | --- | --- | --- |
+| Process name | the executable's **basename** — `photoshop.exe`, not the full path | whole string, exact | insensitive |
+| Window class | the Win32 class name, e.g. `Chrome_WidgetWin_1` | whole string, exact | insensitive |
+| Window title | the title-bar text | substring | insensitive |
+
+There is **no wildcard, glob or regex support**. `*`, `?` and regex characters
+are matched literally. Whole-string means `photoshop.exe` does not match
+`notphotoshop.exe`, and does not match `photoshop` either. A pattern that is
+blank after trimming never matches anything.
+
+Only **Window title** is a substring match, and titles change constantly —
+DimRead re-evaluates on every title change, so a broad title rule can engage and
+disengage as you switch browser tabs.
+
+## Order and precedence
+
+**First match wins.** Rules are evaluated top to bottom and the first one whose
+pattern matches supplies the mode; later rules are never consulted. The order is
+creation order — new rules are appended to the end.
+
+There is no reordering control, so to change precedence you delete and re-create
+rules in the order you want. Nothing warns you that a broad title rule near the
+top is shadowing a specific process rule below it.
+
+## What happens when nothing matches
+
+| Situation | Result |
+| --- | --- |
+| A rule matches | that rule's mode is forced |
+| Rules on, nothing matches | the override clears — back to the mode you chose by hand |
+| **Enable custom rules** off | the override clears as soon as the change saves |
+| DimRead's own window is in front | the current override is **held**, so opening Settings doesn't cancel the rule you're testing |
+| The foreground window can't be read | the current override is held |
+
+## How rules interact with the rest of DimRead
+
+- **A rule beats your manual mode.** While an override is active, clicking a
+  mode in Quick controls or the tray flyout writes the setting but doesn't
+  change the screen — it applies once the override clears. The mode grid keeps
+  highlighting *your* choice, so it can disagree with the screen; the live K/%
+  readout and the tray icon follow what's actually applied.
+- **The schedule composes with rules.** A rule picks the mode; the day/night
+  scheduler picks which end of that mode's range to interpolate toward. A
+  **Health** rule gives 5000 K / 90% at noon and 3700 K / 80% at night. **Pause**
+  is 6500 K / 100% in both phases, so a Pause rule is phase-agnostic. See
+  [Schedule](/docs/schedule).
+- **Brightness and temperature hotkeys edit the mode that's on screen** — nudging
+  brightness while a rule forces Pause edits the *Pause* preset. The mode-toggle
+  hotkeys write your manual mode instead, so they have no visible effect until
+  the override clears. See [Hotkeys](/docs/hotkeys).
+- **Per-monitor exclusions still apply.** An excluded monitor stays unfiltered
+  no matter which rule is running.
+
+## Platform support
+
+On **Windows 10 and 11** this feature is complete. DimRead hooks the system's
+focus and window-title events (no polling), then reads the foreground window's
+process image name, class and title to evaluate your rules.
+
+<Callout type="warn">
+On **macOS and Linux there is no foreground-window detection at all** — neither
+X11 nor Wayland. The tab, the toggles, the dialog and persistence all work, and
+your rules are saved, but **nothing ever fires**. The Finder tool returns an
+empty list, so it always shows *"No open windows found."* This is the only hint
+the app gives you. The built-in full-screen exception runs on the same watcher,
+so it is Windows-only too, despite defaulting to on.
+</Callout>
+
+## Limitations
+
+- No wildcards, globs or regex; no way to reorder rules; no undo on delete.
+- If DimRead isn't elevated, it may not be able to read an elevated app's
+  process name, and a **Process name** rule against it won't match. Match on
+  **Window title** instead.
+- No rules hotkey and no tray control — the settings tab is the only surface.
+- Nothing reports that the feature is unsupported on your platform.
+
+## Where to go next
+
+- **[Display](/docs/display)** — the eight modes a rule can force, and what each
+  preset applies.
+- **[Schedule](/docs/schedule)** — how day/night picks the endpoint of whichever
+  mode a rule chose.
+- **[Hotkeys](/docs/hotkeys)** — which hotkeys edit the overridden mode and which
+  don't.
+- **[Troubleshooting](/docs/troubleshooting)** — start here if a rule never
+  fires.

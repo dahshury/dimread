@@ -19,14 +19,20 @@ function renderRow(overrides: Partial<Parameters<typeof DayNightRow>[0]> = {}) {
 }
 
 describe("DayNightRow", () => {
-	test("renders the auto day/night switch and phase control", () => {
+	test("renders the auto day/night switch and disables manual phase selection while enabled", () => {
 		renderRow();
 		expect(screen.getByText("Auto day/night")).toBeDefined();
 		expect(
 			screen.getByRole("switch", { name: "Auto day/night" }),
 		).toBeDefined();
-		expect(screen.getByRole("button", { name: "Day" })).toBeDefined();
-		expect(screen.getByRole("button", { name: "Night" })).toBeDefined();
+		expect(
+			(screen.getByRole("button", { name: "Day" }) as HTMLButtonElement)
+				.disabled,
+		).toBe(true);
+		expect(
+			(screen.getByRole("button", { name: "Night" }) as HTMLButtonElement)
+				.disabled,
+		).toBe(true);
 	});
 
 	test("no longer offers the schedule gear — that moved to settings", () => {
@@ -38,7 +44,7 @@ describe("DayNightRow", () => {
 
 	test("choosing a phase reports it upward", () => {
 		const onPhaseChange = mock((_phase: string) => undefined);
-		renderRow({ onPhaseChange });
+		renderRow({ enabled: false, onPhaseChange });
 		fireEvent.click(screen.getByRole("button", { name: "Night" }));
 		expect(onPhaseChange).toHaveBeenCalledTimes(1);
 		expect(

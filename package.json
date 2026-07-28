@@ -1,7 +1,7 @@
 {
   "name": "dimread",
   "private": true,
-  "version": "0.0.2-alpha",
+  "version": "0.0.3-alpha",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
@@ -27,10 +27,17 @@
     "check:fsd": "node .claude/skills/feature-sliced-design/check-fsd.mjs",
     "check:lockfile": "bun install --frozen-lockfile --dry-run --ignore-scripts",
     "check:react": "react-doctor --no-supply-chain --blocking error --scope full --yes",
+    "check:rust": "cd src-tauri && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+    "check:rust:linux": "node tools/linux/check-linux.mjs",
+    "check:rust:linux:quick": "node tools/linux/check-linux.mjs --quick",
+    "docs:shots": "node tools/docs/capture-screenshots.mjs",
+    "docs:dev": "bun --cwd docs-site run dev",
+    "docs:build": "bun --cwd docs-site run build",
     "hooks:install": "node tools/git-hooks/install.mjs",
     "postinstall": "bun run hooks:install",
     "precommit": "bun run check:lockfile && bun run lint && bun run typecheck && bun run check:fsd && bun run check:cycles",
-    "prepush": "bun run check:lockfile && bun run test && bun run check:deadcode && bun run check:i18n && bun run check:react",
+    "prepush": "bun run check:lockfile && bun run test && bun run check:deadcode && bun run check:i18n && bun run check:react && bun run prepush:scoped",
+    "prepush:scoped": "node tools/git-hooks/prepush-scoped.mjs",
     "doctor": "bunx react-doctor"
   },
   "dependencies": {
@@ -80,7 +87,9 @@
     "babel-plugin-react-compiler": "^1.0.0",
     "fast-check": "^4.8.0",
     "knip": "^6.23.0",
+    "playwright": "^1.62.0",
     "react-doctor": "^0.7.8",
+    "sharp": "^0.35.3",
     "typescript": "^7.0.2",
     "ultracite": "7.9.2",
     "vite": "^8.0.16"

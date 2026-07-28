@@ -100,11 +100,18 @@ mod geometry {
     /// Toolbar footprint (logical px) — mirrors the `magic-toolbar`
     /// `WINDOW_SPECS` entry (132×36).
     pub(super) const TB_WIDTH: f64 = 132.0;
-    /// Horizontal slack added to each side of the toolbar for the hover zone.
+    /// Horizontal slack added to each side of the toolbar for the TRIGGER zone.
     const HOVER_PAD_X: f64 = 20.0;
-    /// Height of the top-edge band that triggers / keeps the toolbar (covers the
-    /// 36 px toolbar plus slack so the cursor stays "inside" while on it).
+    /// Height of the top-edge band that triggers the toolbar.
     const HOVER_ZONE_HEIGHT: f64 = 46.0;
+    /// Horizontal slack for the KEEP-ALIVE zone, once the toolbar is up.
+    const KEEP_PAD_X: f64 = 56.0;
+    /// Height of the keep-alive band. Deliberately much taller than the trigger
+    /// band: without hysteresis the two are the same rectangle, so a few pixels
+    /// of cursor drift dismisses the toolbar and re-triggers it, which reads as
+    /// hard flicker and eats clicks (the toolbar vanishes under the press).
+    /// The gap between the bands is what makes dismissal deliberate.
+    const KEEP_ZONE_HEIGHT: f64 = 120.0;
 
     /// Toolbar alignment on the target window (FEATURE-PARITY F9.3).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,13 +179,56 @@ mod geometry {
         toolbar_left: f64,
         tb_width: f64,
     ) -> Zone {
-        let left = (toolbar_left - HOVER_PAD_X).max(win_left);
-        let right = (toolbar_left + tb_width + HOVER_PAD_X).min(win_right);
+        zone_with(
+            win_left,
+            win_top,
+            win_right,
+            toolbar_left,
+            tb_width,
+            HOVER_PAD_X,
+            HOVER_ZONE_HEIGHT,
+        )
+    }
+
+    /// The larger band that KEEPS an already-visible toolbar alive. Always a
+    /// superset of [`hover_zone`], so a cursor that just triggered the toolbar
+    /// can never be outside it.
+    pub(super) fn keep_zone(
+        win_left: f64,
+        win_top: f64,
+        win_right: f64,
+        toolbar_left: f64,
+        tb_width: f64,
+    ) -> Zone {
+        zone_with(
+            win_left,
+            win_top,
+            win_right,
+            toolbar_left,
+            tb_width,
+            KEEP_PAD_X,
+            KEEP_ZONE_HEIGHT,
+        )
+    }
+
+    /// Shared band builder: `pad_x` of horizontal slack each side (clamped into
+    /// the window) and `height` downward from the window's top edge.
+    fn zone_with(
+        win_left: f64,
+        win_top: f64,
+        win_right: f64,
+        toolbar_left: f64,
+        tb_width: f64,
+        pad_x: f64,
+        height: f64,
+    ) -> Zone {
+        let left = (toolbar_left - pad_x).max(win_left);
+        let right = (toolbar_left + tb_width + pad_x).min(win_right);
         Zone {
             left,
             top: win_top,
             right,
-            bottom: win_top + HOVER_ZONE_HEIGHT,
+            bottom: win_top + height,
         }
     }
 
@@ -197,6 +247,7 @@ mod windows_impl {
     use tauri::{AppHandle, Listener, Manager, PhysicalPosition};
     use tauri_specta::Event as _;
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -212,7 +263,7 @@ mod windows_impl {
     };
 
     use super::geometry::{
-        Align, TB_WIDTH, clamp_toolbar_left, hover_zone, toolbar_left, zone_contains,
+        Align, TB_WIDTH, clamp_toolbar_left, hover_zone, keep_zone, toolbar_left, zone_contains,
     };
     use super::{Hwnd, current_target, set_target};
     use crate::events::{MagicToolbarHideEvent, MagicToolbarShowEvent};
@@ -418,21 +469,21 @@ mod windows_impl {
             };
             if !state.config.enabled {
                 if state.shown.take().is_some() {
-                    hide(&state.app);
+                    hide_because(&state.app, "MagicX/toolbar switched off");
                 }
                 clear_hover(state);
                 return;
             }
             let Some((fg, native, rect, is_self)) = foreground_target() else {
                 if state.shown.take().is_some() {
-                    hide(&state.app);
+                    hide_because(&state.app, "no usable foreground window");
                 }
                 clear_hover(state);
                 return;
             };
             if is_self {
                 if state.shown.take().is_some() {
-                    hide(&state.app);
+                    hide_because(&state.app, "foreground is one of our own windows");
                 }
                 clear_hover(state);
                 return;
@@ -451,8 +502,13 @@ mod windows_impl {
                 state.config.offset,
             );
             let tb_left = clamp_toolbar_left(desired, win_left, win_right, TB_WIDTH);
-            let zone = hover_zone(win_left, win_top, win_right, tb_left, TB_WIDTH);
+            // Trigger on the tight band, but stay alive across the loose one
+            // (hysteresis) so drifting a few pixels can't dismiss the toolbar
+            // out from under a click.
+            let zone = keep_zone(win_left, win_top, win_right, tb_left, TB_WIDTH);
             let inside = zone_contains(zone, cursor_x, cursor_y);
+            let trigger_zone = hover_zone(win_left, win_top, win_right, tb_left, TB_WIDTH);
+            let inside_trigger = zone_contains(trigger_zone, cursor_x, cursor_y);
             let (x, y) = physical_position(tb_left, win_top, scale);
 
             if let Some(shown) = state.shown.as_mut() {
@@ -464,12 +520,21 @@ mod windows_impl {
                     }
                     return;
                 }
+                let reason = if shown.target != fg {
+                    format!("foreground changed {:#x} -> {fg:#x}", shown.target)
+                } else {
+                    format!(
+                        "cursor ({cursor_x:.0}, {cursor_y:.0}) left zone \
+                         [{:.0},{:.0}]x[{:.0},{:.0}]",
+                        zone.left, zone.right, zone.top, zone.bottom
+                    )
+                };
                 state.shown = None;
-                hide(&state.app);
+                hide_because(&state.app, &reason);
                 clear_hover(state);
             }
 
-            if !inside {
+            if !inside_trigger {
                 clear_hover(state);
                 return;
             }
@@ -575,19 +640,43 @@ mod windows_impl {
         if unsafe { IsIconic(hwnd) }.as_bool() {
             return None;
         }
-        let mut rect = RECT::default();
-        // SAFETY: `hwnd` valid; `rect` is a live out-param.
-        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
-            return None;
-        }
-        if rect.right <= rect.left || rect.bottom <= rect.top {
-            return None;
-        }
+        let rect = frame_bounds(hwnd)?;
         let mut pid: u32 = 0;
         // SAFETY: `hwnd` valid; `pid` is a live out-param.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         let is_self = pid == std::process::id();
         Some((hwnd.0 as Hwnd, hwnd, rect, is_self))
+    }
+
+    /// The target's on-screen bounds, preferring the DWM extended frame bounds
+    /// over `GetWindowRect`. They differ: `GetWindowRect` includes the invisible
+    /// resize border, so a MAXIMIZED window reports a top edge ~8 logical px
+    /// above the visible frame — which parked the toolbar partly off-screen and
+    /// wasted that much of the hover band. This also matches what the effect
+    /// engine pins its magnifier host to (`engine_win::frame_bounds`).
+    fn frame_bounds(target: HWND) -> Option<RECT> {
+        let mut dwm_rect = RECT::default();
+        // SAFETY: DWM writes a RECT into `dwm_rect`; the size is that of `RECT`.
+        let dwm = unsafe {
+            DwmGetWindowAttribute(
+                target,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut dwm_rect as *mut RECT).cast(),
+                core::mem::size_of::<RECT>() as u32,
+            )
+        };
+        if dwm.is_ok() && dwm_rect.right > dwm_rect.left && dwm_rect.bottom > dwm_rect.top {
+            return Some(dwm_rect);
+        }
+        let mut rect = RECT::default();
+        // SAFETY: `target` valid; `rect` is a live out-param.
+        if unsafe { GetWindowRect(target, &mut rect) }.is_err() {
+            return None;
+        }
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return None;
+        }
+        Some(rect)
     }
 
     /// The cursor position converted to logical px on the target's monitor, plus
@@ -638,6 +727,7 @@ mod windows_impl {
     /// Emit `magictoolbar:show` with the toolbar's physical position + the
     /// target's effect flags (so the renderer highlights the active buttons).
     fn emit_show(app: &AppHandle, x: i32, y: i32, dark: bool, gray: bool) {
+        log::debug!("[magicx] toolbar show at ({x}, {y}) dark={dark} gray={gray}");
         if let Err(err) = (MagicToolbarShowEvent {
             x,
             y,
@@ -652,6 +742,13 @@ mod windows_impl {
 
     /// Clear the target and ask the renderer to play its exit. The renderer
     /// calls `magictoolbar_hide_complete` when that animation actually ends.
+    /// [`hide`] with the triggering condition recorded — the toolbar
+    /// disappearing at the wrong moment is the failure mode worth tracing.
+    fn hide_because(app: &AppHandle, reason: &str) {
+        log::debug!("[magicx] toolbar hide: {reason}");
+        hide(app);
+    }
+
     fn hide(app: &AppHandle) {
         set_target(None);
         if let Err(err) = (MagicToolbarHideEvent {}).emit(app) {
@@ -756,7 +853,9 @@ mod windows_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geometry::{Align, TB_WIDTH, clamp_toolbar_left, hover_zone, toolbar_left, zone_contains};
+    use geometry::{
+        Align, TB_WIDTH, clamp_toolbar_left, hover_zone, keep_zone, toolbar_left, zone_contains,
+    };
 
     #[test]
     fn target_round_trips_and_ignores_zero() {
@@ -826,6 +925,41 @@ mod tests {
         // A left-aligned toolbar's zone can't extend past the window's left.
         let clamped = hover_zone(100.0, 0.0, 900.0, 100.0, TB_WIDTH);
         assert_eq!(clamped.left, 100.0);
+    }
+
+    #[test]
+    fn keep_zone_is_a_strict_superset_of_the_trigger_zone() {
+        // Hysteresis invariant: anything that can TRIGGER the toolbar must also
+        // KEEP it, or it would dismiss itself the instant it appeared.
+        let trigger = hover_zone(0.0, 200.0, 1000.0, 434.0, TB_WIDTH);
+        let keep = keep_zone(0.0, 200.0, 1000.0, 434.0, TB_WIDTH);
+        assert!(keep.left <= trigger.left);
+        assert!(keep.right >= trigger.right);
+        assert_eq!(keep.top, trigger.top);
+        assert!(keep.bottom > trigger.bottom);
+
+        // Every corner of the trigger band is inside the keep band.
+        for (x, y) in [
+            (trigger.left, trigger.top),
+            (trigger.right - 1.0, trigger.top),
+            (trigger.left, trigger.bottom - 1.0),
+            (trigger.right - 1.0, trigger.bottom - 1.0),
+        ] {
+            assert!(zone_contains(keep, x, y), "keep zone missed ({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn keep_zone_survives_drift_that_leaves_the_trigger_zone() {
+        let trigger = hover_zone(0.0, 0.0, 1000.0, 434.0, TB_WIDTH);
+        let keep = keep_zone(0.0, 0.0, 1000.0, 434.0, TB_WIDTH);
+        // A cursor that drifts just below the trigger band (the flicker case)
+        // still keeps the toolbar alive.
+        let drift_y = trigger.bottom + 1.0;
+        assert!(!zone_contains(trigger, 500.0, drift_y));
+        assert!(zone_contains(keep, 500.0, drift_y));
+        // Far below still dismisses it — hysteresis, not stickiness.
+        assert!(!zone_contains(keep, 500.0, keep.bottom + 1.0));
     }
 
     #[test]

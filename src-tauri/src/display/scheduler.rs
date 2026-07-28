@@ -25,9 +25,11 @@
 //! ## Sources
 //!
 //! - `enabled == false` ⇒ always `1.0` / [`Phase::Day`].
-//! - `use_location == true` ⇒ today's sunrise/sunset from `latitude`/`longitude`
-//!   via [`super::suncalc`] (pure NOAA math, no network), using the DST-correct
-//!   local offset for the current date.
+//! - `use_location == true` ⇒ today's sunrise/sunset via [`super::suncalc`]
+//!   (pure NOAA math, no network) for the coordinates [`super::location`]
+//!   resolves — the system timezone's locality, a zone the user picked, or the
+//!   stored `latitude`/`longitude` — using the DST-correct local offset for the
+//!   current date.
 //! - otherwise the manual `sunrise`/`sunset` `"HH:MM"` strings.
 //!
 //! Times are recomputed from `chrono::Local` on every evaluation, so DST shifts
@@ -184,26 +186,12 @@ fn next_schedule_delay(
         return until_next_local_midnight(now_minutes);
     }
 
-    let (sunrise, sunset) = if day_night.use_location {
-        match super::suncalc::sun_times(
-            day_night.latitude,
-            day_night.longitude,
-            date,
-            tz_offset_minutes,
-        ) {
-            super::suncalc::SunTimes::Rises {
-                sunrise_minutes,
-                sunset_minutes,
-            } => (sunrise_minutes, sunset_minutes),
-            super::suncalc::SunTimes::AlwaysUp | super::suncalc::SunTimes::AlwaysDown => {
-                return until_next_local_midnight(now_minutes);
-            }
+    let (sunrise, sunset) = match schedule_times(day_night, date, tz_offset_minutes) {
+        ScheduleTimes::Rises { sunrise, sunset } => (sunrise, sunset),
+        // Polar day/night: nothing changes until the date does.
+        ScheduleTimes::AlwaysUp | ScheduleTimes::AlwaysDown => {
+            return until_next_local_midnight(now_minutes);
         }
-    } else {
-        (
-            parse_hhmm(&day_night.sunrise),
-            parse_hhmm(&day_night.sunset),
-        )
     };
 
     let window = f64::from(day_night.transition_minutes).max(1.0);
@@ -355,25 +343,10 @@ fn schedule_factor(
         return (1.0, Phase::Day);
     }
 
-    let (sunrise, sunset) = if day_night.use_location {
-        match super::suncalc::sun_times(
-            day_night.latitude,
-            day_night.longitude,
-            date,
-            tz_offset_minutes,
-        ) {
-            super::suncalc::SunTimes::Rises {
-                sunrise_minutes,
-                sunset_minutes,
-            } => (sunrise_minutes, sunset_minutes),
-            super::suncalc::SunTimes::AlwaysUp => return (1.0, Phase::Day),
-            super::suncalc::SunTimes::AlwaysDown => return (0.0, Phase::Night),
-        }
-    } else {
-        (
-            parse_hhmm(&day_night.sunrise),
-            parse_hhmm(&day_night.sunset),
-        )
+    let (sunrise, sunset) = match schedule_times(day_night, date, tz_offset_minutes) {
+        ScheduleTimes::Rises { sunrise, sunset } => (sunrise, sunset),
+        ScheduleTimes::AlwaysUp => return (1.0, Phase::Day),
+        ScheduleTimes::AlwaysDown => return (0.0, Phase::Night),
     };
 
     let factor = ramp_factor(
@@ -383,6 +356,70 @@ fn schedule_factor(
         f64::from(day_night.transition_minutes),
     );
     (factor, phase_of(factor))
+}
+
+/// Today's schedule boundaries in local minutes-of-day.
+pub(crate) enum ScheduleTimes {
+    Rises { sunrise: f64, sunset: f64 },
+    AlwaysUp,
+    AlwaysDown,
+}
+
+/// Today's day/night boundaries for the LIVE settings, resolved the same way the
+/// colour filter resolves them.
+///
+/// Shared with Auto Dark (`crate::magicx::theme`) so that "follow the day & night
+/// schedule" means literally the same sun times — including a resolved location's
+/// astronomy — rather than a second HH:MM pair that can silently disagree.
+///
+/// `day_night.enabled` is deliberately NOT consulted: that flag says whether the
+/// COLOUR filter ramps, and a user who parks the filter on one profile still
+/// expects their system theme to turn over at dusk. `None` before [`init`] has
+/// captured the handle, i.e. when no settings are reachable yet.
+pub(crate) fn current_schedule_times() -> Option<ScheduleTimes> {
+    let app = APP.get()?;
+    let settings = crate::settings::store::read_settings(app);
+    let now = Local::now();
+    let tz_offset_minutes = now.offset().fix().local_minus_utc() / 60;
+    Some(schedule_times(
+        &settings.day_night,
+        now.date_naive(),
+        tz_offset_minutes,
+    ))
+}
+
+/// The sunrise/sunset pair a settings snapshot implies: real astronomy for the
+/// RESOLVED location when `use_location` is set (see [`super::location`] — the
+/// coordinates may come from the system timezone, a chosen one, or the stored
+/// pair), otherwise the manual "HH:MM" strings.
+pub(crate) fn schedule_times(
+    day_night: &DayNightSettings,
+    date: chrono::NaiveDate,
+    tz_offset_minutes: i32,
+) -> ScheduleTimes {
+    if !day_night.use_location {
+        return ScheduleTimes::Rises {
+            sunrise: parse_hhmm(&day_night.sunrise),
+            sunset: parse_hhmm(&day_night.sunset),
+        };
+    }
+    let location = super::location::resolve(day_night);
+    match super::suncalc::sun_times(
+        location.latitude,
+        location.longitude,
+        date,
+        tz_offset_minutes,
+    ) {
+        super::suncalc::SunTimes::Rises {
+            sunrise_minutes,
+            sunset_minutes,
+        } => ScheduleTimes::Rises {
+            sunrise: sunrise_minutes,
+            sunset: sunset_minutes,
+        },
+        super::suncalc::SunTimes::AlwaysUp => ScheduleTimes::AlwaysUp,
+        super::suncalc::SunTimes::AlwaysDown => ScheduleTimes::AlwaysDown,
+    }
 }
 
 /// CareUEyes-style ramp: `0.0` before sunrise, up over `transition` after it,
@@ -436,11 +473,26 @@ mod tests {
         DayNightSettings {
             enabled: true,
             use_location: false,
+            location_source: "manual".to_string(),
+            timezone: String::new(),
             latitude: 0.0,
             longitude: 0.0,
             sunrise: "07:00".to_string(),
             sunset: "19:00".to_string(),
             transition_minutes: 60,
+        }
+    }
+
+    /// A location-mode snapshot pinned to explicit COORDINATES, so the sun-time
+    /// assertions below test the astronomy rather than whatever timezone the
+    /// machine running the suite happens to be set to.
+    fn at(latitude: f64, longitude: f64) -> DayNightSettings {
+        DayNightSettings {
+            use_location: true,
+            location_source: "manual".to_string(),
+            latitude,
+            longitude,
+            ..manual()
         }
     }
 
@@ -588,10 +640,7 @@ mod tests {
 
     #[test]
     fn location_mode_tracks_computed_sun_times() {
-        let mut settings = manual();
-        settings.use_location = true;
-        settings.latitude = 51.5074;
-        settings.longitude = -0.1278;
+        let settings = at(51.5074, -0.1278);
         // London solstice: sunrise ~04:43, sunset ~21:21 (BST, +60). Local noon
         // is squarely daytime; local midnight is night.
         let noon = schedule_factor(
@@ -612,10 +661,7 @@ mod tests {
 
     #[test]
     fn location_mode_polar_day_and_night() {
-        let mut settings = manual();
-        settings.use_location = true;
-        settings.latitude = 78.0;
-        settings.longitude = 15.0;
+        let settings = at(78.0, 15.0);
         // Midnight sun → always day regardless of the clock.
         assert_eq!(
             schedule_factor(
@@ -643,10 +689,7 @@ mod tests {
         // With manual times set to the computed London solstice sun times, the
         // two modes must classify midday and dusk identically.
         let london = NaiveDate::from_ymd_opt(2024, 6, 21).unwrap();
-        let mut loc = manual();
-        loc.use_location = true;
-        loc.latitude = 51.5074;
-        loc.longitude = -0.1278;
+        let loc = at(51.5074, -0.1278);
         let (loc_factor, loc_phase) = schedule_factor(&loc, london, 720.0, 60);
         let mut man = manual();
         man.sunrise = "04:43".to_string();

@@ -197,6 +197,41 @@ export function buildBrightnessPatch(
 	};
 }
 
+/**
+ * True when a monitor participates in filtering at all.
+ *
+ * Separate axis from {@link readTargetPreset}: that answers "which values does
+ * this display get", this answers "does it get any". A monitor with no entry in
+ * `excludedMonitors` participates, so the default (empty list) filters
+ * everything — the behaviour before per-monitor opt-out existed.
+ */
+export function isMonitorEnabled(
+	display: DisplaySettings,
+	monitorId: string,
+): boolean {
+	return !display.excludedMonitors.includes(monitorId);
+}
+
+/** How many of `monitorIds` currently participate in filtering. */
+export function countEnabledMonitors(
+	display: DisplaySettings,
+	monitorIds: readonly string[],
+): number {
+	return monitorIds.filter((id) => isMonitorEnabled(display, id)).length;
+}
+
+/** Build the `display` patch that opts `monitorId` in or out of filtering. */
+export function buildMonitorEnabledPatch(
+	display: DisplaySettings,
+	monitorId: string,
+	enabled: boolean,
+): Partial<DisplaySettings> {
+	const without = display.excludedMonitors.filter((id) => id !== monitorId);
+	return {
+		excludedMonitors: enabled ? without : [...without, monitorId],
+	};
+}
+
 /** The default Kelvin the reset button restores for the selection/phase. */
 export function defaultKelvinFor(
 	mode: string,
@@ -207,4 +242,16 @@ export function defaultKelvinFor(
 		? (DEFAULT_MODES[mode] ?? FALLBACK_PRESET)
 		: FALLBACK_PRESET;
 	return phase === "night" ? preset.kelvinNight : preset.kelvinDay;
+}
+
+/** The default brightness the reset button restores for the selection/phase. */
+export function defaultBrightnessFor(
+	mode: string,
+	selection: MonitorSelection,
+	phase: EditPhase,
+): number {
+	const preset = isAllMonitors(selection)
+		? (DEFAULT_MODES[mode] ?? FALLBACK_PRESET)
+		: FALLBACK_PRESET;
+	return phase === "night" ? preset.brightnessNight : preset.brightnessDay;
 }

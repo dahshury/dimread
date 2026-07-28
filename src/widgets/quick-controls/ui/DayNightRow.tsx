@@ -18,7 +18,7 @@ export interface DayNightRowProps {
  *
  * Both are instant-effect controls, which is why they stay in the compact main
  * window. The schedule behind them — location vs custom sun times, latitude,
- * longitude, transition minutes — lives in Settings → Day & Night.
+ * longitude, transition minutes — lives in Settings → Schedule.
  */
 export function DayNightRow({
 	enabled,
@@ -40,14 +40,17 @@ export function DayNightRow({
 					onCheckedChange={onToggleEnabled}
 				/>
 			</div>
+			{/* Auto mode keeps the clock-derived phase visible, but makes the manual
+			    phase preview unavailable. Default ("md") segment height matches the preset
+			    mode grid directly below it — a 18px `sm` segment read as a thin
+			    sliver next to the 32px mode buttons. */}
 			<Switcher<EditPhase>
 				fullWidth
 				onChange={onPhaseChange}
 				options={[
-					{ value: "day", label: t("day") },
-					{ value: "night", label: t("night") },
+					{ value: "day", label: t("day"), disabled: enabled },
+					{ value: "night", label: t("night"), disabled: enabled },
 				]}
-				size="sm"
 				value={phase}
 			/>
 		</div>

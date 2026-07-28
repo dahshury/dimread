@@ -39,6 +39,9 @@ from dimread_mark import (  # noqa: E402  (needs the sys.path line above)
     DEFAULT_APP_MODE,
     DEFAULT_APP_PHASE,
     MODE_GLYPHS,
+    SPLIT_MODE,
+    SPLIT_MODES,
+    _render_tray_for_split,
     render_app,
     render_tray,
 )
@@ -150,6 +153,71 @@ def write_contact_sheet() -> Path:
     return path
 
 
+def write_split_comparison() -> Path:
+    """Render both seam candidates at the sizes that drive the decision."""
+    modes = list(MODE_GLYPHS)
+    cell, label_w, header = 96, 235, 104
+    rows = [
+        (split_mode, phase, theme)
+        for split_mode in SPLIT_MODES
+        for phase, theme in (("day", "light"), ("night", "dark"))
+    ]
+    sheet = Image.new(
+        "RGBA",
+        (label_w + cell * len(modes) + 20, header + cell * len(rows) + 20),
+        (233, 235, 241, 255),
+    )
+    d = ImageDraw.Draw(sheet)
+    d.text((20, 20), "DimRead split comparison", fill=(18, 20, 32, 255))
+    d.text(
+        (20, 40),
+        f"vertical vs diagonal; shipped default: {SPLIT_MODE}",
+        fill=(90, 95, 115, 255),
+    )
+    d.text(
+        (20, 58),
+        "each cell: 32 px and 16 px, nearest-neighbour enlarged",
+        fill=(90, 95, 115, 255),
+    )
+    for index, mode in enumerate(modes):
+        d.text(
+            (label_w + index * cell + 5, header - 18),
+            mode,
+            fill=(18, 20, 32, 255),
+        )
+
+    for row, (split_mode, phase, theme) in enumerate(rows):
+        y = header + row * cell
+        strip = (17, 18, 24, 255) if theme == "dark" else (245, 245, 248, 255)
+        d.rectangle(
+            [label_w, y, label_w + cell * len(modes), y + cell - 8],
+            fill=strip,
+        )
+        d.text(
+            (20, y + cell // 2 - 8),
+            f"{split_mode} / {phase} / on {theme}",
+            fill=(18, 20, 32, 255),
+        )
+        for index, mode in enumerate(modes):
+            x = label_w + index * cell
+            sheet.alpha_composite(
+                _render_tray_for_split(mode, phase, theme, 32, split_mode).resize(
+                    (64, 64), Image.NEAREST
+                ),
+                (x + 2, y + 8),
+            )
+            sheet.alpha_composite(
+                _render_tray_for_split(mode, phase, theme, 16, split_mode).resize(
+                    (32, 32), Image.NEAREST
+                ),
+                (x + 64, y + 50),
+            )
+
+    path = PREVIEW / "split-comparison.png"
+    sheet.save(path)
+    return path
+
+
 def main() -> None:
     for directory in (ICONS, TRAY, PREVIEW):
         directory.mkdir(parents=True, exist_ok=True)
@@ -157,12 +225,14 @@ def main() -> None:
     app_icons = write_app_icons()
     tray_icons = write_tray_icons()
     sheet = write_contact_sheet()
+    comparison = write_split_comparison()
 
     print(f"{len(app_icons)} app icons:")
     for path in app_icons:
         print(f"  {path}")
     print(f"{len(tray_icons)} tray state icons in {TRAY}")
     print(f"contact sheet: {sheet}")
+    print(f"split comparison: {comparison}")
 
 
 if __name__ == "__main__":

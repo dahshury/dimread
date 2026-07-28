@@ -1,0 +1,214 @@
+---
+title: Display
+description: Target one monitor or all of them, set colour temperature and brightness, and learn what each of the eight preset modes actually applies.
+---
+
+**Settings → Display** is the tab you will live in. Its top half, **Quick
+controls**, is the live surface: the monitor roster, the K/% readout, the two
+sliders, the auto day/night row and the eight preset modes. Nothing here has an
+Apply button and nothing needs a restart. The tray flyout renders the same
+controls from the same seam, but it always edits the live phase and every
+monitor, so per-phase and per-monitor targeting are Display-tab-only.
+
+<Screenshot
+	alt="The DimRead settings window on the Display tab: a monitor roster, a 5500K · 85% readout, warm-to-cool and dimmer-to-brighter sliders, an Auto day/night switch with a Day | Night selector, and a 4x2 grid of the eight preset modes."
+	caption="Settings → Display. Quick controls first, engine switches second."
+	priority
+	src="settings-display.webp"
+/>
+
+## Quick controls
+
+### Monitors
+
+Each row carries a radio and a switch, because they do two independent jobs.
+
+- **The radio picks the target** — which values the sliders edit. **All
+  monitors** ("Every display, one shared setting") edits the active mode's shared
+  preset; picking one display edits that display's own override. It is an
+  editing choice rather than a filtering one — though moving off **All
+  monitors** does hand any display that already carries an override its own
+  stored values.
+- **The switch decides participation** — `Filter <name>` opts a display out of
+  filtering entirely. An excluded display gets its original ramp back on the next
+  refresh and is skipped by every apply and preview pass, in every mode.
+
+The **last participating monitor cannot be switched off** — that is Pause
+expressed as a roster. An excluded monitor also cannot be targeted: its radio is
+disabled, and excluding the display you were targeting hands the sliders back to
+All monitors in the same write. With one display the control collapses to a
+read-only identity line; with none it reads "No monitors detected."
+
+Overrides and exclusions are keyed by a monitor id whose format differs per OS:
+**Windows** the GDI device name (`\\.\DISPLAY1`), **macOS** a CoreGraphics UUID,
+**X11** an EDID hash plus connector, **Wayland** a make/model/name triple. The
+Windows one is stable per session but is not hardware identity — re-plugging
+monitors in a different order can move that name to a different panel, taking its
+override with it. Excluded ids survive unplugging on purpose, so an exiled
+monitor stays exiled across a dock cycle. The targeted monitor itself is *not*
+persisted; reopening the window falls back to your primary display.
+
+### Colour temperature
+
+Warm on the left, cool on the right: **1000–6500 K** in **50 K** steps. The
+button beside the slider is **Reset colour temperature** — it restores the seeded
+default Kelvin for the current mode and phase, or a neutral 5500 K when you are
+targeting a single monitor.
+
+### Brightness
+
+**10–100 %** in **1 %** steps. This is software gamma dimming, not a backlight
+control — there is no DDC/CI anywhere in the app, so DimRead can take a screen
+below its hardware minimum but never above it. Because the mapping happens at
+scan-out, screenshots come out unaffected.
+
+### The K/% readout
+
+The line above the sliders shows what the engine last applied, as `5000K · 85%`.
+It reports the **active mode's interpolated base value**, not a per-monitor one,
+so with overrides in play it will not match a particular screen. In Pause it
+still shows the selected mode's numbers even though nothing is applied — the tray
+tooltip is the honest one there, and says `DimRead — Paused`.
+
+### Auto day/night
+
+On by default. Every preset stores four numbers — a day and a night endpoint per
+axis — and the scheduler interpolates between them. Off, the factor pins to day,
+so only the day endpoints are used. The schedule itself lives on
+[Schedule](/docs/schedule).
+
+The **Day | Night** control below it chooses **which endpoint the sliders edit**,
+and previews that endpoint raw on screen while the panel shows it. There is
+deliberately no Transition segment — a blended value is not an editable endpoint.
+
+## The eight modes
+
+The 4×2 grid at the bottom of Quick controls is the mode switch, and it is where
+"stop filtering" lives. Every preset is editable: drag a slider while a mode is
+active and you rewrite that mode's stored endpoint. The only reset anywhere is
+the colour-temperature button above — brightness has none, and there is no
+"restore all presets".
+
+| Mode | Day K / % | Night K / % | Best for |
+| --- | --- | --- | --- |
+| Pause | 6500 K / 100 % | 6500 K / 100 % | Filtering off — true colours at full brightness |
+| Health | 5000 K / 90 % | 3700 K / 80 % | Balanced blue-light reduction for everyday work |
+| Game | 6500 K / 90 % | 6000 K / 90 % | Light filtering that keeps games crisp |
+| Movie | 6000 K / 90 % | 5500 K / 90 % | Warmer, dimmer tone for watching video |
+| Office | 5500 K / 85 % | 5000 K / 80 % | Long hours of office work |
+| Editing | 6500 K / 85 % | 6500 K / 85 % | Inverted colours for low-light reading and editing |
+| Reading | 5500 K / 85 % | 5500 K / 85 % | Full-screen grayscale, like e-ink |
+| Custom | 5500 K / 90 % | 5500 K / 90 % | Your own colour temperature and brightness |
+
+Five of those differ only in their numbers. Three are special:
+
+- **Pause** is a passthrough. It writes every monitor's captured original ramp
+  back — your ICC calibration, another tool's tint, or identity — and clears
+  grayscale; its own 6500 K / 100 % preset never reaches the screen. It is the
+  default on a fresh install, so DimRead filters nothing until you pick a mode.
+- **Editing** adds a colour invert, by flipping the gamma table's input before
+  tint and brightness.
+- **Reading** adds full-screen grayscale — a Rec. 601 luminance matrix installed
+  through the Windows Magnification API — on top of its 5500 K / 85 % preset.
+
+<Callout type="warn">
+Reading's grayscale is **Windows-only**. On macOS and Linux the temperature and
+brightness still apply, and the tab replaces the usual description with: "Reading
+temperature and brightness are active, but full-screen grayscale is unavailable
+on this display backend."
+</Callout>
+
+**Custom** has no special engine behaviour. What sets it apart is that it is the
+redirect target for edits made in Pause: move a slider while paused and DimRead
+seeds Custom from what is on screen, applies your edit and switches to Custom —
+so what you previewed is what persists, and Pause stays pristine. The cost is
+that this overwrites whatever Custom held before.
+
+## Which mode should I use?
+
+- **One setting for the whole day** — Health. Its night endpoint (3700 K / 80 %)
+  is by far the warmest of the eight; nothing else drops below 5000 K.
+- **Long reading at night** — Reading on Windows, for the e-ink effect; Office
+  elsewhere, since grayscale will not apply.
+- **Watching something** — Movie: warmer than Game at both endpoints, and it
+  holds 90 % brightness at night where Office drops to 80 %.
+- **Colour-sensitive work** — Pause, with [Toggle blue-light
+  filter](/docs/hotkeys) bound so you can flip back.
+- **Nothing fits** — pick the closest preset and drag; you are editing that
+  preset, not a scratch value.
+
+## Colour transitions
+
+### Smooth transition
+
+On by default. Changes ease towards their target instead of snapping — about
+98 % of the move in roughly 360 ms — so a mode switch fades and a drag trails the
+pointer by about a tenth of a second. Off, every change is written immediately.
+
+### Wide colour range
+
+Off by default. Extends the temperature range to **0–10000 K**. The app's own
+tooltip is the caveat: temperatures above 6500 K increase blue-light exposure and
+are not recommended.
+
+### Wide brightness range
+
+Off by default. Lowers the brightness floor from **10 %** to **0 %**. The 10 %
+floor is a safety clamp — 0 % dims the screen to fully black, which can make it
+hard to see well enough to undo.
+
+<Callout type="warn">
+Turning a wide range back off does **not** re-clamp values already stored outside
+the narrow range. Dial 0 % with the wide brightness range on, switch it off, and
+you keep a black screen until you move the slider again.
+</Callout>
+
+## Disable filtering for full-screen apps
+
+This switch reads like an engine option but is driven by the foreground-window
+watcher, so it lives on **Settings → App rules**, not here. On by default: while
+a full-screen app or game owns the foreground, DimRead restores the original
+ramps and clears grayscale — the filter behaves like Pause while the UI keeps
+showing your selected mode. See [App rules](/docs/app-rules).
+
+**Note:** the watcher behind it is Windows-only. On macOS and Linux the toggle
+persists and nothing drives it.
+
+## How the filter reaches your screen
+
+DimRead composes one gamma ramp — three 256-entry lookup tables, R/G/B — from
+your Kelvin white point, brightness factor and invert flag, then writes it per
+monitor: **Windows** through GDI `SetDeviceGammaRamp`, **macOS** through
+CoreGraphics transfer tables resampled to the display's own table size,
+**Linux/X11** through RandR per-CRTC gamma (RandR 1.2 or newer required), and
+**Wayland** through the wlroots `zwlr_gamma_control_v1` protocol — where
+restoring means releasing the compositor's control, since that protocol cannot
+read ramps back. Hot-plug, resolution changes and, on Windows, resume from sleep
+all trigger a re-apply.
+
+## Limitations
+
+- **On a native Wayland session without `zwlr_gamma_control_manager_v1` — GNOME
+  and KDE Plasma's Wayland sessions — the display core does nothing.** There is
+  no XWayland fallback by design: it would affect only XWayland surfaces while
+  claiming physical-display control.
+- **Reading's grayscale, full-screen suspend and per-app rule overrides are
+  Windows-only.** Editing's invert works wherever ramp writes work.
+- **Per-monitor overrides are mode-independent.** With per-monitor targeting
+  active, switching modes leaves an overridden monitor's Kelvin and brightness
+  alone — only its invert, grayscale and Pause state change.
+- **If DimRead is force-killed the ramp stays applied** until the next launch
+  repairs it from a recovery journal beside the settings file. On Wayland that gap
+  does not exist — the compositor restores its snapshot when the client
+  disconnects.
+
+## Where to go next
+
+- **[Schedule](/docs/schedule)** — sunrise/sunset, transition length, and the
+  day/night endpoints these presets interpolate between.
+- **[App rules](/docs/app-rules)** — per-app mode switching and full-screen
+  detection.
+- **[Hotkeys](/docs/hotkeys)** — step temperature and brightness, and toggle
+  Reading, Editing or the filter without opening the window.
+- **[Troubleshooting](/docs/troubleshooting)** — start here if the sliders move
+  and the screen does not.

@@ -1,0 +1,204 @@
+---
+title: Diagnostics
+description: Find DimRead's log file, read what the display engine wrote, check whether your session can do gamma control at all, and file a bug report someone can act on.
+---
+
+Most people never need this page. It exists for the case where the screen will not
+change, the app quits on its own, or a maintainer has asked you for a log — and for
+that you need to know where DimRead writes things down.
+
+DimRead has **no command-line interface**. There are no flags, no `--debug`, no
+verbose switch: the binary parses no arguments at all, so every diagnostic here is
+either a file on disk or a check you run against your own system.
+
+## Logs
+
+The log file is always named `dimread.log`.
+
+| Where you installed it | Log file |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.dahshury.dimread\logs\dimread.log` |
+| macOS | `~/Library/Logs/com.dahshury.dimread/dimread.log` |
+| Linux | `~/.local/share/com.dahshury.dimread/logs/dimread.log` (`$XDG_DATA_HOME` if set) |
+| Windows portable | `Data\logs\dimread.log`, next to the executable |
+
+Portable mode redirects the whole data folder — settings, window state, logs — into
+`Data/` beside the binary. That is the default Windows install, so on Windows look
+next to `DimRead.exe` first. See [General](/docs/general) for how the marker file
+decides.
+
+- **Rotation is "keep one".** The cap is 500,000 bytes. When the file passes it the
+  older content is discarded rather than archived — there is no `dimread.log.1`. Copy
+  the file soon after reproducing a problem, or a busy session will overwrite the part
+  you wanted.
+- **Release builds log at Info; debug builds log at Debug.** Every published alpha is a
+  release build, so a healthy log is mostly empty: warnings and errors, one line on
+  exit, and nothing else.
+- **Timestamps are your local clock**, not UTC, so they line up with when you saw the
+  problem.
+- Logs also go to stdout, which a release Windows build has no console for. The one
+  line that confirms portable mode — `[portable] data dir: …` — is printed to stderr
+  before the logger exists and therefore **never reaches the file**.
+
+## Reading the display log
+
+Most backend messages are prefixed with a bracketed tag: `[display]`, `[grayscale]`,
+`[scheduler]`, `[session-guard]`, `[hotkeys]`, `[rules]`, `[magicx]`, `[autodark]`,
+`[focus-read]`, `[focus-blur]`, `[overlay]`, `[tray]`, `[settings]`, `[exit]`,
+`[crash]`. Search for those. A few lines carry no tag — the normal quit line is one of
+them, and reads `App window closed - exiting.` or
+`Quit requested from the tray menu - exiting.`
+
+**A successful apply writes nothing.** The engine's only startup line,
+`[display] engine initialized (2 monitor(s))`, is Debug-level and so is absent from a
+release log. Silence between launch and exit is the healthy case; confirm the filter is
+live from the tray tooltip instead, not from the log. The tooltip is the honest
+indicator — it reads `DimRead — Paused` whenever nothing is applied, whereas the K/%
+readout in Settings → Display → Quick controls keeps reporting the selected mode's
+numbers even while filtering is paused or suspended for a full-screen app.
+
+These lines identify which backend you actually got:
+
+| Line | What it means |
+| --- | --- |
+| `[display] X11 display control unavailable: the X server does not expose RandR 1.2 or newer` | Linux/X11, refused. DimRead needs RandR 1.2+ |
+| `[display] X11 display control unavailable: could not load Xlib: …` | Xlib or XRandR is not installed — a warning, not a crash |
+| `[display] native Wayland session detected; …refusing false XWayland RandR fallback` | You are on Wayland. DimRead will not pretend XWayland is your display |
+| `[display] native Wayland gamma control unavailable: compositor does not advertise zwlr_gamma_control_manager_v1` | GNOME or KDE Wayland. There is no tint on this session, by design |
+| `[grayscale] this platform has no reliable public full-screen colour-matrix API; Reading mode is running without grayscale` | macOS or Linux. Reading mode's warmth and dimming still apply |
+| `[grayscale] MagInitialize failed; Reading-mode grayscale disabled` | Windows, Magnification API refused |
+
+And these are the failures worth reporting:
+
+- `[session-guard] previous run did not shut down cleanly (2 monitor ramp(s)) - repairing` —
+  the last run was killed with a filter applied. DimRead is putting the original ramps
+  back. Seeing this once after a crash is normal; seeing it every launch is a bug.
+- `[exit] gamma restore failed on at least one monitor - keeping the recovery journal for the next boot` —
+  a monitor was asleep or gone at exit, so its ramp may still be tinted until the next
+  launch repairs it.
+- `[display] ramp captured for \\.\DISPLAY1 looks like a stranded filter …` — DimRead
+  refused to treat an already-dimmed ramp as your baseline. The guard working, not a
+  failure.
+- `[hotkeys] failed to arm action 'toggleFilter' = 'Ctrl+Alt+F': …` — another app owns
+  that combination. Pick a different one on [Hotkeys](/docs/hotkeys).
+
+**Note:** a failed gamma write is **not** logged on Windows, macOS or X11 — the native
+call reports failure and the apply path discards it, so a screen that refuses to tint
+leaves no line at all. That case is covered in
+[Troubleshooting](/docs/troubleshooting). Wayland is the exception: a rejected output
+does write `[display] Wayland gamma control failed for output global …`.
+
+## Checking what your system supports
+
+### Windows
+
+There is nothing to enable and no permission to grant. The check that matters is
+whether DimRead enumerated your display: open **Settings → Display** and look at the
+monitor roster. A panel that is not listed is never filtered. Reading mode's grayscale
+is the one display feature that announces its own failure in the log — watch for the
+`[grayscale]` line above.
+
+### macOS
+
+DimRead requests no permissions — there is no Accessibility, Screen Recording or
+Location prompt in the shipped code, because colour temperature and brightness go
+through public CoreGraphics calls. To confirm macOS sees the displays DimRead lists:
+
+```bash
+system_profiler SPDisplaysDataType
+```
+
+Reading mode's full-screen grayscale is not implemented on macOS, and neither are the
+window effects or per-app rules.
+
+### Linux
+
+First find out which session you are in — this is the variable DimRead reads, and if it
+is empty DimRead falls back to the presence of `WAYLAND_DISPLAY`:
+
+```bash
+echo "$XDG_SESSION_TYPE" "$WAYLAND_DISPLAY"
+```
+
+On **x11**, confirm the RandR version is 1.2 or newer:
+
+```bash
+xrandr --version
+```
+
+On **wayland**, DimRead can only drive gamma through `zwlr_gamma_control_manager_v1`
+(sway, Hyprland, river, labwc). Ask your compositor whether it advertises it:
+
+```bash
+wayland-info | grep zwlr_gamma_control_manager_v1
+```
+
+No output means no tint — GNOME and KDE Wayland do not implement the protocol, and
+DimRead deliberately refuses to fall back to XWayland, which would only tint XWayland
+surfaces while claiming to control the panel. Global hotkeys are also silently inert on
+Wayland: registration succeeds and the key never fires.
+
+## Crash reports
+
+An unhandled panic writes a plain-text report to your temp directory as
+`dimread-crash-<epoch-milliseconds>.log` — `%TEMP%` on Windows, `$TMPDIR` (or `/tmp`
+when that is unset) on macOS and Linux. It contains the DimRead version, the same epoch
+timestamp, the panic location and message, and a backtrace.
+
+<Callout type="info">
+Crash reports are **not** portable-aware: even a portable install writes them to the
+system temp directory, not to `Data/`. Deleting a portable folder leaves them behind.
+</Callout>
+
+The same panic hook restores your monitors' original gamma ramps before it chains into
+the abort, so a crash should not leave the screen tinted.
+
+## Filing a useful bug report
+
+DimRead has no telemetry and never uploads anything, so a maintainer sees only what you
+attach. Open an issue at
+[github.com/dahshury/dimread/issues](https://github.com/dahshury/dimread/issues) with:
+
+<Steps>
+
+<Step>
+**Your OS and version**, and on Linux the output of
+`echo "$XDG_SESSION_TYPE" "$WAYLAND_DISPLAY"` plus your compositor or desktop.
+</Step>
+
+<Step>
+**The DimRead version**, from **Settings → About**, and whether the install is portable
+(is there a `Data/` folder next to the executable?).
+</Step>
+
+<Step>
+**`dimread.log`**, attached as a file. Skim it first — it contains monitor names, display
+ids and file paths from your machine.
+</Step>
+
+<Step>
+**The newest `dimread-crash-*.log`** from your temp directory, if the app disappeared.
+</Step>
+
+<Step>
+**What you did and what you expected** — the mode, the monitor, and whether the K/%
+readout moved while the screen did not.
+</Step>
+
+</Steps>
+
+<Screenshot
+	alt="The DimRead settings window on the About tab, showing Name DimRead, Version 0.0.3-alpha and Tauri 2.11.2, plus Check for updates and links to GitHub, Docs and Releases."
+	caption="Settings → About. The version string here is the first thing a bug report needs."
+	src="settings-about.webp"
+	width={780}
+/>
+
+## Where to go next
+
+- **[Troubleshooting](/docs/troubleshooting)** — symptom-shaped fixes; start there
+  before you read a log.
+- **[General](/docs/general)** — portable mode, where settings live, and the startup
+  options.
+- **[About](/docs/about)** — version, update checks, and what DimRead does and does not
+  send.

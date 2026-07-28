@@ -23,7 +23,4 @@ export {
 	toggleDark,
 	toggleGray,
 } from "./lib/toolbar-state";
-export {
-	patchMagicxHotkeys,
-	patchMagicxSettings,
-} from "./model/persist-magicx";
+export { patchMagicxSettings } from "./model/persist-magicx";

@@ -1,0 +1,197 @@
+---
+title: Schedule
+description: Set when night starts — sunrise and sunset from your timezone, a chosen city or exact coordinates, the fade width, and the Windows theme that follows it.
+---
+
+**Settings → Schedule** answers one question — *when is it night?* — then lists what
+runs on that answer: the colour filter's day-to-night fade, and the Windows system
+theme. Those were once two tabs with two sunrise pairs, which let DimRead hold two
+opinions about dusk.
+
+The on/off switch is not here. **Auto day/night** sits at the top of
+**Settings → Display** next to the sliders because it takes effect instantly; this
+tab holds the schedule behind it.
+
+<Screenshot
+	alt="The DimRead settings window on the Schedule tab, showing Day and night settings with Time source set to Custom time, Sunrise 7:00, Sunset 19:00, Transition 60 min, and a Windows theme section with System theme set to Disable."
+	caption="Settings → Schedule. Day and night settings on top, the Windows theme that follows them below."
+	priority
+	src="settings-schedule.webp"
+/>
+
+## Two profiles, not two modes
+
+DimRead never switches to a "night mode". Each of the eight preset modes stores
+**two** endpoints per axis — a day Kelvin/brightness pair and a night pair — and the
+engine interpolates between them. `Health` is 5000 K at 90% by day and 3700 K at 80%
+by night; `Reading` is 5500 K at 85% in both, so it looks the same whatever the clock
+says. Full table on the [Display](/docs/display#the-eight-modes) page.
+
+The schedule produces one number between 0 and 1 (1 = full day, 0 = full night) and
+everything reads from it. A coarse phase label rides alongside it — **Day** at 0.999
+and above, **Night** at 0.001 and below, **Transition** in between. The tray icon has
+only two artworks, cool for day and warm for night, so a transition draws as day; the
+tray tooltip carries the exact Kelvin and percentage instead.
+
+**Note:** switching modes, a per-app rule, a hotkey or the tray flyout never
+suspends the schedule. Only turning **Auto day/night** off does — and that pins the
+output to the **day** profile, not to whatever was last on screen.
+
+## Day & night settings
+
+### Time source
+
+Three segments: **Automatic** (coordinates from your system timezone), **Manual**
+(you say where you are), **Custom time** (fixed clock hours, no astronomy). A fresh
+install starts on **Custom time** with 07:00 and 19:00.
+
+Picking **Custom time** leaves your location choice untouched, so coming back to a
+sun-based schedule restores the way you had it set up.
+
+### Location
+
+Shown when Time source is **Manual**. Two segments — **Timezone** or **Coordinates**
+— refining how you give your position. Defaults to **Timezone**, the option that
+needs no outside knowledge.
+
+### Your timezone
+
+A searchable picker over the **418 canonical IANA zones** compiled into the app,
+grouped by region and badged with a country code. Search matches city, country, code
+and raw zone id, so `Berlin`, `Germany`, `DE` and `Europe/Berlin` all find the same
+row. Empty by default, which falls back to detection. Sun times are computed for the
+zone's reference city.
+
+### Latitude and Longitude
+
+Shown when Location is **Coordinates**. Latitude takes -90 to 90 degrees, longitude
+-180 to 180, stepping by 1° — hold <Kbd>Alt</Kbd> for 0.1°. Both default to 0, which
+is the Gulf of Guinea, so use this only if you know your coordinates.
+
+### Sunrise and Sunset
+
+**Custom time** only. Local clock times, 0-23 hours and 0-59 minutes, defaulting to
+07:00 and 19:00. Sunrise is when the morning ramp starts; sunset is when full night
+is reached.
+
+### Detected location
+
+A read-only readout, shown for every source except Custom time. Its sun times come
+from the same backend function that drives the screen, so it cannot disagree with
+what is being applied. It says one of:
+
+- **"From your system timezone, Berlin."** — resolution worked, followed by
+  *"Today: sunrise 05:12, sunset 21:26."*
+- **"…has no known city. Pick another timezone, or enter coordinates."** — the
+  platform named a zone with no locality, like `UTC` or `Etc/GMT+5`.
+- **"Your system timezone could not be read…"** — the platform named nothing.
+- **"Today the sun does not rise or set at this location."** — polar day or polar
+  night. Midnight sun holds the day profile; polar night holds the night profile.
+
+Every fallback is reported rather than silently scheduling for 0°, 0°.
+
+### Transition
+
+How many minutes the fade between the two profiles takes. Default **60**, range 0-240,
+stepping by 15. It applies to all three time sources.
+
+The ramp is asymmetric on purpose: the morning ramp **starts at sunrise** and climbs
+to full day over the window, and the evening ramp **starts one window before sunset**
+so full night lands exactly at sunset. Setting 0 gives no instant step — the window
+is floored at one minute.
+
+<Callout type="info">
+**Transition** is not **Smooth transition**. This is the width of the day-to-night
+ramp in minutes; the other, on the Display tab, is the roughly 360 ms ease applied to
+any single change.
+</Callout>
+
+## Why there is no location permission prompt
+
+DimRead never asks for location, never calls a geolocation API, and never makes a
+network request for sun times. The coordinates come from the **system timezone**,
+mapped through an IANA tzdb table generated into the binary — 418 zones plus 131
+deprecated aliases, so a machine reporting `Asia/Calcutta` still resolves to Kolkata.
+
+A zone's reference locality is by construction the place its civil clock is set for,
+and sunrise moves only about 4 minutes per degree of longitude, so `Europe/Berlin` is
+good to a few minutes anywhere in Germany. The sun maths is a port of the NOAA Solar
+Calculator, accurate to about a minute at mid latitudes. Detection reads the registry
+on Windows, `CFTimeZone` on macOS and `/etc/localtime` on Linux; on failure it says
+so rather than guessing.
+
+## Over midnight, after sleep, across DST
+
+Nothing is cached. Every evaluation re-reads the clock and recomputes the sun times
+with the DST-correct offset for that instant, so a date change, midnight and a DST
+jump need no special case — the night plateau spans midnight naturally.
+
+Between boundaries DimRead sleeps rather than polls: it wakes at the next sunrise,
+ramp edge or sunset, and inside a ramp ticks every 1% of the transition window — 36
+seconds at the default 60. Windows also listens for clock-change and power-resume
+broadcasts. macOS and Linux have no native wall-clock-change notification, so the
+schedule reconciles on resume, on window focus, or at its next deadline.
+
+## Windows theme
+
+### System theme
+
+**Light**, **Dark**, **From day to night**, or **Disable**. Default **Disable**. It
+writes the Windows *system* theme only — DimRead's own UI is permanently dark, and
+the app-theme key that would re-skin every other app was removed on purpose. Some
+apps ignore the setting entirely. Unlike the filter this is a hard switch, not a
+ramp: light from sunrise until sunset, dark otherwise.
+
+### Follow the day & night schedule
+
+On by default, shown only when System theme is **From day to night**. It reuses the
+boundaries above, resolved location and all, so the theme turns over on the same sun
+times as the filter. Turn it off to give the theme its own hours.
+
+**Note:** it borrows the times, not the master switch. Turning **Auto day/night** off
+parks the colour filter on its day profile but leaves the theme flipping at sunrise
+and sunset as before — the two are deliberately decoupled.
+
+### System sunrise and System sunset
+
+The opt-out pair, visible only when the follow toggle is off. `HH:MM`, defaulting to
+07:00 and 19:00. This pair wraps midnight correctly when sunrise is later than sunset.
+
+### Transparent taskbar
+
+Applies an accent policy to the taskbar. Default off. It uses an undocumented Windows
+API, best-effort, and the restore replays the policy captured before the first
+override — if that capture failed, DimRead does nothing rather than pin the taskbar
+to an opaque black bar.
+
+<Callout type="warn">
+The whole **Windows theme** section is Windows-only in effect. On macOS and Linux
+the controls compile and persist but do nothing — no registry, no taskbar, no
+theme change.
+</Callout>
+
+## Limitations
+
+- **An inverted custom pair means permanent night.** A Custom time pair where sunset
+  is earlier than sunrise (sunrise 19:00, sunset 07:00) gives the filter the night
+  profile at every minute of the day — that ramp has no midnight-wrapping branch and
+  the UI does not stop you. The Windows theme schedule *does* wrap, so the two
+  visibly disagree there.
+- **Hotkeys edit the day endpoint mid-fade.** *Transition* is not an editable
+  endpoint, so the brightness and temperature hotkeys — and the tray flyout — fall
+  back to the **day** value while the screen shows a blend.
+- **No clock-change notification off Windows.** Change the system clock on macOS or
+  Linux with no DimRead window focused and no resume happening, and the schedule
+  catches up only at its next deadline, computed against the old clock.
+- **Time fields are lenient, not validated.** Hours clamp to 0-23 and minutes to
+  0-59; anything unparseable becomes 00:00.
+
+Every edit here saves immediately — no Save button, no restart.
+
+## Where to go next
+
+- **[Display](/docs/display)** — the sliders, the eight modes and their day/night
+  endpoint pairs, per-monitor overrides.
+- **[Hotkeys](/docs/hotkeys)** — the steppers that write the current phase's endpoint.
+- **[Troubleshooting](/docs/troubleshooting)** — if the schedule fires at the wrong
+  time or the screen never warms.

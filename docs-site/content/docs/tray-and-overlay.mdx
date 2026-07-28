@@ -1,0 +1,212 @@
+---
+title: Tray and overlay
+description: Read the tray icon's state glyph and tooltip, drive the filter from the right-click flyout, and understand the notification pill that drops from the top of the screen.
+---
+
+DimRead is a tray app, so on most days you never open the settings window at all.
+Three surfaces do the work: the **tray icon**, which encodes what the filter is
+currently doing; the **tray flyout**, a right-click popup with real sliders and
+the eight modes; and the **notification pill**, a click-through island that
+appears at the top of the screen.
+
+The flyout writes the same settings the [Display](/docs/display) tab does — it's
+a shortcut into that tab, not a parallel copy.
+
+<Screenshot
+	alt="The DimRead tray flyout: a narrow dark panel with Reading as the active mode and a 5500K · 85% readout at the top, a brightness slider, a colour temperature slider, a four-by-two grid of the eight mode buttons with Reading highlighted, then Settings and Quit rows."
+	caption="The tray flyout. Right-click the tray icon to open it — 284 px of sliders, modes, Settings and Quit."
+	priority
+	src="tray-flyout.webp"
+	width={320}
+/>
+
+## The tray icon
+
+### Click routing
+
+| Gesture | What happens |
+| --- | --- |
+| **Left click** | Dismisses the flyout if it's open, then unminimizes, shows and focuses the settings window. |
+| **Right click** | Opens the flyout at the click point — or dismisses it if it's already up. |
+| **Middle click** | Ignored. |
+| **Double click** | Not handled separately — a left double-click shows the window twice, a right double-click opens the flyout and closes it again. |
+
+Right click, not left click, gets you the quick controls — the opposite of many
+tray apps. Left click has no hide half; it always shows. To hide the window
+again, use its close button or bind the **Show / hide DimRead** hotkey on the
+[Hotkeys](/docs/hotkeys) tab. The two tray surfaces are never up at once.
+
+### The tooltip
+
+Hovering the icon shows the live engine output, e.g. `DimRead — 5000K · 85%`, or
+`DimRead — Paused` while the mode is Pause. The numbers are what's actually on
+screen, not the saved profile, so they move during a day/night transition and
+while you drag a slider.
+
+**Note:** the tooltip is hard-coded English. It doesn't follow the app's language
+setting.
+
+### Reading the glyph
+
+The icon is a family of **32 renderings**, picked on three axes:
+
+- **Display mode** — one glyph each for Pause, Health, Game, Movie, Office,
+  Editing, Reading and Custom, so you can tell at a glance whether anything is
+  being applied.
+- **Day / night phase** — the same mark tinted cool for day and warm for night,
+  following the scheduler. There is no third artwork: a `transition` phase renders
+  as **day**, and the tooltip carries the exact numbers.
+- **Taskbar theme** — an on-dark and an on-light rendering, so the mark stays
+  legible either way.
+
+That's 8 × 2 × 2. All of them are generated from one base mark by
+`tools/assets/generate-icons.py` and compiled into the binary — build output,
+never hand-drawn. The icon repaints when the mode or phase changes and when the
+OS reports a theme change.
+
+### Platform notes
+
+- **Windows** reads the taskbar theme from the registry value
+  `SystemUsesLightTheme` under `…\CurrentVersion\Themes\Personalize` —
+  deliberately the taskbar key, not the app-theme key, since the two can differ.
+- **macOS and Linux** have no equivalent read. They fall back to the theme the
+  app window reports, defaulting to dark, so treat the pairing there as
+  best-effort.
+
+<Callout type="warn">
+On Linux the tray needs an AppIndicator host. Install
+`libayatana-appindicator3-1` (deb) or `libayatana-appindicator-gtk3` (rpm) —
+without it there is no icon. The settings window still opens at launch, and
+re-running DimRead re-shows it, but you lose the flyout and the click-to-show
+gesture. Tray behaviour beyond Windows is not verified by the project.
+</Callout>
+
+## The flyout
+
+### What it shows
+
+Top to bottom, in a 284 px-wide panel:
+
+- **The readout row** — the active mode's icon and name on the left, the live
+  `5000K · 85%` engine output on the right. The readout only appears once the
+  engine has reported state, which is why the panel's height varies.
+- **Brightness** — 10–100 % in 1 % steps, or 0–100 % if you've turned on the wide
+  brightness range on the [Display](/docs/display) tab.
+- **Colour temperature** — 1000–6500 K in 50 K steps, or 0–10000 K with the wide
+  range on.
+- **The mode grid** — all eight presets, four across and two down; hovering one
+  shows its description. Picking a mode **keeps the flyout open**, so you can try
+  one and then tune it without reopening.
+- **Settings** — opens the settings window, then dismisses the flyout.
+- **Quit** — a real shutdown: it restores your monitors' original gamma ramps,
+  tears down the window effects and the taskbar accent, then force-terminates
+  after 3 s if teardown stalls.
+
+There's no "Show" row — Settings *is* the app window, and a left click on the
+tray icon already surfaces it.
+
+Two rules make the flyout different from the Display tab: it always edits the
+**live phase** (during a day↔night transition your edit lands on the **day**
+values) and it always edits **all monitors**. Per-monitor overrides and explicit
+day/night editing live in Settings → Display.
+
+Slider values stream to the screen as a preview while you drag and are only saved
+when you release. Dragging while the mode is Pause moves you to **Custom**, seeded
+from what's currently on screen, so the Pause preset keeps meaning "off".
+
+### Where it appears
+
+The flyout anchors at the tray click position, then clamps into the bounds of
+whichever monitor that click landed on, keeping 8 px clear of the bottom edge for
+the taskbar. DimRead reads the full monitor rectangle rather than the OS work
+area, so that fixed 8 px is the whole taskbar allowance. A tray on a secondary
+display anchors there. The panel sizes itself to its content and re-clamps
+afterwards, so a taller flyout is never pushed under the taskbar.
+
+<Callout type="warn">
+On Wayland, setting a window position silently does nothing, so the flyout's
+anchoring is expected to fail. There is no fallback path — see
+[Troubleshooting](/docs/troubleshooting).
+</Callout>
+
+### How it dismisses
+
+- A second right click on the tray icon.
+- A left click on the tray icon (which then shows the settings window).
+- Clicking anywhere else — the flyout takes focus when it opens, and losing focus
+  dismisses it.
+- <Kbd>Esc</Kbd>.
+- Choosing **Settings** or **Quit**.
+
+Resizing makes the webview briefly drop focus, so blur-to-dismiss is suppressed
+for **500 ms** after each self-resize. Without that grace the popup would
+collapse every time its height changed.
+
+### Why there is no native menu
+
+A native tray menu can only host labels and check marks. Brightness would have to
+ship as a ten-row quick-set submenu — which isn't a brightness control, it's ten
+buttons shaped like one. So the flyout is a transparent, undecorated webview
+rendering the *same* gradient sliders the settings window uses, and its two
+footer rows cover what a native menu would have carried. That's a deliberate
+decision, not a missing feature.
+
+## The notification pill
+
+<Screenshot
+	alt="The DimRead notification pill: a rounded dark island hanging from the top edge of the screen with a green check icon, the bold title Reading, and the line 5500 K · 85% below it."
+	caption="The pill docks at the top of the monitor holding the settings window and fades out on its own."
+	src="overlay-pill.webp"
+	width={560}
+/>
+
+### What triggers it
+
+In the shipped app the **download manager** is the only producer: a transfer that
+reaches Completed shows *Download complete* with the file name in the success
+tone, a failure shows *Download failed* in the error tone. Nothing in the tray,
+the display engine, or the hotkey path raises a pill today. Both titles are
+hard-coded English.
+
+### What it shows and where
+
+A rounded island 360 px wide, hanging flat from the top edge of the screen: a
+tone icon, an optional bold title on one line, and a message clamped to three
+lines. The four tones are **neutral** (muted info icon), **success** (green
+check), **warning** (amber alert) and **error** (red alert).
+
+It's centred horizontally on the monitor holding the settings window, flush with
+that monitor's top edge — the placement reads the full monitor rectangle, not the
+OS work area, so a taskbar docked along the top is covered rather than avoided. If
+the window is gone it uses the primary display.
+
+### How it behaves
+
+- **It stays for 4 s by default.** A caller can ask for anything from 1.2 s to
+  30 s; values outside that are clamped.
+- **It's click-through and never takes focus.** Mouse input passes straight to
+  whatever's underneath, so you can't click it away — it goes when its timer
+  expires, and it won't interrupt typing.
+- **Last one wins.** A new notification replaces the current one immediately.
+  There is no queue and no stacking.
+- **It respects reduced motion.** The 240 ms open / 160 ms close reveal is
+  removed entirely under `prefers-reduced-motion`.
+
+Nothing about the pill is configurable — no settings key, no duration or position
+control. Every value is decided per call.
+
+<Callout type="info">
+Always-on-top works on Windows and X11. On macOS the pill sits at a floating
+window level that is **below the Dock**; on Wayland always-on-top no-ops.
+</Callout>
+
+## Where to go next
+
+- **[Display](/docs/display)** — the full sliders, the eight modes, and the
+  per-monitor targeting the flyout deliberately skips.
+- **[Hotkeys](/docs/hotkeys)** — bind **Show / hide DimRead** and skip the tray
+  entirely.
+- **[General](/docs/general)** — **Minimize to tray** is on by default, which is
+  why closing the window doesn't quit.
+- **[Troubleshooting](/docs/troubleshooting)** — no tray icon, or a flyout that
+  opens in the wrong place.

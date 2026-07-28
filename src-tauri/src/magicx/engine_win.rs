@@ -151,8 +151,13 @@ fn worker(rx: Receiver<Cmd>) {
 
     // SAFETY: MagInitialize takes no arguments. On failure host creation fails
     // gracefully below, so we only log.
-    if !unsafe { MagInitialize() }.as_bool() {
-        log::warn!("[magicx] MagInitialize failed; per-window effects unavailable");
+    if unsafe { MagInitialize() }.as_bool() {
+        log::debug!("[magicx] MagInitialize ok; effect worker ready");
+    } else {
+        log::warn!(
+            "[magicx] MagInitialize failed ({:?}); per-window effects unavailable",
+            std::io::Error::last_os_error()
+        );
     }
 
     let mut hosts: HashMap<Hwnd, Host> = HashMap::new();
@@ -291,8 +296,14 @@ fn set_effect(
 ) {
     if let Some(host) = hosts.get_mut(&hwnd) {
         if host.effect != effect {
+            if !apply_color(host.mag, effect) {
+                // Swapping Dark→Gray (or back) was refused: the host would keep
+                // rendering the OLD effect while the UI claims the new one.
+                remove_host(hwnd, hosts, host_ids);
+                crate::magicx::engine_wgc::apply(hwnd, Some(effect));
+                return;
+            }
             host.effect = effect;
-            apply_color(host.mag, effect);
             invalidate(host.mag);
         }
         return;
@@ -300,33 +311,62 @@ fn set_effect(
     let target = HWND(hwnd as *mut core::ffi::c_void);
     // SAFETY: IsWindow tolerates any handle; a dead target is forgotten.
     if !unsafe { IsWindow(Some(target)) }.as_bool() {
+        log::warn!("[magicx] target {hwnd:#x} is not a window; dropping effect");
         super::forget(hwnd);
         return;
     }
+    // An advanced-colour (HDR) display refuses `MagSetColorEffect` outright, so
+    // skip the doomed host and go straight to the capture backend.
+    if crate::magicx::hdr::advanced_color_active(target) {
+        log::debug!("[magicx] {hwnd:#x} is on an HDR display; using the capture backend");
+        crate::magicx::engine_wgc::apply(hwnd, Some(effect));
+        return;
+    }
     let Some(bounds) = frame_bounds(target) else {
+        log::warn!("[magicx] no usable frame bounds for target {hwnd:#x}");
         return;
     };
     if let Some(host) = create_host(target, bounds, effect) {
+        log::debug!(
+            "[magicx] host {:#x} created for target {hwnd:#x} at ({}, {})-({}, {})",
+            host.host.0 as isize,
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom
+        );
         host_ids.insert(host.host.0 as isize);
         hosts.insert(hwnd, host);
+    } else {
+        // The Magnification path refused this target for a reason HDR detection
+        // didn't predict (a driver quirk, a remote session). The capture backend
+        // does not depend on that pipeline, so hand off rather than give up.
+        log::debug!("[magicx] {hwnd:#x} refused by Magnification; falling back to capture");
+        crate::magicx::engine_wgc::apply(hwnd, Some(effect));
     }
 }
 
 /// Tear down the host for one window.
+///
+/// A target may be running on EITHER backend (HDR displays never get a
+/// Magnification host), so clearing has to reach both — the caller doesn't know
+/// which one owns it.
 fn remove_host(hwnd: Hwnd, hosts: &mut HashMap<Hwnd, Host>, host_ids: &mut HashSet<isize>) {
     if let Some(host) = hosts.remove(&hwnd) {
         host_ids.remove(&(host.host.0 as isize));
         destroy(&host);
     }
+    crate::magicx::engine_wgc::apply(hwnd, None);
 }
 
-/// Tear down every host.
+/// Tear down every host on both backends.
 fn clear_hosts(hosts: &mut HashMap<Hwnd, Host>, host_ids: &mut HashSet<isize>) {
     for host in hosts.values() {
         destroy(host);
     }
     hosts.clear();
     host_ids.clear();
+    crate::magicx::engine_wgc::clear_all();
 }
 
 /// Build a layered click-through host + magnifier child over `bounds`.
@@ -350,10 +390,12 @@ fn create_host(target: HWND, bounds: RECT, effect: Effect) -> Option<Host> {
             None,
         )
     }
+    .inspect_err(|err| log::warn!("[magicx] host window creation failed: {err}"))
     .ok()?;
     // SAFETY: make the layered host fully opaque so the child renders. On
     // failure, tear the half-built host back down.
-    if unsafe { SetLayeredWindowAttributes(host, COLORREF(0), 255, LWA_ALPHA) }.is_err() {
+    if let Err(err) = unsafe { SetLayeredWindowAttributes(host, COLORREF(0), 255, LWA_ALPHA) } {
+        log::warn!("[magicx] SetLayeredWindowAttributes failed: {err}");
         // SAFETY: `host` was just created and is owned here.
         unsafe {
             let _ = DestroyWindow(host);
@@ -378,7 +420,8 @@ fn create_host(target: HWND, bounds: RECT, effect: Effect) -> Option<Host> {
         )
     } {
         Ok(mag) => mag,
-        Err(_) => {
+        Err(err) => {
+            log::warn!("[magicx] WC_MAGNIFIER child creation failed: {err}");
             // SAFETY: `host` is owned here; drop it (and any child) on failure.
             unsafe {
                 let _ = DestroyWindow(host);
@@ -386,25 +429,46 @@ fn create_host(target: HWND, bounds: RECT, effect: Effect) -> Option<Host> {
             return None;
         }
     };
+    // SAFETY: point the magnifier at the target's screen rect at 1.0× zoom.
+    if !unsafe { MagSetWindowSource(mag, bounds) }.as_bool() {
+        log::warn!("[magicx] MagSetWindowSource failed");
+    }
+    // SAFETY: show without activating so focus/input stay with the target.
+    // The magnifier only builds its composition surface once the host is on
+    // screen, so every effect-bearing call below has to come AFTER this.
+    unsafe {
+        let _ = ShowWindow(host, SW_SHOWNOACTIVATE);
+    }
     // Exclude our own overlay windows so the magnifier never captures itself.
     let mut exclude = [host, mag];
     // SAFETY: `exclude` is a live 2-element array for the duration of the call.
-    unsafe {
-        let _ = MagSetWindowFilterList(
+    if !unsafe {
+        MagSetWindowFilterList(
             mag,
             MW_FILTERMODE_EXCLUDE,
             exclude.len() as i32,
             exclude.as_mut_ptr(),
+        )
+    }
+    .as_bool()
+    {
+        // Non-fatal: the magnification window excludes itself automatically, so
+        // this only costs us the host's own exclusion.
+        log::debug!(
+            "[magicx] MagSetWindowFilterList unavailable: {:?}",
+            std::io::Error::last_os_error()
         );
     }
-    apply_color(mag, effect);
-    // SAFETY: point the magnifier at the target's screen rect at 1.0× zoom.
-    unsafe {
-        let _ = MagSetWindowSource(mag, bounds);
-    }
-    // SAFETY: show without activating so focus/input stay with the target.
-    unsafe {
-        let _ = ShowWindow(host, SW_SHOWNOACTIVATE);
+    if !apply_color(mag, effect) {
+        // The colour matrix IS the effect. Without it the host is a
+        // pixel-identical 1:1 copy of the target that still burns a 60 Hz
+        // re-magnify loop over the whole window — strictly worse than nothing,
+        // and it makes the toolbar button lie about being active. Tear it down.
+        // SAFETY: `host` is owned here; its magnifier child dies with it.
+        unsafe {
+            let _ = DestroyWindow(host);
+        }
+        return None;
     }
     Some(Host {
         target,
@@ -542,8 +606,15 @@ fn frame_bounds(target: HWND) -> Option<RECT> {
     }
 }
 
-/// Apply the colour matrix for `effect` to a magnifier window.
-fn apply_color(mag: HWND, effect: Effect) {
+/// Apply the colour matrix for `effect` to a magnifier window. `false` means the
+/// platform refused the transform, in which case the caller must NOT keep the
+/// host — see [`create_host`].
+///
+/// The common refusal is `ERROR_NOT_SUPPORTED` while the display is in HDR
+/// (advanced colour) mode: the Magnification API's colour pipeline needs the
+/// WDDM path that HDR composition takes away, which is also why the built-in
+/// Windows Magnifier greys out "Invert colours" on an HDR display.
+fn apply_color(mag: HWND, effect: Effect) -> bool {
     let mut matrix = MAGCOLOREFFECT {
         transform: match effect {
             Effect::Dark => super::INVERT_MATRIX,
@@ -551,9 +622,15 @@ fn apply_color(mag: HWND, effect: Effect) {
         },
     };
     // SAFETY: `matrix` outlives the call; MagSetColorEffect copies it.
-    unsafe {
-        let _ = MagSetColorEffect(mag, &mut matrix);
+    if unsafe { MagSetColorEffect(mag, &mut matrix) }.as_bool() {
+        return true;
     }
+    let err = std::io::Error::last_os_error();
+    log::warn!(
+        "[magicx] MagSetColorEffect refused {effect:?}: {err:?} \
+         (per-window effects are unavailable while the display is in HDR mode)"
+    );
+    false
 }
 
 /// Force a magnifier window to repaint.

@@ -24,12 +24,19 @@
 //! - Per-monitor: `settings.display.sync_monitors` applies one value everywhere;
 //!   otherwise `settings.display.monitor_overrides[id]` per monitor (falling back
 //!   to the active mode preset when a monitor has no override).
+//! - `settings.display.excluded_monitors` opts a display OUT of filtering
+//!   entirely — its original ramp is restored and it is dropped from every
+//!   apply/preview pass, whatever the mode or sync setting says.
 //! - Day/night: each preset carries `*_day` / `*_night` values; the engine
 //!   interpolates them by [`scheduler::day_factor`].
 //! - Editing mode inverts the ramp; Reading mode engages full-screen grayscale;
 //!   `pause` restores original ramps (no filtering).
-//! - `settings.display.smooth_transition` animates ramp changes over ~400 ms in a
-//!   worker thread ([`TRANSITION_GEN`] cancels a superseded animation).
+//! - `settings.display.smooth_transition` eases every ramp change — including the
+//!   live slider-drag [`preview`] path — towards its target in a worker thread
+//!   ([`TRANSITION_GEN`] cancels a superseded animation). The ease is
+//!   exponential rather than a fixed-duration lerp precisely BECAUSE the target
+//!   moves: a drag re-targets on every animation frame, and a fixed-duration
+//!   animation restarted 60×/s never gets anywhere. See [`Animator`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -91,8 +98,10 @@ struct EngineState {
     /// mirrored to the [`crate::session_guard`] journal for unclean-shutdown recovery.
     /// `BTreeMap` so the journal it serializes into has a stable key order.
     originals: BTreeMap<String, OriginalRamp>,
-    /// Last applied scalar per device (`kelvin`, `brightness_0_1`) — the START of
-    /// the next smooth transition.
+    /// Last TARGETED scalar per device (`kelvin`, `brightness_0_1`). Seeds the
+    /// start of a transition on a device the [`Animator`] has not written yet;
+    /// once it has, the animator's own `live` value is the start point (during a
+    /// drag this target is a value the screen never actually reached).
     applied: HashMap<String, (f64, f64)>,
     /// Rule-engine forced mode id; `None` = follow settings.
     rule_override: Option<String>,
@@ -148,14 +157,59 @@ static TOPOLOGY_TX: OnceLock<SyncSender<()>> = OnceLock::new();
 /// filter on the display with the recovery journal already cleared, and the
 /// next boot launders the dim into its captured "originals". Writers hold this
 /// lock around {generation check + ramp writes}; the bump in [`restore_ramps`]/
-/// [`preview`] happens under the same lock, so no stale write can follow it.
-/// Lock order: `ENGINE` (optional) → `RAMP_WRITE`; the worker takes only
-/// `RAMP_WRITE`, so there is no inversion.
+/// [`reconcile_topology`] happens under the same lock, so no stale write can
+/// follow it. Lock order: `ENGINE` (optional) → `RAMP_WRITE` → `ANIMATOR`; the
+/// worker takes only the last two, so there is no inversion.
 static RAMP_WRITE: Mutex<()> = Mutex::new(());
 
 fn lock_ramp_write() -> std::sync::MutexGuard<'static, ()> {
     RAMP_WRITE.lock().unwrap_or_else(|p| p.into_inner())
 }
+
+/// The single smooth-transition animator.
+///
+/// One long-lived worker eases `live` towards `targets`; every apply path
+/// ([`refresh`], [`preview`]) just re-points `targets` at it. `live` is what was
+/// last WRITTEN to each device — the only correct start point for the next ease,
+/// and the reason a slider drag no longer snaps: `state.applied` records the
+/// TARGET of the previous apply, which during a drag is a value the screen never
+/// reached.
+///
+/// Guarded by `ANIMATOR`. Lock order: `ENGINE` (optional) → `RAMP_WRITE` →
+/// `ANIMATOR`; the worker takes only the last two.
+struct Animator {
+    /// device -> (kelvin, brightness_0_1) actually on screen.
+    live: BTreeMap<String, (f64, f64)>,
+    /// Where the worker is easing towards; empty when nothing is animating.
+    targets: Vec<Target>,
+    /// The [`TRANSITION_GEN`] value these targets belong to. A bump that does
+    /// NOT update this (restore/teardown/topology) stops the worker.
+    generation: u64,
+    /// True while a worker thread is alive, so re-targeting never spawns a second.
+    running: bool,
+}
+
+static ANIMATOR: Mutex<Animator> = Mutex::new(Animator {
+    live: BTreeMap::new(),
+    targets: Vec::new(),
+    generation: 0,
+    running: false,
+});
+
+fn lock_animator() -> std::sync::MutexGuard<'static, Animator> {
+    ANIMATOR.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Worker frame interval (~60 Hz).
+const EASE_FRAME_MS: u64 = 16;
+/// Ease time constant. A step change is ~98 % complete after 4τ (≈360 ms),
+/// which keeps mode switches feeling like the previous fixed 400 ms ramp while
+/// a drag trails the pointer by about a tenth of a second.
+const EASE_TAU_MS: f64 = 90.0;
+/// Remaining deltas below these are invisible on an 8-bit LUT: snap and stop,
+/// so an exponential ease actually terminates.
+const EASE_KELVIN_EPSILON: f64 = 1.0;
+const EASE_BRIGHTNESS_EPSILON: f64 = 0.001;
 
 fn with_state<R>(f: impl FnOnce(&mut EngineState) -> R) -> Option<R> {
     let mut guard = ENGINE.lock().unwrap_or_else(|p| p.into_inner());
@@ -328,6 +382,14 @@ fn reconcile_topology() {
         app = Some(state.app.clone());
         let _io = lock_ramp_write();
         TRANSITION_GEN.fetch_add(1, Ordering::SeqCst);
+        {
+            // Stops the animator (the bump is unclaimed) and drops every device
+            // that is no longer attached, so a reconnect eases from scratch
+            // instead of from a stale pre-unplug value.
+            let mut anim = lock_animator();
+            anim.targets.clear();
+            anim.live.retain(|device, _| current_ids.contains(device));
+        }
         state
             .applied
             .retain(|device, _| current_ids.contains(device));
@@ -464,8 +526,17 @@ pub fn refresh() {
             f64::from(state.last.kelvin),
             f64::from(state.last.brightness) / 100.0,
         );
+        // Opted-out displays are released BEFORE the pass that would dim them,
+        // so toggling one off hands it back on this very refresh rather than
+        // leaving the last filter frozen on it until something else restores.
+        let excluded = excluded_ids(display, &monitors);
+        restore_devices(state, &excluded);
+
         let mut targets = Vec::with_capacity(monitors.len().max(1));
         for m in &monitors {
+            if excluded.contains(&m.id) {
+                continue;
+            }
             let (to_kelvin, to_brightness_pct) = if display.sync_monitors {
                 (base_kelvin, base_brightness)
             } else if let Some(ov) = display.monitor_overrides.get(&m.id) {
@@ -564,12 +635,6 @@ pub fn preview(
 ) {
     with_state(|state| {
         state.previewing = true;
-        // Supersede any in-flight smooth-transition animation so it stops
-        // re-applying the old interpolated ramp over this live drag. Bump and
-        // write under the ramp-write lock so a worker frame that already
-        // passed its generation check cannot land after this preview's writes.
-        let _io = lock_ramp_write();
-        TRANSITION_GEN.fetch_add(1, Ordering::SeqCst);
         // Fallback for a monitor with no applied entry (e.g. `pause` restored
         // its original ramp): the engine's last reported output, which in
         // `pause` is the undimmed passthrough the screen is actually showing.
@@ -585,9 +650,17 @@ pub fn preview(
         let factor = f64::from(scheduler::day_factor());
         let invert = mode == "editing";
         let monitors = monitors::enumerate();
+        let excluded = excluded_ids(&settings.display, &monitors);
         let mut reported = None;
+        let mut targets = Vec::with_capacity(monitors.len().max(1));
         for m in &monitors {
             if monitor_id.as_deref().is_some_and(|id| id != m.id) {
+                continue;
+            }
+            // An opted-out display stays out during a live drag too — `refresh`
+            // already released it, and writing a preview frame here would dim
+            // it for the length of the drag.
+            if excluded.contains(&m.id) {
                 continue;
             }
             let (applied_kelvin, applied_brightness) =
@@ -612,13 +685,24 @@ pub fn preview(
                 },
             );
             let to_brightness = to_brightness.clamp(0.0, 1.0);
-            let ramp = gamma::compose(to_kelvin, to_brightness, invert);
-            gamma::apply_ramp(&m.id, &ramp);
+            targets.push(Target {
+                device: m.id.clone(),
+                from_kelvin: applied_kelvin,
+                from_brightness: applied_brightness,
+                to_kelvin,
+                to_brightness,
+                invert,
+            });
             state
                 .applied
                 .insert(m.id.clone(), (to_kelvin, to_brightness));
             reported.get_or_insert((to_kelvin, to_brightness));
         }
+        // Same seam as `refresh` — a drag is what the smooth-transition setting
+        // is most visible on, so it must not bypass it. Re-targeting (rather
+        // than restarting) the animator is what makes a 60 Hz stream of these
+        // ease continuously instead of stuttering.
+        apply_targets(targets, settings.display.smooth_transition);
         let (reported_kelvin, reported_brightness) = reported.unwrap_or(last_applied);
         let out = DisplayOutput {
             kelvin: reported_kelvin.round() as u32,
@@ -706,6 +790,12 @@ fn restore_ramps(state: &mut EngineState) -> bool {
     // smooth-transition frame can re-dim a monitor we just restored.
     let _io = lock_ramp_write();
     TRANSITION_GEN.fetch_add(1, Ordering::SeqCst);
+    // Not claimed by the animator, so the worker stops on its next frame. Drop
+    // the live values too: what is on screen now is the ORIGINAL ramp, so the
+    // next smooth apply must ease from there (the caller's `from_*` fallback)
+    // rather than from the filtered value this restore just undid.
+    let mut anim = lock_animator();
+    anim.targets.clear();
     let mut restored = true;
     for (device, original) in &state.originals {
         restored &= match original {
@@ -713,49 +803,185 @@ fn restore_ramps(state: &mut EngineState) -> bool {
             OriginalRamp::CompositorManaged => gamma::release_ramp(device),
         };
         state.applied.remove(device);
+        anim.live.remove(device);
     }
     restored
 }
 
-/// Apply per-monitor targets, optionally animating over ~400 ms.
+/// Hand a SUBSET of monitors back to their original ramps, leaving every other
+/// display's filter intact.
+///
+/// Split out of [`restore_ramps`] for `excluded_monitors`: an opted-out display
+/// must be released while its neighbours keep filtering, so a blanket restore
+/// is wrong. Same lock + generation discipline as the full restore — the bump
+/// happens under the write lock, so no stale animator frame can re-dim what was
+/// just released — plus a per-device eviction from `targets`, because a device
+/// left in the animator's target list is re-written on its very next frame.
+///
+/// Devices with no captured original (a monitor plugged in after boot, before
+/// [`reconcile_topology`] caught it) are skipped: there is nothing to put back,
+/// and dropping them from `applied`/`live` is enough to keep them out of the
+/// next ease.
+fn restore_devices(state: &mut EngineState, devices: &[String]) -> bool {
+    if devices.is_empty() {
+        return true;
+    }
+    let _io = lock_ramp_write();
+    TRANSITION_GEN.fetch_add(1, Ordering::SeqCst);
+    let mut anim = lock_animator();
+    anim.targets.retain(|t| !devices.contains(&t.device));
+    let mut restored = true;
+    for device in devices {
+        if let Some(original) = state.originals.get(device) {
+            restored &= match original {
+                OriginalRamp::Captured(ramp) => gamma::apply_ramp(device, ramp),
+                OriginalRamp::CompositorManaged => gamma::release_ramp(device),
+            };
+        }
+        state.applied.remove(device);
+        anim.live.remove(device);
+    }
+    restored
+}
+
+/// The monitors in `monitors` the user has opted out of filtering.
+///
+/// Matches on the enumerated roster rather than returning the raw setting so an
+/// id for an unplugged display (kept in settings deliberately, see
+/// `DisplaySettings::excluded_monitors`) never reaches a ramp write.
+fn excluded_ids(
+    display: &crate::settings::DisplaySettings,
+    monitors: &[MonitorInfo],
+) -> Vec<String> {
+    monitors
+        .iter()
+        .filter(|m| display.excluded_monitors.iter().any(|id| id == &m.id))
+        .map(|m| m.id.clone())
+        .collect()
+}
+
+/// Apply per-monitor targets, easing towards them when `smooth`.
+///
+/// Re-targets the shared [`Animator`] instead of starting a fresh animation, so
+/// a stream of applies (a slider drag previews once per frame) keeps easing
+/// towards the moving target rather than restarting — and rewriting — a
+/// fixed-duration ramp on every one.
 fn apply_targets(targets: Vec<Target>, smooth: bool) {
     let generation = TRANSITION_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let io = lock_ramp_write();
+    let mut anim = lock_animator();
+    // Claim the bump we just made: the worker only keeps running while the
+    // generation still matches, so restore/teardown/topology bumps (which do not
+    // update this) still cancel it.
+    anim.generation = generation;
 
     if !smooth {
-        let _io = lock_ramp_write();
+        anim.targets.clear();
         for t in &targets {
+            anim.live
+                .insert(t.device.clone(), (t.to_kelvin, t.to_brightness));
             let ramp = gamma::compose(t.to_kelvin, t.to_brightness, t.invert);
             gamma::apply_ramp(&t.device, &ramp);
         }
         return;
     }
 
-    std::thread::spawn(move || {
-        const STEPS: u32 = 24;
-        const DURATION_MS: u64 = 400;
-        for step in 1..=STEPS {
-            {
-                // Check-and-write atomically w.r.t. `restore_ramps`/`preview`:
-                // both bump the generation UNDER this lock, so a frame that
-                // passes the check here can never land after a restore — a
-                // stale write on the exit path would re-dim the display AFTER
-                // the originals were put back (and after the recovery journal
-                // was cleared), poisoning the next boot's captured originals.
-                let _io = lock_ramp_write();
-                if TRANSITION_GEN.load(Ordering::SeqCst) != generation {
-                    return; // Superseded by a newer apply — abandon this animation.
-                }
-                let f = step as f64 / STEPS as f64;
-                for t in &targets {
-                    let kelvin = lerp(t.from_kelvin, t.to_kelvin, f);
-                    let brightness = lerp(t.from_brightness, t.to_brightness, f);
-                    let ramp = gamma::compose(kelvin, brightness, t.invert);
-                    gamma::apply_ramp(&t.device, &ramp);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(DURATION_MS / STEPS as u64));
+    // A device the animator has never written (first apply after boot, or the
+    // first after a restore dropped it) starts from the caller's `from_*`, which
+    // is what the screen is actually showing.
+    for t in &targets {
+        anim.live
+            .entry(t.device.clone())
+            .or_insert((t.from_kelvin, t.from_brightness));
+    }
+    anim.targets = targets;
+    if anim.running {
+        return; // The live worker picks the new targets up on its next frame.
+    }
+    anim.running = true;
+    drop(anim);
+    drop(io);
+    if let Err(err) = std::thread::Builder::new()
+        .name("display-transition".into())
+        .spawn(run_transition)
+    {
+        // Without a worker the screen would sit at the old value forever, so
+        // fall back to applying the target directly.
+        log::warn!("[display] could not start the smooth-transition worker: {err}");
+        let _io = lock_ramp_write();
+        let mut anim = lock_animator();
+        anim.running = false;
+        let targets = std::mem::take(&mut anim.targets);
+        for t in &targets {
+            anim.live
+                .insert(t.device.clone(), (t.to_kelvin, t.to_brightness));
+            let ramp = gamma::compose(t.to_kelvin, t.to_brightness, t.invert);
+            gamma::apply_ramp(&t.device, &ramp);
         }
-    });
+    }
+}
+
+/// One exponential ease step on one device: the next `(kelvin, brightness_0_1)`
+/// and whether both axes have landed. Snapping inside `epsilon` is what makes an
+/// asymptotic ease terminate — without it the worker would spin forever writing
+/// LUT-identical ramps.
+fn ease_step(current: (f64, f64), target: (f64, f64), alpha: f64) -> ((f64, f64), bool) {
+    let kelvin = lerp(current.0, target.0, alpha);
+    let brightness = lerp(current.1, target.1, alpha);
+    if (target.0 - kelvin).abs() < EASE_KELVIN_EPSILON
+        && (target.1 - brightness).abs() < EASE_BRIGHTNESS_EPSILON
+    {
+        (target, true)
+    } else {
+        ((kelvin, brightness), false)
+    }
+}
+
+/// One ease frame across every device. Returns true once all of them have landed.
+fn step_transition(anim: &mut Animator, alpha: f64) -> bool {
+    // Taken out so `live` can be written while iterating; restored below.
+    let targets = std::mem::take(&mut anim.targets);
+    let mut settled = true;
+    for t in &targets {
+        let current = anim
+            .live
+            .get(&t.device)
+            .copied()
+            .unwrap_or((t.from_kelvin, t.from_brightness));
+        let (next, landed) = ease_step(current, (t.to_kelvin, t.to_brightness), alpha);
+        settled &= landed;
+        anim.live.insert(t.device.clone(), next);
+        let ramp = gamma::compose(next.0, next.1, t.invert);
+        gamma::apply_ramp(&t.device, &ramp);
+    }
+    if !settled {
+        anim.targets = targets;
+    }
+    settled
+}
+
+fn run_transition() {
+    let alpha = 1.0 - (-(EASE_FRAME_MS as f64) / EASE_TAU_MS).exp();
+    loop {
+        std::thread::sleep(Duration::from_millis(EASE_FRAME_MS));
+        // Check-and-write atomically w.r.t. `restore_ramps`: it bumps the
+        // generation UNDER this lock, so a frame that passes the check here can
+        // never land after a restore — a stale write on the exit path would
+        // re-dim the display AFTER the originals were put back (and after the
+        // recovery journal was cleared), poisoning the next boot's captured
+        // originals.
+        let _io = lock_ramp_write();
+        let mut anim = lock_animator();
+        if TRANSITION_GEN.load(Ordering::SeqCst) != anim.generation {
+            anim.running = false;
+            anim.targets.clear();
+            return; // Superseded by a restore/teardown — abandon this animation.
+        }
+        if step_transition(&mut anim, alpha) {
+            anim.running = false;
+            return;
+        }
+    }
 }
 
 fn emit_state(app: &AppHandle, output: &DisplayOutput) {
@@ -838,6 +1064,65 @@ pub fn display_set_value(
 mod tests {
     use super::*;
 
+    /// The alpha the worker actually uses, so these assertions describe the
+    /// shipped feel rather than a test-only ease.
+    fn frame_alpha() -> f64 {
+        1.0 - (-(EASE_FRAME_MS as f64) / EASE_TAU_MS).exp()
+    }
+
+    #[test]
+    fn ease_terminates_instead_of_approaching_forever() {
+        let start = (6500.0, 1.0);
+        let target = (3400.0, 0.62);
+        let alpha = frame_alpha();
+        let mut current = start;
+        let mut frames = 0_u64;
+        let mut traversed_at_400ms = 0.0;
+        loop {
+            let (next, settled) = ease_step(current, target, alpha);
+            current = next;
+            frames += 1;
+            if frames * EASE_FRAME_MS == 400 {
+                traversed_at_400ms = (start.0 - current.0) / (start.0 - target.0);
+            }
+            if settled {
+                break;
+            }
+            assert!(frames < 120, "ease never settled ({frames} frames)");
+        }
+        assert_eq!(
+            current, target,
+            "a settled ease must land exactly on target"
+        );
+        // The PERCEPTIBLE part of the move is what has to feel like the old
+        // fixed 400 ms ramp; the remaining sub-epsilon tail is invisible.
+        assert!(
+            traversed_at_400ms > 0.95,
+            "only {:.0}% of a mode switch had happened after 400 ms",
+            traversed_at_400ms * 100.0
+        );
+    }
+
+    #[test]
+    fn ease_tracks_a_moving_target_without_falling_behind() {
+        // A slider drag re-targets every frame. The ease must keep closing on
+        // the pointer rather than lagging further behind each frame.
+        let alpha = frame_alpha();
+        let mut current = (6500.0, 1.0);
+        let mut target_kelvin = 6500.0;
+        let mut gap = 0.0;
+        for _ in 0..60 {
+            target_kelvin -= 50.0; // ~3000 K swept over one second
+            let (next, _) = ease_step(current, (target_kelvin, 1.0), alpha);
+            current = next;
+            gap = (target_kelvin - current.0).abs();
+        }
+        assert!(
+            gap < 400.0,
+            "the ease drifted {gap} K behind a steady drag — it should trail by a fraction of a second"
+        );
+    }
+
     fn preset() -> ModePreset {
         ModePreset {
             kelvin_day: 6500,
@@ -875,5 +1160,71 @@ mod tests {
         );
         assert_eq!(kelvin, 5000.0);
         assert_eq!(brightness, 0.805, "an untouched axis stays applied");
+    }
+
+    const DISPLAY1: &str = r"\\.\DISPLAY1";
+    const DISPLAY2: &str = r"\\.\DISPLAY2";
+
+    fn monitor(id: &str, index: u32, primary: bool) -> MonitorInfo {
+        MonitorInfo {
+            id: id.to_string(),
+            index,
+            friendly_name: format!("Monitor {index}"),
+            is_primary: primary,
+        }
+    }
+
+    fn display_with_exclusions(ids: &[&str]) -> crate::settings::DisplaySettings {
+        crate::settings::DisplaySettings {
+            excluded_monitors: ids.iter().map(|id| (*id).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_exclusions_means_every_monitor_participates() {
+        let monitors = [monitor(DISPLAY1, 0, true), monitor(DISPLAY2, 1, false)];
+        assert!(excluded_ids(&display_with_exclusions(&[]), &monitors).is_empty());
+    }
+
+    #[test]
+    fn an_excluded_monitor_is_dropped_from_the_pass() {
+        let monitors = [monitor(DISPLAY1, 0, true), monitor(DISPLAY2, 1, false)];
+        let display = display_with_exclusions(&[DISPLAY2]);
+        assert_eq!(
+            excluded_ids(&display, &monitors),
+            vec![DISPLAY2.to_string()],
+            "only the opted-out display is released; its neighbour keeps filtering"
+        );
+    }
+
+    #[test]
+    fn an_unplugged_exclusion_never_reaches_a_ramp_write() {
+        // The id is kept in settings deliberately (so an exiled display stays
+        // exiled across a dock cycle) but it must not appear in a pass over the
+        // monitors that are actually enumerated right now.
+        let monitors = [monitor(DISPLAY1, 0, true)];
+        let display = display_with_exclusions(&[r"\\.\DISPLAY7"]);
+        assert!(excluded_ids(&display, &monitors).is_empty());
+    }
+
+    #[test]
+    fn exclusion_is_independent_of_sync_monitors() {
+        // The two settings answer different questions — "which values" vs
+        // "whether at all" — so opting a display out must not require leaving
+        // sync mode, and must survive being in it.
+        let monitors = [monitor(DISPLAY1, 0, true), monitor(DISPLAY2, 1, false)];
+        for sync in [true, false] {
+            let display = crate::settings::DisplaySettings {
+                sync_monitors: sync,
+                excluded_monitors: vec![DISPLAY2.to_string()],
+                ..Default::default()
+            };
+            assert_eq!(
+                excluded_ids(&display, &monitors),
+                vec![DISPLAY2.to_string()],
+                "sync_monitors={sync} must not change who participates"
+            );
+        }
     }
 }

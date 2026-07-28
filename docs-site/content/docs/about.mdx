@@ -1,0 +1,153 @@
+---
+title: About
+description: Read the version DimRead is actually running, check GitHub for a newer release, and find the licence, the privacy position, and how to build from source.
+---
+
+**Settings → About** is the last tab in the sidebar's *App* group. It answers three
+questions: what exactly am I running, is anything newer published, and who made
+this.
+
+Nothing on this tab touches your screen, and nothing on it is a setting — the
+values are read live from the running bundle every time you open it.
+
+<Screenshot
+	alt="The DimRead settings window on the About tab, showing the Application section with Name, Version and Tauri rows, an Updates section with a Check for updates button, a row of GitHub / Docs / Releases link buttons, and the credits paragraph."
+	caption="Settings → About. The only button here that reaches the network is Check for updates."
+	priority
+	src="settings-about.webp"
+/>
+
+## What the About tab shows
+
+The **Application** section is three read-only rows:
+
+- **Name** — `DimRead`.
+- **Version** — the version compiled into this build, currently `0.0.3-alpha`.
+  This is the number the update check compares against GitHub. The release
+  pipeline refuses to publish unless `package.json`, `tauri.conf.json` and
+  `Cargo.toml` all carry the same version, so what you read here is the version
+  of every part of the app.
+- **Tauri** — the Tauri runtime the binary was built against, currently `2.11.5`.
+  Useful when reporting a bug that looks like a webview or window-manager
+  problem rather than a DimRead one.
+
+The **Links** section below the update controls has three buttons that open your
+browser: **GitHub** (the source), **Docs** (this site), and **Releases** (every
+published build and its assets).
+
+## Checking for updates
+
+Press **Check for updates**. DimRead asks GitHub's releases API for the 20 most
+recent releases of `dahshury/dimread`, throws away drafts and any tag that is not
+valid semver, takes the highest version left, and compares it with the version
+compiled into the running build. Pre-releases are counted on purpose — every
+DimRead release so far carries an `-alpha` segment, so skipping them would report
+"up to date" forever.
+
+**The check runs only when you press the button.** There is no startup ping and
+no background timer; the caption on the section says so in the app: *"DimRead
+only contacts GitHub while you are on this screen and press the button."* The
+request is made by the Rust backend rather than the web view, because the app's
+content-security policy pins `connect-src` to `'self' ipc: http://ipc.localhost`
+and would block a `fetch()` to api.github.com outright. The connect timeout is
+10 seconds and the whole request is capped at 15 seconds, so a stalled check
+fails instead of looking wedged. Pressing again while one is in flight does
+nothing.
+
+### What each outcome means
+
+| Status line | What happened |
+| --- | --- |
+| *Checking GitHub for a newer release…* | The request is in flight. |
+| *You are on the latest release (…).* | Your version matches the newest published release. |
+| *Version … is available.* | A newer release exists. Up to two buttons appear below the line — see [The download button](#the-download-button). |
+| *This build (…) is newer than the latest release (…).* | You are running something ahead of anything published: a build from source, or a tag that has not been pushed yet. Reported rather than rounded down to "up to date" so you can tell the two apart. |
+| *Could not check for updates — ….* | The reason comes straight from the backend. *GitHub rate limit reached* means the unauthenticated API cap for your IP was hit (HTTP 403 or 429) — wait and press again. Anything else is a network or parsing failure. |
+| *Update checks are only available in the desktop app.* | You are looking at a browser preview with no native backend. |
+
+### The download button
+
+**Download …** appears only when a newer release exists *and* that release
+carries an asset matching your OS and architecture. Assets are matched by
+file-name suffix, in this preference order:
+
+| Platform | Suffixes tried, in order |
+| --- | --- |
+| Windows | `dimread.exe`, `-portable.zip`, `.exe` |
+| macOS (Apple Silicon) | `_aarch64.dmg`, `aarch64.dmg` |
+| macOS (Intel) | `x64-x86_64.dmg`, `x86_64.dmg` |
+| Linux | `.appimage`, `.deb`, `.rpm` |
+
+macOS never falls back to a bare `.dmg`, so an Apple Silicon Mac is never handed
+the Intel disk image. When no asset matches, the button is absent and
+**Release notes** takes you to the release page to pick a file yourself.
+
+<Callout type="warn">
+There is no in-app installer. The alpha builds are not code-signed, and the
+Tauri updater needs a minisign key pair and a signed endpoint that this pipeline
+does not produce — so the updater plugin is deliberately not wired up. The
+Download button opens the file in your browser; you install it the same way you
+installed the build you are running. See [Getting Started](/docs).
+</Callout>
+
+## Licence and credits
+
+DimRead is open source under the **MIT licence** (copyright 2026 dahshury). The
+Credits section on the tab puts it this way: no account, no activation, no
+telemetry. It is built on **Tauri v2** and **React 19**, and its design system,
+multi-window shell and download manager were extracted from WinSTT.
+
+## Privacy
+
+- **No account, no activation, no telemetry.** There is nothing to sign in to
+  and no analytics of any kind.
+- **One outbound request, on demand.** The manual update check is the only time
+  DimRead talks to a server, and only while you are on this tab pressing the
+  button.
+- **No location prompt.** Sunrise and sunset for the day/night schedule are
+  computed offline from your system timezone, so no OS location permission is
+  ever requested. See
+  [Why there is no location permission prompt](/docs/schedule#why-there-is-no-location-permission-prompt).
+- **Everything stays local.** Settings, window position and logs are plain files
+  on your machine — see
+  [Where DimRead keeps its files](/docs/general#where-dimread-keeps-its-files)
+  for where each one lives, and delete them freely.
+
+## Contributing
+
+The source is at
+[github.com/dahshury/dimread](https://github.com/dahshury/dimread). You need
+[Bun](https://bun.sh), a stable Rust toolchain, and the Tauri v2 platform
+prerequisites for your OS.
+
+```bash
+bun install   # deps, plus the git hooks
+bun run dev   # builds and launches the desktop app
+```
+
+Before opening a pull request, run the gates CI runs:
+
+```bash
+bun run lint && bun run typecheck && bun run test
+bun run check:fsd && bun run check:i18n && bun run check:deadcode && bun run check:react
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets && cargo test
+```
+
+Two things trip newcomers up: `src/bindings.ts` is generated by tauri-specta
+(regenerate with `cd src-tauri && cargo test export_bindings`, never hand-edit),
+and everything under `src-tauri/icons/` is build output from
+`tools/assets/generate-icons.py`. The full contract — the enforced
+Feature-Sliced Design layering, the design-system rules, the template rename
+checklist — lives in
+[AGENTS.md](https://github.com/dahshury/dimread/blob/main/AGENTS.md) at the
+repository root. Bug reports and feature requests go to
+[Issues](https://github.com/dahshury/dimread/issues).
+
+## Where to go next
+
+- **[General](/docs/general)** — start at login, minimize to tray, language and
+  reduced motion, plus every file DimRead writes on each OS.
+- **[Diagnostics](/docs/diagnostics)** — the log file, what the display engine
+  writes into it, crash reports, and how to file a bug report.
+- **[Troubleshooting](/docs/troubleshooting)** — what is implemented on which
+  platform, and what to do when the screen does not change.

@@ -90,16 +90,21 @@ README.md
   x86_64-apple-darwin`) instead of the deprecated Intel `macos-13` pool.
 - **Icons**: `generate-icons.py` draws everything from the procedural mark in
   `tools/assets/dimread_mark.py` (Pillow only — no source image, no numpy).
-  One geometry: a rounded reading surface, a light band along its lower edge,
-  and the active mode's glyph KNOCKED OUT of the surface above it.
+  One geometry — the **temperature disc**: a circle split through its centre,
+  brand indigo on the cool/identity half, the emitted light on the warm/state
+  half, and the active mode's glyph KNOCKED OUT of the whole disc.
   - App icons get the mark on a dark squircle tile.
   - Tray icons get the bare mark on transparency — **no tile**. A tile costs
     ~30 % of a 16 px budget and is a dark smudge on a dark taskbar.
   - The tray set is 8 modes × day/night × light/dark taskbar = **32 PNGs** at
     64 px, written to the exact `include_bytes!` paths in tray.rs
-    (`icons/tray/<mode>-<phase>-on-<theme>.png`). The band carries the
-    day/night state (pale cool vs amber); the surface colour only changes for
+    (`icons/tray/<mode>-<phase>-on-<theme>.png`). The warm half carries the
+    day/night state (pale cool vs amber); the cool half only changes for
     taskbar contrast.
+  - Every glyph is clipped to a centred circle of radius `0.40 D`, so the disc
+    always keeps a ring of colour around it. This is asserted at render time:
+    without it a wide glyph runs through the disc edge and the mark stops
+    reading as a disc at all.
   - `contact-sheet.png` in `tools/assets/icon-preview/` renders every state at
     32/20/16 px over both taskbar tones. Look at it after touching a glyph —
     small-size legibility is the whole job and 512 px tells you nothing.

@@ -1,14 +1,8 @@
-import {
-	CenterFocusIcon,
-	ComputerIcon,
-	Delete02Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { CenterFocusIcon, ComputerIcon } from "@hugeicons/core-free-icons";
 import { useTranslations } from "use-intl";
 import { commands } from "@/bindings";
 import { SettingSection, useSettingsStore } from "@/entities/setting";
 import {
-	patchFocusBlurHotkey,
 	patchFocusBlurSettings,
 	useFocusBlurActive,
 } from "@/features/focus-blur";
@@ -18,21 +12,18 @@ import {
 	HEIGHT_MAX,
 	HEIGHT_MIN,
 	HEIGHT_STEP,
-	patchFocusReadHotkey,
 	patchFocusReadSettings,
 	TRANSPARENCY_MAX,
 	TRANSPARENCY_MIN,
 	useFocusReadActive,
 } from "@/features/focus-read";
-import { collectOtherCombos, useHotkeyLabels } from "@/features/hotkey-actions";
-import { type ForbiddenCombo, HotkeyRecorder } from "@/features/record-hotkey";
 import { hasNativeRuntime } from "@/shared/api";
 import { Button } from "@/shared/ui/button";
 import { FormControl } from "@/shared/ui/form-control";
-import { IconButton } from "@/shared/ui/icon-button";
 import { NumberStepper } from "@/shared/ui/number-stepper";
 import { Slider } from "@/shared/ui/slider";
 import { Toggle } from "@/shared/ui/toggle";
+import { MagicWindowSection } from "./MagicWindowSection";
 
 const PREVIEW_BUTTON =
 	"h-9 min-w-[13rem] gap-1.5 rounded-lg bg-accent px-4 font-medium text-body text-on-accent shadow-elevated transition-colors hover:bg-accent-dim";
@@ -65,77 +56,34 @@ function ColorSwatch({
 	);
 }
 
-/** Recorder + clear button pair used by both focus hotkey rows. */
-function HotkeyField({
-	clearLabel,
-	forbiddenCombos,
-	hotkeyId,
-	onClear,
-	onRecorded,
-	value,
-}: {
-	clearLabel: string;
-	forbiddenCombos: readonly ForbiddenCombo[];
-	hotkeyId: "focusRead" | "focusBlur";
-	onClear: () => void;
-	onRecorded: (combo: string) => void;
-	value: string;
-}) {
-	return (
-		<div className="flex items-center gap-1.5">
-			<HotkeyRecorder
-				currentKey={value}
-				forbiddenCombos={forbiddenCombos}
-				hotkeyId={hotkeyId}
-				onKeyRecorded={onRecorded}
-			/>
-			{value.length > 0 ? (
-				<IconButton
-					aria-label={clearLabel}
-					icon={<HugeiconsIcon icon={Delete02Icon} size={15} />}
-					onClick={onClear}
-					tooltip={clearLabel}
-				/>
-			) : (
-				<span aria-hidden className="size-7 shrink-0" />
-			)}
-		</div>
-	);
-}
-
 /**
- * Settings → Focus: both focus effects on one tab (FEATURE-PARITY F8.1–F8.2),
- * mirroring the CareUEyes Focus tab that groups them.
+ * Settings → Window effects: every overlay DimRead paints ON TOP of windows,
+ * as opposed to the gamma ramp the Display tab configures.
+ *
+ * Three sections, in rising order of how much of the screen they touch: Focus
+ * Read (a band), Focus Blur (everything but the active window), Magic Window
+ * (one chosen window). The first two are FEATURE-PARITY F8.1–F8.2, mirroring the
+ * CareUEyes Focus tab that groups them; {@link MagicWindowSection} (F9.1–F9.4)
+ * joined them because it is the same KIND of thing — a per-window shade — and
+ * six rows did not earn a rail entry of their own.
  *
  * Focus Read is the reading-ruler band — transparency, shade colour, band
- * height, a toggle hotkey and a Preview button that arms the full-screen shade
- * (ESC or a second press quits). Focus Blur is the HazeOver-style dimmer — an
- * enable switch that reflects the running effect (`focus:state`) and drives it
- * through `focus_blur_toggle`, plus its taskbar / monitor / animation options.
+ * height and a Preview button that arms the full-screen shade (ESC or a second
+ * press quits). Focus Blur is the HazeOver-style dimmer — an enable switch that
+ * reflects the running effect (`focus:state`) and drives it through
+ * `focus_blur_toggle`, plus its taskbar / monitor / animation options.
  *
  * Each section persists through its own feature slice's settings saver, so the
- * live overlay shades pick up edits at once; the hotkeys are captured with the
- * shared recorder and land in the `hotkeys` section.
+ * live overlay shades pick up edits at once. The toggle SHORTCUTS for all three
+ * effects live on the Hotkeys tab with every other binding — this tab owns the
+ * effect options only.
  */
-export function FocusPanel() {
+export function WindowEffectsPanel() {
 	const t = useTranslations("focusTab");
-	const tHotkeys = useTranslations("hotkeys");
 	const focusRead = useSettingsStore((s) => s.settings.focusRead);
 	const focusBlur = useSettingsStore((s) => s.settings.focusBlur);
-	const hotkeys = useSettingsStore((s) => s.settings.hotkeys);
-	const readHotkey = hotkeys.focusRead;
-	const blurHotkey = hotkeys.focusBlur;
 	const readActive = useFocusReadActive();
 	const blurActive = useFocusBlurActive();
-
-	// Full-roster conflict set (labels included) so a combo bound on ANY other
-	// tab is rejected here with a named error instead of a raw backend message.
-	const labels = useHotkeyLabels();
-	const forbiddenFor = (id: "focusRead" | "focusBlur"): ForbiddenCombo[] =>
-		collectOtherCombos(hotkeys, id).map((other) => ({
-			combo: other.combo,
-			label: labels[other.id],
-		}));
 
 	const handlePreview = () => {
 		if (!hasNativeRuntime()) {
@@ -152,20 +100,6 @@ export function FocusPanel() {
 		if (hasNativeRuntime() && next !== blurActive) {
 			void commands.focusBlurToggle().catch(() => undefined);
 		}
-	};
-
-	const clearReadHotkey = () => {
-		if (hasNativeRuntime()) {
-			void commands.hotkeyUnregister("focusRead").catch(() => undefined);
-		}
-		void patchFocusReadHotkey("");
-	};
-
-	const clearBlurHotkey = () => {
-		if (hasNativeRuntime()) {
-			void commands.hotkeyUnregister("focusBlur").catch(() => undefined);
-		}
-		void patchFocusBlurHotkey("");
 	};
 
 	return (
@@ -227,21 +161,6 @@ export function FocusPanel() {
 							}
 							step={HEIGHT_STEP}
 							value={focusRead.height}
-						/>
-					}
-					layout="row"
-				/>
-
-				<FormControl
-					label={t("readHotkey")}
-					labelAddon={
-						<HotkeyField
-							clearLabel={tHotkeys("clear")}
-							forbiddenCombos={forbiddenFor("focusRead")}
-							hotkeyId="focusRead"
-							onClear={clearReadHotkey}
-							onRecorded={(combo) => void patchFocusReadHotkey(combo)}
-							value={readHotkey}
 						/>
 					}
 					layout="row"
@@ -336,22 +255,9 @@ export function FocusPanel() {
 					}
 					layout="row"
 				/>
-
-				<FormControl
-					label={t("blurHotkey")}
-					labelAddon={
-						<HotkeyField
-							clearLabel={tHotkeys("clear")}
-							forbiddenCombos={forbiddenFor("focusBlur")}
-							hotkeyId="focusBlur"
-							onClear={clearBlurHotkey}
-							onRecorded={(combo) => void patchFocusBlurHotkey(combo)}
-							value={blurHotkey}
-						/>
-					}
-					layout="row"
-				/>
 			</SettingSection>
+
+			<MagicWindowSection />
 		</div>
 	);
 }

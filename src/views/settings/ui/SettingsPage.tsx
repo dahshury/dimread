@@ -3,11 +3,9 @@ import { Tabs } from "@base-ui/react/tabs";
 import {
 	Cancel01Icon,
 	CenterFocusIcon,
+	FilterIcon,
 	InformationCircleIcon,
 	KeyboardIcon,
-	MagicWand01Icon,
-	Moon02Icon,
-	PaintBrush03Icon,
 	Settings01Icon,
 	Sun03Icon,
 	SunriseIcon,
@@ -36,33 +34,24 @@ import {
 	type WindowExitIntent,
 } from "../model/use-settings-window-motion";
 import { AboutPanel } from "./AboutPanel";
-import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
-import { AutoDarkPanel } from "./panels/AutoDarkPanel";
-import { DayNightPanel } from "./panels/DayNightPanel";
 import { DisplayPanel } from "./panels/DisplayPanel";
-import { FocusPanel } from "./panels/FocusPanel";
 import { HotkeysPanel } from "./panels/HotkeysPanel";
-import { MagicWindowPanel } from "./panels/MagicWindowPanel";
 import { RulesPanel } from "./panels/RulesPanel";
+import { SchedulePanel } from "./panels/SchedulePanel";
+import { WindowEffectsPanel } from "./panels/WindowEffectsPanel";
 import { SettingsSidebar, type SidebarLink } from "./SettingsSidebar";
 
 function SettingsPanelContent({ tab }: { tab: string }): ReactNode {
 	switch (tab) {
-		case "appearance":
-			return <AppearancePanel />;
 		case "general":
 			return <GeneralPanel />;
 		case "hotkeys":
 			return <HotkeysPanel />;
-		case "dayNight":
-			return <DayNightPanel />;
-		case "focus":
-			return <FocusPanel />;
-		case "magicWindow":
-			return <MagicWindowPanel />;
-		case "autoDark":
-			return <AutoDarkPanel />;
+		case "schedule":
+			return <SchedulePanel />;
+		case "windowEffects":
+			return <WindowEffectsPanel />;
 		case "rules":
 			return <RulesPanel />;
 		case "about":
@@ -103,13 +92,24 @@ function SettingsHydrationPanel({
  *
  *  This window IS the app: the live controls (sliders, preset modes, auto
  *  day/night) sit at the top of the Display tab and every setting behind them
- *  lives one tab away, grouped Display / App / Features / Application. Display
- *  leads the rail because it is the landing tab ({@link INITIAL_TAB}) — opening
- *  the app should land on the controls, not on a preferences page.
+ *  lives one tab away.
+ *
+ *  The rail is grouped on ONE axis — what a setting acts on. **Screen** holds
+ *  the four surfaces that change what you see (the filter itself, the clock that
+ *  drives it, the foreground-window automation that overrides it, and the
+ *  overlays painted on top of windows); **App** holds the three that are about
+ *  DimRead rather than your display. Display leads because it is the landing tab
+ *  ({@link INITIAL_TAB}) — opening the app should land on the controls, not on a
+ *  preferences page.
+ *
+ *  Tabs are merged, not multiplied: "Day & night" and "Auto dark" were one
+ *  question ("when is it night?") answered on two tabs, and "Magic window" was
+ *  six rows of the same kind of thing as Focus. Before adding a rail entry, check
+ *  that it is a new AXIS and not a new section of an existing tab.
  *
  *  Each link carries per-tab search keywords (its setting names) so the sidebar
- *  search surfaces a tab by its contents, which is what keeps a roster this long
- *  navigable. */
+ *  search surfaces a tab by its contents, which is what keeps the roster
+ *  navigable however it is grouped. */
 function useSettingsSidebarLinks(): SidebarLink[] {
 	const t = useTranslations("settings");
 	const tHotkeys = useTranslations("hotkeys");
@@ -120,29 +120,28 @@ function useSettingsSidebarLinks(): SidebarLink[] {
 			icon: Sun03Icon,
 			tooltip: t("displayTooltip"),
 			keywords: t("displayKeywords"),
-			groupLabel: t("navDisplay"),
+			groupLabel: t("navScreen"),
 		},
 		{
-			key: "dayNight",
-			label: t("dayNight"),
+			key: "schedule",
+			label: t("schedule"),
 			icon: SunriseIcon,
-			tooltip: t("dayNightTooltip"),
-			keywords: t("dayNightKeywords"),
+			tooltip: t("scheduleTooltip"),
+			keywords: t("scheduleKeywords"),
 		},
 		{
-			key: "appearance",
-			label: t("appearance"),
-			icon: PaintBrush03Icon,
-			tooltip: t("appearanceTooltip"),
-			keywords: `${t("appearanceLocale")} ${t("appearanceReducedMotion")}`,
-			groupLabel: t("navApp"),
+			key: "rules",
+			label: t("rules"),
+			icon: FilterIcon,
+			tooltip: t("rulesTooltip"),
+			keywords: t("rulesKeywords"),
 		},
 		{
-			key: "general",
-			label: t("general"),
-			icon: Settings01Icon,
-			tooltip: t("generalTooltip"),
-			keywords: `${t("generalAutostart")} ${t("generalMinimizeToTray")}`,
+			key: "windowEffects",
+			label: t("windowEffects"),
+			icon: CenterFocusIcon,
+			tooltip: t("windowEffectsTooltip"),
+			keywords: t("windowEffectsKeywords"),
 		},
 		{
 			key: "hotkeys",
@@ -150,43 +149,21 @@ function useSettingsSidebarLinks(): SidebarLink[] {
 			icon: KeyboardIcon,
 			tooltip: t("hotkeysTooltip"),
 			keywords: `${tHotkeys("sectionTitle")} ${tHotkeys("toggleMainLabel")} ${tHotkeys("brightnessUpLabel")} ${tHotkeys("tempUpLabel")} ${tHotkeys("toggleFilterLabel")}`,
+			groupLabel: t("navApp"),
 		},
 		{
-			key: "focus",
-			label: t("focus"),
-			icon: CenterFocusIcon,
-			tooltip: t("focusTooltip"),
-			keywords: t("focusKeywords"),
-			groupLabel: t("navFeatures"),
-		},
-		{
-			key: "magicWindow",
-			label: t("magicWindow"),
-			icon: MagicWand01Icon,
-			tooltip: t("magicWindowTooltip"),
-			keywords: t("magicWindowKeywords"),
-		},
-		{
-			key: "autoDark",
-			label: t("autoDark"),
-			icon: Moon02Icon,
-			tooltip: t("autoDarkTooltip"),
-			keywords: t("autoDarkKeywords"),
-		},
-		{
-			key: "rules",
-			label: t("rules"),
+			key: "general",
+			label: t("general"),
 			icon: Settings01Icon,
-			tooltip: t("rulesTooltip"),
-			keywords: t("rulesKeywords"),
+			tooltip: t("generalTooltip"),
+			keywords: `${t("generalAutostart")} ${t("generalMinimizeToTray")} ${t("appearance")} ${t("appearanceLocale")} ${t("appearanceReducedMotion")}`,
 		},
 		{
 			key: "about",
 			label: t("about"),
 			icon: InformationCircleIcon,
 			tooltip: t("aboutTooltip"),
-			keywords: `${t("aboutVersion")} ${t("aboutLinks")} ${t("aboutCredits")}`,
-			groupLabel: t("navApplication"),
+			keywords: `${t("aboutVersion")} ${t("aboutLinks")} ${t("aboutCredits")} ${t("aboutUpdates")}`,
 		},
 	];
 }

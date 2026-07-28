@@ -1,0 +1,309 @@
+---
+title: Troubleshooting
+description: Find the log, work through the symptoms other people hit first, and check the honest per-platform support matrix before filing a bug.
+---
+
+Most DimRead problems are one of three things: a Wayland session, a Windows-only
+feature running on macOS or Linux, or a monitor that has been opted out — this
+page sorts them in that order.
+
+## Start here
+
+There is no logging switch to turn on. DimRead always writes one log file, at
+**Info** level in release builds, with local-time timestamps:
+
+| OS | Log file |
+| --- | --- |
+| Windows (portable) | `Data\logs\dimread.log`, next to `DimRead.exe` |
+| Windows (installed) | `%LOCALAPPDATA%\com.dahshury.dimread\logs\dimread.log` |
+| macOS | `~/Library/Logs/com.dahshury.dimread/dimread.log` |
+| Linux | `~/.local/share/com.dahshury.dimread/logs/dimread.log` |
+
+Display lines are tagged `[display]`, shortcut lines `[hotkeys]`:
+
+```bash
+grep '\[display\]' ~/.local/share/com.dahshury.dimread/logs/dimread.log
+```
+
+<Callout type="warn">
+The log is capped at 500,000 bytes and rotation **deletes** the old file rather
+than archiving it — there is only ever one `dimread.log`. Copy it out before you
+reproduce a problem a second time.
+</Callout>
+
+A crash writes a separate file, `dimread-crash-<epoch_ms>.log`, into the system
+temp directory on every OS — portable mode does not redirect it. Full paths for
+every file DimRead writes are in [Diagnostics](/docs/diagnostics).
+
+## Common symptoms
+
+### Nothing happens on Wayland
+
+The sliders move, the readout changes, and the screen does not.
+
+- Check your session type: `echo $XDG_SESSION_TYPE`. If it prints `wayland`,
+  DimRead needs the compositor's `zwlr_gamma_control_manager_v1` protocol.
+  **sway, Hyprland, river and labwc implement it. GNOME and KDE's Wayland sessions
+  do not**, so there is no tint at all.
+- Log out and pick an **X11 / Xorg** session at the login screen. DimRead drives
+  X11 through RandR 1.2 and works fully.
+- DimRead refuses to fall back to XWayland RandR, because that would affect only
+  XWayland surfaces while claiming to control the physical display. The log says so
+  once: *native Wayland session detected … refusing false XWayland RandR fallback*.
+- Global hotkeys are broken on every Wayland session too — see
+  [A hotkey does nothing](#a-hotkey-does-nothing).
+
+### The screen barely dims, or does not change at all
+
+- Check the mode first: **Pause** restores your original ramps and applies
+  nothing. Pick any other mode in Settings → Display. (Editing a slider while
+  paused moves you to **Custom** by design — that is expected.)
+- Brightness stops at **10%** in the default range. Turn on Settings → Display →
+  **Wide brightness range** to reach 0%; the temperature equivalent is **Wide
+  colour range** (0–10000 K instead of 1000–6500 K).
+- DimRead dims in software by scaling the GPU gamma ramp. There is no DDC/CI and no
+  backlight control in it at all, so it goes darker than your monitor's own minimum
+  but can never make the panel brighter than its current backlight.
+- On Windows, some driver and display combinations restrict the gamma range the OS
+  accepts. DimRead applies the ramp and reports what the driver returns; it does not
+  compensate.
+
+### The second monitor does not change
+
+- Open Settings → Display and look at that monitor's **Filter …** switch. A
+  display switched off there is skipped by every apply pass and gets its original
+  ramp back — and exclusions are remembered across dock cycles on purpose, so one
+  you exiled months ago is still exiled.
+- The monitor strip has two independent axes. The radio picks **which values the
+  sliders edit**; the switch picks **whether that display is filtered at all**.
+  Changing the radio changes nothing on screen.
+- With **All monitors** selected the sliders write one shared preset. Deselect it
+  to store a per-monitor override. Which monitor is targeted is not persisted —
+  reopening the window falls back to the primary display.
+- The last participating monitor cannot be switched off. If the toggle is dead,
+  that is why.
+- Overrides are keyed by a platform id. On Windows that id is the GDI device name
+  (`\\.\DISPLAY1`), which is not hardware identity — re-plugging monitors in a
+  different order can hand an override to a different physical panel.
+
+### The filter turns off when I launch a game
+
+- That is **Disable filtering for full-screen apps**, the built-in first entry of
+  Settings → App rules — it reads like an engine option but rides the same
+  foreground-window watcher. It is **on by default**; turn it off to keep
+  filtering inside games.
+- Suspension needs the full-screen window to hold the foreground for **700 ms**;
+  leaving full screen releases it immediately.
+- It outranks per-app rules: a rule forcing **Game** plus a real full-screen game
+  still means no filtering at all.
+- Maximized windows are not full-screen, and DimRead ignores the Alt+Tab switcher,
+  the desktop and the taskbar — those used to flash the screen back to unfiltered.
+- The toggle is **Windows-only in effect**. Elsewhere it persists and nothing
+  drives it.
+
+### The screen goes back to normal after sleep or undocking
+
+- On Windows, DimRead re-applies on resume, on a clock change and on
+  `WM_DISPLAYCHANGE`. If it did not, check the log for a `[display]` warning.
+- On **macOS and Linux there is no native power hook**. The scheduler reconciles
+  on app activity and window focus instead, so opening the DimRead window (or
+  clicking the tray icon) after waking forces a re-apply.
+- After a hot-plug, DimRead re-enumerates, captures the new display's original
+  ramp and re-applies — even for disconnect-only changes.
+- If a re-plugged monitor comes back unfiltered, check its **Filter …** switch:
+  an id that was excluded is never pruned from the setting.
+
+### The screen is still tinted after I quit DimRead
+
+- Start DimRead again. It keeps a recovery journal (`dimread-session-guard.json`)
+  beside the settings file and deletes it only after a clean teardown, so finding
+  one at launch means the last run died dirty — and the engine puts every ramp back
+  before it reads anything. The journal is also kept on purpose when a monitor was
+  asleep or gone during exit, so the next launch repairs it.
+- A force-kill leaves the ramp applied until DimRead runs again; nothing else is
+  around to undo it. On Wayland this gap does not exist — the compositor restores
+  the ramp when the client disconnects.
+- If a **custom calibration went missing**: DimRead rejects a captured "original"
+  whose channels all peak below 75% of full scale (that is a stranded filter, not a
+  real baseline) and uses identity instead, with a warning in the log. Re-apply
+  your ICC profile.
+
+### DimRead and another blue-light app fight each other
+
+- There is exactly one gamma ramp per display, and DimRead, Night Light, f.lux,
+  redshift and `xrandr --gamma` all write it. DimRead does no arbitration, so
+  whichever tool wrote last wins until the other one refreshes. Run one of them.
+- Start order matters: DimRead captures whatever ramp is present when it starts as
+  the "original" it will restore to. Quit the other tool first, then start DimRead.
+- On macOS, applying a gamma table and HDR are mutually exclusive — the system
+  turns HDR off on a display while a gamma table is in force.
+
+### The mode I clicked is not the one on screen
+
+- A per-app rule override always wins over the mode you picked, and the mode grid
+  keeps highlighting your manual choice — so the grid and the screen can disagree
+  while a rule is active. The readout and the tray icon follow what is applied.
+- Focus a non-matching app, or turn off **Enable custom rules** in Settings →
+  App rules, and your choice takes effect immediately.
+- The K/% readout shows the active mode's day/night-interpolated **base** values,
+  so it keeps showing numbers while paused or full-screen-suspended (the tray
+  tooltip says *DimRead — Paused* instead) and it never reports a per-monitor
+  override.
+
+### A hotkey does nothing
+
+- **Nothing is bound out of the box.** All twelve bindings default to empty — open
+  Settings → Hotkeys and record one.
+- **On any Wayland session, global hotkeys silently never fire.** Registration
+  returns success and the key is grabbed against XWayland. There is no workaround
+  short of an X11 session.
+- On macOS, Apple-reserved combinations also register successfully and then never
+  fire. Pick a different combination.
+- A binding the OS refuses at startup fails silently — the only evidence is a
+  `[hotkeys] failed to arm …` line in the log.
+- Brightness and temperature steps are inert while the mode is **Pause**: they edit
+  the Pause preset, which is never applied. Leave Pause first.
+- MagicX hotkeys do nothing until **Enable MagicX** is on (off by default), and are
+  no-ops off Windows. Escape, `fn`, punctuation, numpad operators and media keys
+  cannot be recorded at all.
+
+### There is no tray icon (Linux)
+
+- The settings window opens at launch, but **Minimize to tray** is on by default,
+  so once you close it the tray icon is the only way back — short of a bound
+  **Show / hide DimRead** hotkey. Without a StatusNotifierItem host there is no
+  tray icon at all.
+- Install the AppIndicator library: `sudo apt install libayatana-appindicator3-1`
+  (Debian/Ubuntu) or `libayatana-appindicator-gtk3` (Fedora/RHEL). The `.deb` and
+  `.rpm` declare it; the **AppImage cannot declare dependencies**, so install it by
+  hand first.
+- On GNOME, tray icons need a shell extension before anything appears.
+- On Wayland the flyout's positioning call silently does nothing, so the panel may
+  not land against the tray icon.
+
+### Window effects or app rules do nothing (macOS, Linux)
+
+Settings → Window effects and Settings → App rules render, accept input and
+persist on every platform, with no warning that the backend is Windows-only.
+
+- **Per-app rules** never fire off Windows, and the Finder tool always reports
+  *No open windows found.*
+- **Focus Blur** shows an invisible overlay and paints nothing — the switch reads
+  "on" and there is no effect.
+- **Focus Read** shows the shade, but the band never follows the cursor and the
+  overlay is sized to a hard-coded 1920×1080 box at the origin.
+- **Magic Window** is an editable settings section that controls nothing; the
+  hover toolbar never appears.
+- **Reading mode** still applies its 5500 K / 85% preset, but full-screen grayscale
+  is Windows-only — the Display tab says so under the mode grid when it happens.
+
+### macOS says the app is damaged or from an unidentified developer
+
+- The builds are ad-hoc signed and **not notarized**, so Gatekeeper blocks the
+  first launch. Right-click **DimRead.app → Open**, then confirm.
+- If that does not offer an Open button, go to **System Settings → Privacy &
+  Security** and click **Open Anyway**, or strip the quarantine flag:
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/DimRead.app
+  ```
+
+- DimRead requests **no** permissions — there is no Accessibility, Screen Recording
+  or Location prompt. It puts an icon in the menu bar, and it keeps a Dock icon
+  as well — nothing in the build hides it from the Dock.
+
+## Platform support
+
+What actually works today, read from the platform gates in the source — not from
+the roadmap. "Stub" means the control moves and nothing reaches the screen.
+
+| Feature | Windows | macOS | Linux (X11) | Linux (Wayland) |
+| --- | --- | --- | --- | --- |
+| Colour temperature + brightness | Yes | Yes | Yes | wlroots only (sway, Hyprland, river, labwc) |
+| Editing mode (invert) | Yes | Yes | Yes | wlroots only |
+| Reading mode grayscale | Yes | No — preset applies, no grayscale | No — same | No — same |
+| Per-monitor targeting | Yes | Yes | Yes | wlroots only |
+| Auto day/night + offline sunrise/sunset | Yes | Yes | Yes | wlroots only |
+| Re-apply on resume / clock change | Yes, native | On app focus only | On app focus only | On app focus only |
+| Disable filtering for full-screen apps | Yes | No — stub | No — stub | No — stub |
+| Per-app rules + window picker | Yes | No — stub | No — stub | No — stub |
+| Focus Read band | Yes | Stub — band frozen | Stub — band frozen | Stub — band frozen |
+| Focus Blur | Yes | No — nothing painted | No — nothing painted | No — nothing painted |
+| Magic Window (Dark / Gray / toolbar) | Yes | No — inert | No — inert | No — inert |
+| Auto dark (system theme + taskbar) | Yes | No | No | No |
+| Global hotkeys | Yes | Yes, except Apple-reserved combos | Yes | **No — binds, never fires** |
+| Tray icon + flyout | Yes | Yes | Needs an AppIndicator host | Needs a host; flyout placement no-ops |
+| Unclean-shutdown ramp recovery | Yes | Yes | Yes | Not needed — compositor restores |
+
+## Known issues
+
+Current, in v0.0.3-alpha, with what you can do about each:
+
+- **Wayland outside the wlroots family has no tint and no working hotkeys**, and
+  nothing in the UI says so. Use an X11 session.
+- **Turning a wide range back off does not re-clamp values already stored outside
+  it** — a 0% screen stays 0% until you move the slider once.
+- **Brightness and temperature hotkeys pressed in Pause quietly dirty the Pause
+  preset** while doing nothing on screen. The sliders cannot repair it — any edit
+  made in Pause is redirected into **Custom** — so put `display.modes.pause` back
+  to 6500 K / 100% in `dimread-settings.json` if the paused readout stops reading
+  6500K · 100%.
+- **Focus Blur's saved state and its running state can drift**, because the hotkey
+  toggles the engine without writing the setting. Only the Settings switch persists.
+- **Mixed-DPI multi-monitor is not modelled** in either Focus overlay — one scale
+  factor covers the whole virtual desktop, so the band or cutout is offset on a
+  differently-scaled display.
+- **App rules cannot be reordered** and the first match wins; delete and re-create
+  them in the order you want.
+- **Windows from apps running as administrator cannot be inspected** by a
+  non-elevated DimRead, so a `process` rule will not match them and Focus Blur will
+  not cut a hole for them.
+
+## Getting help
+
+<Steps>
+
+<Step>
+
+**Check [Platform support](#platform-support)** — most reports turn out to be a
+feature that is Windows-only today.
+
+</Step>
+
+<Step>
+
+**Check the [FAQ](/docs/faq)** for behaviour that looks like a bug and is not: the
+Pause redirect, the readout showing numbers while paused, screenshots staying
+un-tinted.
+
+</Step>
+
+<Step>
+
+**Update.** Settings → About → **Check for updates** queries GitHub only while you
+are on that screen and press the button.
+
+</Step>
+
+<Step>
+
+**File an issue** at
+[github.com/dahshury/dimread/issues](https://github.com/dahshury/dimread/issues)
+with your DimRead version, your OS, the output of `echo $XDG_SESSION_TYPE` on
+Linux, the monitor list from Settings → Display, and the relevant `[display]` or
+`[hotkeys]` lines from the log.
+
+</Step>
+
+</Steps>
+
+## Where to go next
+
+- **[Diagnostics](/docs/diagnostics)** — every file DimRead writes, and how to read
+  the log.
+- **[Display](/docs/display)** — monitor targeting, the wide ranges, and what each
+  mode applies.
+- **[Hotkeys](/docs/hotkeys)** — the twelve bindable actions and the recorder's
+  rules.
+- **[FAQ](/docs/faq)** — short answers to the questions this page does not treat as
+  faults.

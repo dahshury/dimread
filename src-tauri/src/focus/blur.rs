@@ -41,6 +41,17 @@
 //! distinguish a MOVE (snap the cutout) from a SWITCH (glide it) — a spring
 //! chasing a dragged window is itself perceived as lag.
 //!
+//! ## The anchor carries the ENVIRONMENT too, so it must survive an idle desktop
+//! Each anchor ships the whole dimmable region set (`monitors`), which is the
+//! only channel the renderer has for `include_taskbar`, the work areas and the
+//! display topology. So an anchor is not optional bookkeeping that can be skipped
+//! whenever no window is worth highlighting: skipping it freezes the shade's
+//! GEOMETRY as well as its cutout. The tracker therefore RETAINS its last target
+//! (`TrackerState::target`) and re-resolves that window when the
+//! foreground is not anchorable, so every environment change reaches the
+//! renderer — including the one that arrives while our own settings window is
+//! focused, which is every settings edit there is.
+//!
 //! Coordinates are emitted **window-local** (the absolute rects minus the
 //! virtual-screen origin) so the overlay renderer only has to divide by its
 //! device-pixel-ratio — no origin bookkeeping in the webview.
@@ -333,6 +344,36 @@ fn to_local_anchor(
     }
 }
 
+/// Pick the window one sync should anchor to, and the target to retain for the
+/// next one: the live foreground candidate wins, otherwise the previously
+/// retained one is re-measured against the CURRENT environment, and a retained
+/// window that can no longer be measured (it closed) is dropped.
+///
+/// Generic over the handle and the measurement so the policy is unit-tested
+/// without Win32. The fallback is what makes `include_taskbar` (and a taskbar
+/// move, and a display hot-plug) take effect: those all arrive while an
+/// un-anchorable window owns the foreground — our own settings window, for a
+/// settings edit — and the anchor is the only channel carrying the region set the
+/// renderer shades.
+#[cfg(any(windows, test))]
+fn resolve_anchor<H: Copy, A>(
+    foreground: Option<H>,
+    retained: Option<H>,
+    measure: impl Fn(H) -> Option<A>,
+) -> (Option<A>, Option<H>) {
+    if let Some(candidate) = foreground
+        && let Some(anchor) = measure(candidate)
+    {
+        return (Some(anchor), Some(candidate));
+    }
+    match retained.map(|candidate| (candidate, measure(candidate))) {
+        Some((candidate, Some(anchor))) => (Some(anchor), Some(candidate)),
+        // Either nothing was retained, or what was retained is gone: emit
+        // nothing and stop pinning a handle that no longer resolves.
+        _ => (None, None),
+    }
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::cell::RefCell;
@@ -399,6 +440,20 @@ mod windows_impl {
         /// Cached `settings.focus_blur.include_taskbar`, likewise refreshed by
         /// the settings-change callback rather than read per WinEvent.
         include_taskbar: bool,
+        /// The window the shade is currently anchored to — RETAINED across
+        /// foreground changes we deliberately ignore (our own windows, the
+        /// desktop/shell, the task switcher).
+        ///
+        /// This is what makes an ENVIRONMENT change re-emit. Without it,
+        /// [`refresh_environment`] could only republish while a real application
+        /// window happened to own the foreground — and the one moment that is
+        /// never true is the moment the environment actually changes from a
+        /// settings edit, because the user is looking at OUR settings window. So
+        /// toggling "include taskbar" off recomputed the monitor rects
+        /// internally and then emitted nothing, leaving the renderer shading the
+        /// full monitor rect (i.e. a tinted taskbar) until some other app was
+        /// clicked — or, if Blur was left on, until the app restarted.
+        target: Option<HWND>,
     }
 
     thread_local! {
@@ -470,6 +525,7 @@ mod windows_impl {
             last: None,
             monitors: all_monitor_rects(include_taskbar),
             include_taskbar,
+            target: None,
         }));
         // Force creation of the thread message queue before publishing its id.
         // This closes the start→immediate-stop race where PostThreadMessageW can
@@ -607,7 +663,7 @@ mod windows_impl {
     /// unrelated accessibility events the system emits.
     ///
     /// `WINEVENT_SKIPOWNPROCESS` keeps our own windows (the overlay included) from
-    /// waking the callback at all; `compute_anchor` still re-checks the pid to
+    /// waking the callback at all; `foreground_target` still re-checks the pid to
     /// reject a foreground switch racing the queued event.
     fn install_hooks() -> Vec<HWINEVENTHOOK> {
         const RANGES: [(u32, u32); 4] = [
@@ -679,13 +735,24 @@ mod windows_impl {
     /// Recompute the anchor from the cached environment and emit it if it
     /// changed. The guards mirror the old poll's: a superseded or stopped tracker
     /// emits nothing even if a queued event still reaches the callback.
+    ///
+    /// The live foreground window wins; when there is none to highlight the
+    /// RETAINED target ([`TrackerState::target`]) is re-resolved against the
+    /// cached environment instead, so a settings/display/work-area change always
+    /// reaches the renderer. A retained window that can no longer be resolved
+    /// (it closed) is dropped rather than pinning a dead handle.
     fn sync_anchor() {
         let emitted = STATE.with_borrow_mut(|slot| {
             let state = slot.as_mut()?;
             if !super::is_active() || super::GENERATION.load(Ordering::SeqCst) != state.generation {
                 return None;
             }
-            let geometry = compute_anchor(state.include_taskbar, &state.monitors)?;
+            let (geometry, target) =
+                super::resolve_anchor(foreground_target(), state.target, |hwnd| {
+                    anchor_for(hwnd, state.include_taskbar, &state.monitors)
+                });
+            state.target = target;
+            let geometry = geometry?;
             if state.last.as_ref() == Some(&geometry) {
                 return None;
             }
@@ -708,6 +775,11 @@ mod windows_impl {
     /// Re-read `include_taskbar`, re-enumerate monitors, then re-sync. This only
     /// runs for a settings callback or a native display/work-area notification;
     /// it is never timer-driven.
+    ///
+    /// The re-sync is the point: the refreshed rects are what the renderer shades,
+    /// so they have to be published, not just cached. [`sync_anchor`]'s retained
+    /// target is what lets that happen while DimRead's own settings window (the
+    /// window the user just clicked the toggle in) owns the foreground.
     fn refresh_environment() {
         STATE.with_borrow_mut(|slot| {
             let Some(state) = slot.as_mut() else {
@@ -750,16 +822,10 @@ mod windows_impl {
         }
     }
 
-    /// Resolve the current foreground window into a window-local anchor, or
-    /// `None` when there is nothing to highlight (no focus, our own window, a
-    /// desktop/shell surface, or an un-inspectable window).
-    ///
-    /// `monitors` is the caller's cached enumeration — this is the hot path, so
-    /// it must not re-enumerate displays.
-    fn compute_anchor(
-        include_taskbar: bool,
-        monitors: &[(i32, i32, i32, i32)],
-    ) -> Option<FocusAnchorEvent> {
+    /// The foreground window the shade should highlight, or `None` when there is
+    /// nothing to highlight (no focus, one of our own windows, a desktop/shell
+    /// surface).
+    fn foreground_target() -> Option<HWND> {
         // SAFETY: returns the foreground HWND or a null handle (no focus).
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
@@ -768,7 +834,7 @@ mod windows_impl {
         let mut pid: u32 = 0;
         // SAFETY: `hwnd` is valid; `pid` is a live out-param.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        // Our own windows (main, settings, the overlay itself) must never punch a
+        // Our own windows (settings, the overlay itself) must never punch a
         // hole — that would flash the shade off whenever DimRead is focused.
         if pid == std::process::id() {
             return None;
@@ -776,6 +842,20 @@ mod windows_impl {
         if is_shell_class(&class_name_of(hwnd)) {
             return None;
         }
+        Some(hwnd)
+    }
+
+    /// Resolve one window into a window-local anchor against the cached
+    /// environment, or `None` when it can no longer be measured (it closed, or it
+    /// is un-inspectable).
+    ///
+    /// `monitors` is the caller's cached enumeration — this is the hot path, so
+    /// it must not re-enumerate displays.
+    fn anchor_for(
+        hwnd: HWND,
+        include_taskbar: bool,
+        monitors: &[(i32, i32, i32, i32)],
+    ) -> Option<FocusAnchorEvent> {
         let win = window_bounds(hwnd)?;
         let monitor = monitor_bounds(hwnd, include_taskbar)?;
         let (ox, oy, _, _) = crate::windows::virtual_screen_bounds();
@@ -907,7 +987,7 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_shell_class, to_local_anchor};
+    use super::{is_shell_class, resolve_anchor, to_local_anchor};
 
     /// Stand-in window handle for the geometry tests — `to_local_anchor`
     /// passes it straight through, so its value only has to be stable.
@@ -933,6 +1013,59 @@ mod tests {
         assert!(is_shell_class("TaskSwitcherWnd"));
         assert!(is_shell_class("TaskSwitcherOverlayWnd"));
         assert!(is_shell_class("ForegroundStaging"));
+    }
+
+    /// Stand-in for `anchor_for`: every window measures to its own handle except
+    /// the ones listed as gone (a closed window can no longer be measured).
+    fn measuring(gone: &[u64]) -> impl Fn(u64) -> Option<u64> + '_ {
+        move |hwnd| (!gone.contains(&hwnd)).then_some(hwnd)
+    }
+
+    #[test]
+    fn anchor_resolution_prefers_the_live_foreground_and_retains_it() {
+        let (anchor, retained) = resolve_anchor(Some(HWND_A), Some(HWND_A + 1), measuring(&[]));
+        assert_eq!(anchor, Some(HWND_A));
+        assert_eq!(retained, Some(HWND_A));
+    }
+
+    #[test]
+    fn anchor_resolution_falls_back_to_the_retained_target() {
+        // THE include_taskbar REGRESSION. An environment change (the taskbar
+        // toggle, a taskbar move, a display hot-plug) is republished through the
+        // anchor, and it always lands while a window we refuse to highlight owns
+        // the foreground — DimRead's own settings window, for a settings edit.
+        // Emitting nothing there froze the shade on the previous region set, so
+        // turning "include taskbar" off left the taskbar tinted.
+        let (anchor, retained) = resolve_anchor(None, Some(HWND_A), measuring(&[]));
+        assert_eq!(anchor, Some(HWND_A));
+        assert_eq!(retained, Some(HWND_A), "the target must stay retained");
+    }
+
+    #[test]
+    fn anchor_resolution_drops_a_retained_target_that_is_gone() {
+        // A closed window must not pin the cutout forever.
+        let (anchor, retained) = resolve_anchor(None, Some(HWND_A), measuring(&[HWND_A]));
+        assert_eq!(anchor, None);
+        assert_eq!(retained, None);
+    }
+
+    #[test]
+    fn anchor_resolution_falls_back_when_the_foreground_cannot_be_measured() {
+        // An un-inspectable foreground window (elevated, or racing its own close)
+        // keeps the shade on the last window it could measure.
+        let (anchor, retained) =
+            resolve_anchor(Some(HWND_A + 1), Some(HWND_A), measuring(&[HWND_A + 1]));
+        assert_eq!(anchor, Some(HWND_A));
+        assert_eq!(retained, Some(HWND_A));
+    }
+
+    #[test]
+    fn anchor_resolution_emits_nothing_before_the_first_target() {
+        // Activating Blur while DimRead itself is focused: there is nothing to
+        // highlight yet, and the renderer must not flash a hole-less shade.
+        let (anchor, retained) = resolve_anchor(None, None, measuring(&[]));
+        assert_eq!(anchor, None);
+        assert_eq!(retained, None);
     }
 
     #[test]

@@ -328,6 +328,25 @@ async displaySetValue(edit: DisplayEdit) : Promise<Result<SettingsSnapshot, stri
 }
 },
 /**
+ * `daynight_list_timezones` — every zone the picker can offer, with the
+ * coordinates each resolves to. Sent once when the panel mounts; the renderer
+ * turns `country` into a localized name with `Intl.DisplayNames`.
+ */
+async daynightListTimezones() : Promise<TimeZoneOption[]> {
+    return await TAURI_INVOKE("daynight_list_timezones");
+},
+/**
+ * `daynight_location_status` — what the Day & night panel needs to show which
+ * location the schedule is actually running on, and today's sun times for it.
+ *
+ * Computed here rather than in the renderer so there is exactly ONE
+ * implementation of "which coordinates apply": the panel cannot disagree with
+ * the scheduler about what it is displaying.
+ */
+async daynightLocationStatus() : Promise<LocationStatus> {
+    return await TAURI_INVOKE("daynight_location_status");
+},
+/**
  * `rules_list_windows` — enumerate candidate top-level windows for the rule
  * editor's picker, each with a stable `id` (its `HWND`) so same-process windows
  * stay distinguishable. Empty off-Windows.
@@ -387,6 +406,23 @@ async magictoolbarRendererReady() : Promise<void> {
  */
 async magictoolbarHideComplete() : Promise<void> {
     await TAURI_INVOKE("magictoolbar_hide_complete");
+},
+/**
+ * `update_check` — ask GitHub whether a newer release than the running build
+ * exists. Manual only: the About tab's button is the sole caller, so DimRead
+ * never phones home on its own.
+ *
+ * The version compared is the one baked into the bundle
+ * (`tauri.conf.json` → `package_info`), not a stored setting, so a downgrade
+ * or a portable copy still reports the truth.
+ */
+async updateCheck() : Promise<Result<UpdateCheck, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_check") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return __commandError__(e);
+}
 }
 }
 
@@ -478,8 +514,16 @@ export type AutoDarkSettings = {
  */
 systemTheme: string;
 /**
+ * Take the `auto` schedule's boundaries from [`DayNightSettings`] — the same
+ * sun times the colour filter runs on — instead of the pair below. On by
+ * default: two schedules that answer "when is it night?" differently is a
+ * bug the user has to notice, and only the day/night section can resolve a
+ * real location. The manual pair stays as the opt-out.
+ */
+useDayNightSchedule: boolean;
+/**
  * Sunrise for the SYSTEM theme's `auto` (day→night) schedule, `"HH:MM"`.
- * Decoupled from the Display-tab blue-light schedule.
+ * Used only when `use_day_night_schedule` is off.
  */
 systemSunrise: string;
 /**
@@ -495,10 +539,24 @@ taskbarTransparent: boolean }
  */
 export type DayNightSettings = { enabled: boolean;
 /**
- * Derive sun times from `latitude`/`longitude` instead of the manual
- * `sunrise`/`sunset` strings.
+ * Compute sun times from a location instead of the manual `sunrise`/
+ * `sunset` strings. WHICH location is [`Self::location_source`]'s job.
  */
-useLocation: boolean; latitude: number; longitude: number;
+useLocation: boolean;
+/**
+ * Where the coordinates come from when `use_location` is set — one of
+ * [`LOCATION_SOURCE_IDS`]. See `crate::display::location::resolve`.
+ */
+locationSource: string;
+/**
+ * IANA zone id chosen in the picker (`location_source == "timezone"`).
+ * Empty falls back to the detected system zone.
+ */
+timezone: string;
+/**
+ * Hand-entered coordinates (`location_source == "manual"`).
+ */
+latitude: number; longitude: number;
 /**
  * Manual sunrise time, "HH:MM" (used when `use_location` is off).
  */
@@ -564,7 +622,8 @@ brightnessWideRange: boolean;
  */
 disableOnFullscreen: boolean;
 /**
- * Animate colour/brightness changes over ~400 ms.
+ * Ease colour/brightness changes towards their target (~400 ms for a mode
+ * switch) instead of snapping — including live slider drags.
  */
 smoothTransition: boolean;
 /**
@@ -575,6 +634,17 @@ syncMonitors: boolean;
  * Per-monitor overrides keyed by the display backend's durable monitor id.
  */
 monitorOverrides: Partial<{ [key in string]: MonitorOverride }>;
+/**
+ * Monitor ids that opt OUT of filtering entirely — the engine restores
+ * their original ramp and leaves them alone.
+ *
+ * Deliberately independent of `sync_monitors`/`monitor_overrides`: those
+ * choose WHAT VALUES a monitor gets, this chooses WHETHER it participates,
+ * and a user wanting one untouched screen must not have to leave sync mode
+ * to get it. Ids of unplugged displays are kept rather than pruned, so a
+ * monitor that is exiled stays exiled across a dock/undock cycle.
+ */
+excludedMonitors: string[];
 /**
  * The eight editable preset modes keyed by mode id.
  */
@@ -804,6 +874,44 @@ magicDark: string;
  */
 magicGray: string }
 /**
+ * Where a resolution actually landed, mirroring `settings.location_source`
+ * plus the two failure branches the UI has to explain.
+ */
+export type LocationSource =
+/**
+ * Detected from the system timezone.
+ */
+"auto" |
+/**
+ * The user's chosen timezone.
+ */
+"timezone" |
+/**
+ * Hand-entered coordinates.
+ */
+"manual" |
+/**
+ * Wanted a timezone (auto or chosen) but none resolved — the stored
+ * coordinates are being used instead, and the UI should say so.
+ */
+"unresolved"
+/**
+ * What the Day & night panel needs to explain the current schedule: the
+ * resolution above, plus the system zone it detected (so "Timezone" mode can
+ * still show what auto WOULD have picked).
+ */
+export type LocationStatus = { resolved: ResolvedLocation;
+/**
+ * The raw IANA id the platform reports, even when it has no locality —
+ * showing `Etc/GMT+3` is more useful than showing nothing.
+ */
+detectedTimezone: string | null;
+/**
+ * Today's sun times in local wall-clock minutes from midnight, or `None`
+ * on a polar day/night where the sun does not cross the horizon.
+ */
+sunriseMinutes: number | null; sunsetMinutes: number | null }
+/**
  * `magictoolbar:hide` — the Magic Toolbar left its target window; the renderer
  * plays its exit and Rust hides the `magic-toolbar` window.
  */
@@ -956,6 +1064,18 @@ export type PickerClosingEvent = Record<string, never>
  */
 export type PickerLifecycleSnapshot = { anchor?: PickerAnchorEvent | null; closing: boolean }
 /**
+ * The outcome of resolving `day_night` to a point on the globe.
+ */
+export type ResolvedLocation = { latitude: number; longitude: number;
+/**
+ * Which branch produced the coordinates above.
+ */
+source: LocationSource;
+/**
+ * The zone the coordinates came from, when they came from one.
+ */
+timezone: string | null }
+/**
  * One custom per-app rule: switch to `mode` while a matching window is active.
  */
 export type Rule = { id: string;
@@ -982,6 +1102,56 @@ export type SettingsChangedEvent = { revision: number; settings: AppSettings }
  * read/written at.
  */
 export type SettingsSnapshot = { revision: number; settings: AppSettings }
+/**
+ * A selectable timezone, as sent to the picker.
+ */
+export type TimeZoneOption = { id: string; country: string; latitude: number; longitude: number }
+/**
+ * The result of one update check.
+ */
+export type UpdateCheck = { status: UpdateStatus;
+/**
+ * The running build's version, as compiled in.
+ */
+currentVersion: string;
+/**
+ * The newest published release's version, tag prefix stripped.
+ */
+latestVersion: string;
+/**
+ * The release page, for "see what changed".
+ */
+releaseUrl: string;
+/**
+ * The asset matching this OS/architecture, when the release has one.
+ */
+downloadUrl: string | null;
+/**
+ * The asset's file name, so the UI can say what it is about to hand over.
+ */
+downloadName: string | null;
+/**
+ * RFC 3339 publish timestamp, straight from GitHub.
+ */
+publishedAt: string | null }
+/**
+ * How the running build compares to the newest published release.
+ */
+export type UpdateStatus =
+/**
+ * The running version matches the newest release.
+ */
+"upToDate" |
+/**
+ * A newer release exists.
+ */
+"updateAvailable" |
+/**
+ * The running build is newer than anything published — a local dev build,
+ * or a release whose tag has not been pushed yet. Reported rather than
+ * rounded down to "up to date" so a tester can tell the two apart.
+ */
+"ahead"
 
 /** tauri-specta globals **/
 

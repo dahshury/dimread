@@ -14,9 +14,6 @@ export {
 	TRANSPARENCY_MAX,
 	TRANSPARENCY_MIN,
 } from "./lib/read-values";
-export {
-	patchFocusReadHotkey,
-	patchFocusReadSettings,
-} from "./model/persist-focus-read";
+export { patchFocusReadSettings } from "./model/persist-focus-read";
 export { useFocusReadActive } from "./model/use-focus-read-active";
 export { useFocusReadSettings } from "./model/use-focus-read-settings";

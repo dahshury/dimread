@@ -177,6 +177,11 @@ export const displaySettingsSchema = z.object({
 		.record(z.string(), monitorOverrideSchema)
 		.catch({})
 		.default({}),
+	/** Monitor ids that opt OUT of filtering entirely. Independent of
+	 *  `syncMonitors` — that picks which VALUES a display gets, this picks
+	 *  whether it participates at all, so one screen can stay untouched without
+	 *  leaving sync mode. */
+	excludedMonitors: z.array(z.string()).catch([]).default([]),
 	/** The eight editable preset modes keyed by mode id. */
 	modes: z
 		.record(z.string(), modePresetSchema)
@@ -184,10 +189,40 @@ export const displaySettingsSchema = z.object({
 		.default(() => ({ ...DEFAULT_MODES })),
 });
 
+/**
+ * The three ways `dayNight` can arrive at a latitude/longitude, in the order the
+ * panel presents them. Mirrors `LOCATION_SOURCE_IDS` in
+ * `src-tauri/src/settings/mod.rs`.
+ */
+export const LOCATION_SOURCE_IDS = ["auto", "timezone", "manual"] as const;
+
+export type LocationSourceId = (typeof LOCATION_SOURCE_IDS)[number];
+
+/** Narrow a persisted `locationSource` string, defaulting anything unrecognised
+ *  to detection — the source that needs no stored input, and therefore the only
+ *  safe fallback. */
+export function asLocationSource(value: string): LocationSourceId {
+	return (LOCATION_SOURCE_IDS as readonly string[]).includes(value)
+		? (value as LocationSourceId)
+		: "auto";
+}
+
 export const dayNightSettingsSchema = z.object({
 	enabled: z.boolean().catch(true).default(true),
-	/** Derive sun times from latitude/longitude instead of manual strings. */
+	/** Compute sun times from a location instead of manual strings. WHICH
+	 *  location is `locationSource`'s job. */
 	useLocation: z.boolean().catch(false).default(false),
+	/**
+	 * Where the coordinates come from — one of {@link LOCATION_SOURCE_IDS}.
+	 * Typed as a plain string (not a Zod enum) so this section stays structurally
+	 * interchangeable with the tauri-specta `DayNightSettings`, which types every
+	 * roster field as `string`; narrow with {@link asLocationSource} at the point
+	 * of use. The backend normalizes an unrecognised value back to `"auto"`, so
+	 * it can never come to mean "use 0°, 0°".
+	 */
+	locationSource: z.string().catch("auto").default("auto"),
+	/** IANA zone id for `locationSource: "timezone"`; empty falls back to auto. */
+	timezone: z.string().catch("").default(""),
 	latitude: z.number().catch(0).default(0),
 	longitude: z.number().catch(0).default(0),
 	/** Manual sunrise time, "HH:MM" (used when `useLocation` is off). */
@@ -275,8 +310,12 @@ const autoDarkTarget = z
 export const autoDarkSettingsSchema = z.object({
 	/** Windows system-theme schedule: `light` | `dark` | `auto` | `disable`. */
 	systemTheme: autoDarkTarget,
-	/** Sunrise for the SYSTEM theme's `auto` schedule, "HH:MM" (decoupled from the
-	 *  Display-tab blue-light schedule). */
+	/** Take the `auto` schedule's boundaries from the `dayNight` section — the same
+	 *  sun times the colour filter runs on — instead of the pair below. On by
+	 *  default; the manual pair is the opt-out. */
+	useDayNightSchedule: z.boolean().catch(true).default(true),
+	/** Sunrise for the SYSTEM theme's `auto` schedule, "HH:MM". Used only when
+	 *  `useDayNightSchedule` is off. */
 	systemSunrise: z.string().catch("07:00").default("07:00"),
 	/** Sunset for the SYSTEM theme's `auto` schedule, "HH:MM". */
 	systemSunset: z.string().catch("19:00").default("19:00"),

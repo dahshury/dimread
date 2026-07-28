@@ -8,6 +8,9 @@
 //!   * [`grayscale`] — full-screen grayscale where the platform exposes a
 //!     compositor colour-matrix API (Reading mode).
 //!   * [`scheduler`] — day/night interpolation factor.
+//!   * [`suncalc`] — offline NOAA sunrise/sunset math.
+//!   * [`timezones`] — IANA zone → approximate location (generated tzdb table),
+//!     and [`location`] — which of those coordinates `day_night` resolves to.
 //!   * [`engine`] — the orchestrator + the `display_*` IPC commands. This is the
 //!     stable seam other agents build on.
 //!
@@ -29,9 +32,12 @@ compile_error!("the DimRead display engine needs a native backend for this targe
 pub mod engine;
 pub mod gamma;
 pub mod grayscale;
+pub mod location;
 pub mod monitors;
 pub mod scheduler;
 pub mod suncalc;
+pub mod timezones;
+mod timezones_data;
 pub mod values;
 
 pub use engine::{

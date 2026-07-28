@@ -6,6 +6,7 @@
     "src/entries/*.{ts,tsx}",
     "src/**/*.{test,spec}.{ts,tsx}",
     "tools/**/*.ts",
+    "tools/**/*.mjs",
     "test/**/*.ts",
     "src/shared/ui/*/index.ts",
     "src/shared/lib/*.ts",

@@ -7,8 +7,12 @@ import {
 	ALL_MONITORS,
 	BRIGHTNESS_STEP,
 	brightnessRange,
+	buildBrightnessPatch,
 	buildKelvinPatch,
+	buildMonitorEnabledPatch,
+	clampBrightness,
 	clampKelvin,
+	defaultBrightnessFor,
 	defaultKelvinFor,
 	type EditPhase,
 	isAllMonitors,
@@ -26,7 +30,7 @@ import { Slider } from "@/shared/ui/slider";
 import { DayNightRow } from "./DayNightRow";
 import { LiveReadout } from "./LiveReadout";
 import { ModeGrid } from "./ModeGrid";
-import { MonitorStrip } from "./MonitorStrip";
+import { MonitorTargets } from "./MonitorTargets";
 
 /**
  * The live display controls (parity F1–F3): the monitor selector, the engine's
@@ -62,7 +66,9 @@ export function QuickControls() {
 	// user's Day/Night override (which also previews that phase's values).
 	const livePhase: EditPhase = state?.phase === "night" ? "night" : "day";
 	const [phaseOverride, setPhaseOverride] = useState<EditPhase | null>(null);
-	const effectivePhase = phaseOverride ?? livePhase;
+	const effectivePhase = dayNight.enabled
+		? livePhase
+		: (phaseOverride ?? livePhase);
 	// `transition` is not an editable endpoint. The segmented control necessarily
 	// shows Day or Night, so preview that endpoint raw instead of presenting a
 	// slider whose 0% can only move the blended output to (for example) 97%.
@@ -71,9 +77,9 @@ export function QuickControls() {
 	const previewSelectedEndpoint =
 		phaseOverride !== null || state?.phase === "transition";
 
-	// Monitor-strip selection derived from `syncMonitors` (the source of truth for
+	// Monitor-roster selection derived from `syncMonitors` (the source of truth for
 	// "all vs one monitor") plus a local pointer to the last-chosen monitor, so the
-	// strip stays consistent across window reopens. Falls back to the primary
+	// roster stays consistent across window reopens. Falls back to the primary
 	// monitor when the stored pointer is empty or points at an unplugged display.
 	const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(
 		null,
@@ -126,6 +132,21 @@ export function QuickControls() {
 				),
 			),
 		);
+	const handleResetBrightness = () =>
+		runSettled(() =>
+			patchDisplaySettings(
+				buildBrightnessPatch(
+					display,
+					mode,
+					selection,
+					effectivePhase,
+					clampBrightness(
+						defaultBrightnessFor(mode, selection, effectivePhase),
+						brightnessWideRange,
+					),
+				),
+			),
+		);
 
 	// --- mode / monitor / day-night handlers ---
 	const handleSelectMode = (nextMode: string) =>
@@ -138,18 +159,37 @@ export function QuickControls() {
 			patchDisplaySettings({ syncMonitors: isAllMonitors(next) }),
 		);
 	};
-	const handleToggleAutoDayNight = (enabled: boolean) =>
-		runSettled(() => patchDayNightSettings({ enabled }));
+	const handleToggleAutoDayNight = (enabled: boolean) => {
+		if (enabled) {
+			setPhaseOverride(null);
+		}
+		return runSettled(() => patchDayNightSettings({ enabled }));
+	};
+	// Opting a monitor out while it is the slider target would leave the sliders
+	// editing an override the engine no longer applies — a control that looks
+	// live and does nothing. Hand the target back to "all monitors" in the same
+	// patch, so the two settings can never disagree.
+	const handleSetMonitorEnabled = (monitorId: string, enabled: boolean) => {
+		const retarget = !enabled && selection === monitorId;
+		return runSettled(() =>
+			patchDisplaySettings({
+				...buildMonitorEnabledPatch(display, monitorId, enabled),
+				...(retarget ? { syncMonitors: true } : {}),
+			}),
+		);
+	};
 
 	return (
 		<div className="flex flex-col gap-3">
-			{monitors.length > 1 ? (
-				<MonitorStrip
-					monitors={monitors}
-					onSelect={(next) => void handleSelectMonitor(next)}
-					selection={selection}
-				/>
-			) : null}
+			<MonitorTargets
+				excluded={display.excludedMonitors}
+				monitors={monitors}
+				onSelect={(next) => void handleSelectMonitor(next)}
+				onSetEnabled={(id, enabled) =>
+					void handleSetMonitorEnabled(id, enabled)
+				}
+				selection={selection}
+			/>
 
 			<div className="flex flex-col gap-4 rounded-xl border border-divider bg-surface-2 p-4 shadow-elevated">
 				<div className="flex justify-center">
@@ -178,19 +218,29 @@ export function QuickControls() {
 						tooltip={t("resetTemperature")}
 					/>
 				</div>
-				<Slider
-					aria-label={t("brightness")}
-					endLabel={t("brighter")}
-					formatValue={(v) => t("percentValue", { percent: Math.round(v) })}
-					label={t("dimmer")}
-					max={brightnessMax}
-					min={brightnessMin}
-					onChange={dragBrightness}
-					onCommit={(value) => void commitBrightness(value)}
-					step={BRIGHTNESS_STEP}
-					value={brightness}
-					variant="brightness"
-				/>
+				<div className="flex items-center gap-1.5">
+					<Slider
+						aria-label={t("brightness")}
+						className="min-w-0 flex-1"
+						endLabel={t("brighter")}
+						formatValue={(v) => t("percentValue", { percent: Math.round(v) })}
+						label={t("dimmer")}
+						max={brightnessMax}
+						min={brightnessMin}
+						onChange={dragBrightness}
+						onCommit={(value) => void commitBrightness(value)}
+						step={BRIGHTNESS_STEP}
+						value={brightness}
+						variant="brightness"
+					/>
+					<IconButton
+						aria-label={t("resetBrightness")}
+						className="shrink-0"
+						icon={<HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={16} />}
+						onClick={() => void handleResetBrightness()}
+						tooltip={t("resetBrightness")}
+					/>
+				</div>
 				<div aria-hidden="true" className="h-px bg-divider" />
 				<DayNightRow
 					enabled={dayNight.enabled}

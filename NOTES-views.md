@@ -303,6 +303,14 @@ settings; converting them would be churn with no reset semantics. The
 download-demo form's URL/file-name fields stay `FormControl` (form inputs,
 not persisted settings).
 
+`AppearancePanel` is since gone: the Appearance tab held two rows (language,
+reduce motion) and General held two (autostart, minimize to tray), so the App
+group spent two rail entries on four settings. They are now one **General** tab
+— `GeneralPanel` renders a "Startup & tray" section plus a local
+`AppearanceSection` — and the rail link carries both tabs' keywords so a search
+for "language" or "motion" still lands on it. The `appearance` settings section
+in the schema is untouched; only the UI grouping changed.
+
 ### i18n
 
 New namespaces (per the parallel-agent key-partition): `dropZone.*`,

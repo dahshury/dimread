@@ -1,40 +1,15 @@
 #!/usr/bin/env python3
-r"""The DimRead brand mark, drawn procedurally.
+r"""The DimRead temperature-disc brand mark, drawn procedurally.
 
-ONE geometry, rendered into every icon the app ships. Keeping the mark as code
-rather than a pile of exported PNGs is what makes the tray's 8 x 2 x 2 state
-family possible: a variant is a parameter change, not a new drawing.
+ONE geometry is rendered into every icon the app ships. The mark is a circle
+split through its centre: brand indigo is the constant cool/identity half and
+the emitted day/night light is the warm/state half. The active mode glyph is
+knocked through the whole disc and straddles the split.
 
-## The mark
-
-A rounded **reading surface** with a **band of light** along its lower edge, and
-the active **mode glyph knocked out** of the surface above it.
-
-    +-----------+
-    |    /\     |   <- surface   (constant: this is the brand)
-    |   /  \    |   <- mode glyph, KNOCKED OUT (transparent)
-    |           |
-    |###########|   <- light band (its colour is the day/night state)
-    +-----------+
-
-Three deliberate choices, each learned from a failed round:
-
-* **The glyph is a knockout, not a badge.** A small glyph drawn *on* the surface
-  disappears at 16 px. A hole punched *through* it is maximum contrast at any
-  size and survives as a flat monochrome silhouette.
-* **The tray icon has no tile.** A dark rounded tile behind the mark eats ~30 %
-  of a 16 px budget and, on a dark taskbar, is just a dark smudge. Only the APP
-  icon (installer / taskbar button) gets the squircle tile; the tray gets the
-  bare mark on transparency.
-* **The band is the state, the surface is the identity.** The band renders the
-  light DimRead is currently putting on the screen — pale and cool on the day
-  profile, amber on the night one. The surface colour only ever changes to keep
-  contrast against a light vs dark taskbar.
-
-## Coordinates
-
-Everything is normalised 0..1 over the mark's own box and scaled at draw time,
-so the same code renders a 16 px tray glyph and a 1024 px master.
+The tray uses the bare disc on transparency. The app icon keeps the dark
+squircle tile behind it. Everything is normalised 0..1 over the disc's own box
+and supersampled before the final resize so the same drawing serves 16 px tray
+icons and the 1024 px app-icon master.
 """
 
 from __future__ import annotations
@@ -42,61 +17,56 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
-# Supersampling factor. Pillow has no anti-aliased vector rasteriser, so every
-# shape is drawn large and LANCZOS-downsampled; 8x is where the 16 px renders
-# stop showing stair-steps on the diagonals (the pencil and the play triangle).
+# Pillow has no anti-aliased vector rasteriser. Drawing at 8x and reducing with
+# LANCZOS is enough to keep the 16 px circle and diagonal glyphs clean.
 SUPERSAMPLE = 8
 
+# Both split geometries are intentionally kept live so the design choice can be
+# checked in tools/assets/icon-preview/split-comparison.png.
+SPLIT_MODES = ("vertical", "diagonal")
+SPLIT_MODE = "diagonal"
+"""Active disc split: vertical or diagonal.
+
+The diagonal is about 30 degrees through the centre, with the state/warm half
+on the lower-right. Change only this constant to ship the vertical alternative.
+"""
+
+SPLIT_ANGLE_DEGREES = 30.0
+
 # ── Palette ─────────────────────────────────────────────────────────────────
-# Two surface treatments (for a dark vs light taskbar) and two band treatments
-# (day vs night). The band hues are the app's own two poles: the cool end of the
-# Kelvin range and the warm end.
+# surface remains the identity/cool half and band remains the emitted
+# light/state half in MarkStyle so the existing public API stays stable.
 
-SURFACE_ON_DARK = (108, 124, 255, 255)  # brand blue-violet, bright enough for a dark taskbar
-SURFACE_ON_LIGHT = (43, 51, 110, 255)  # deep indigo, reads solid on a light taskbar
+SURFACE_ON_DARK = (108, 124, 255, 255)
+SURFACE_ON_LIGHT = (43, 51, 110, 255)
 
-BAND_DAY_ON_DARK = (186, 208, 255, 255)  # pale cool light
-BAND_DAY_ON_LIGHT = (96, 132, 224, 255)
-BAND_NIGHT_ON_DARK = (250, 176, 78, 255)  # warm amber light
+BAND_DAY_ON_DARK = (186, 208, 255, 255)
+# More cyan and materially lighter than the identity indigo. This is selected
+# for separation on a light taskbar, where the old #6084E0 band looked muddy.
+BAND_DAY_ON_LIGHT = (70, 151, 218, 255)
+BAND_NIGHT_ON_DARK = (250, 176, 78, 255)
 BAND_NIGHT_ON_LIGHT = (214, 130, 26, 255)
 
-# The app-icon tile (the squircle the mark sits on). Tray icons never use it.
 TILE = (14, 17, 32, 255)
 
-# ── Geometry (normalised 0..1 over the mark's box) ──────────────────────────
+# ── Geometry (normalised 0..1 over the disc) ────────────────────────────────
 
-SURFACE_RADIUS = 0.24
-"""Corner radius of the reading surface, as a fraction of its width."""
+TRAY_PAD = 0.02
+"""Optical tray padding: the circular silhouette occupies 96% of the box."""
 
-BAND_TOP = 0.70
-"""Where the light band starts. The band is the bottom 30 % of the mark."""
+GLYPH_BOX = (0.22, 0.22, 0.78, 0.78)
+"""Centred 56%-diameter square used as the default glyph layout box."""
 
-SEAM = 0.028
-"""Transparent gap between surface and band.
+GLYPH_CONTAINMENT_RADIUS = 0.40
+"""Maximum glyph radius as a fraction of disc diameter.
 
-This is what makes the two read as separate planes — light falling ON something
-rather than a two-tone block. At 16 px it survives as a single pixel, which is
-exactly enough.
+This preserves a continuous ring at least 0.10D thick around every knockout.
 """
 
-GLYPH_BOX = (0.135, 0.105, 0.865, 0.605)
-"""The knockout region: left, top, right, bottom.
-
-The mode glyph fills this box — 73 % of the mark's width and the whole upper
-plane. A glyph confined to a small badge is unreadable in the tray; this one IS
-the upper surface. Every point of margin here is a point of legibility lost at
-16 px, so it is cut as close to the surface's corner radius as the rounding
-allows.
-"""
-
-STROKE = 0.115
-"""Minimum stroke weight as a fraction of the mark's width (~2/16 at tray size).
-
-Nothing in a glyph may be thinner than this. It is the entire reason the modes
-stay apart at 16 px.
-"""
+STROKE = 0.14
+"""Minimum feature weight as a fraction of disc diameter (~2.2 px at 16 px)."""
 
 
 @dataclass(frozen=True)
@@ -106,11 +76,7 @@ class MarkStyle:
 
 
 def mark_style(phase: str, on_theme: str) -> MarkStyle:
-    """Resolve the (day|night) x (dark|light taskbar) colour pair.
-
-    `on_theme` is the TASKBAR's theme: `dark` asks for the rendering that sits on
-    a dark taskbar.
-    """
+    """Resolve the (day|night) x (dark|light taskbar) colour pair."""
     if on_theme not in ("dark", "light"):
         raise ValueError(f"on_theme must be 'dark' or 'light', got {on_theme!r}")
     if phase not in ("day", "night"):
@@ -124,14 +90,9 @@ def mark_style(phase: str, on_theme: str) -> MarkStyle:
 
 
 # ── Mode glyphs ─────────────────────────────────────────────────────────────
-# Each draws into `box` (l, t, r, b) with the given colour. They are called
-# twice: once to punch the knockout (transparent) and, for the app icon, that is
-# it — the tile shows through.
-#
-# Every glyph is 1-3 shapes with no detail finer than STROKE. Checked against
-# each other at 16 px: two vertical bars (pause) vs three horizontal (custom),
-# a cross (game) vs a heart (health), a triangle (movie) vs a diagonal (editing),
-# a notched rectangle (office) vs two arcs (reading).
+# Glyph functions draw into a one-channel knockout mask. White removes the disc
+# and black preserves it. Every completed mask is asserted to fit inside the
+# global 0.40D containment circle before it can be applied to the mark.
 
 
 def _span(box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -141,31 +102,36 @@ def _span(box: tuple[float, float, float, float]) -> tuple[float, float, float, 
 
 def _glyph_pause(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
     left, top, w, h = _span(box)
-    bar = STROKE * unit * 1.25
-    gap = bar * 0.9
+    bar = STROKE * unit
+    gap = STROKE * unit * 0.86
     x = left + (w - (2 * bar + gap)) / 2
     for _ in range(2):
         d.rounded_rectangle(
-            [x, top + h * 0.06, x + bar, top + h * 0.94], radius=bar * 0.32, fill=colour
+            [x, top + h * 0.03, x + bar, top + h * 0.97],
+            radius=bar * 0.28,
+            fill=colour,
         )
         x += bar + gap
 
 
 def _glyph_health(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
     left, top, w, h = _span(box)
-    # Two lobes over a deep V. The lobes sit HIGH and the point runs the full
-    # remaining height — a shallow heart turns into a cloud at 16 px.
-    r = w * 0.265
-    cy = top + h * 0.27
-    d.ellipse([left + w * 0.02, cy - r, left + w * 0.02 + 2 * r, cy + r], fill=colour)
+    # High lobes and a deep point keep the heart distinct from a cloud at 16 px.
+    radius = w * 0.265
+    centre_y = top + h * 0.28
     d.ellipse(
-        [left + w * 0.98 - 2 * r, cy - r, left + w * 0.98, cy + r], fill=colour
+        [left + w * 0.02, centre_y - radius, left + w * 0.02 + 2 * radius, centre_y + radius],
+        fill=colour,
+    )
+    d.ellipse(
+        [left + w * 0.98 - 2 * radius, centre_y - radius, left + w * 0.98, centre_y + radius],
+        fill=colour,
     )
     d.polygon(
         [
-            (left + w * 0.02, cy),
-            (left + w * 0.98, cy),
-            (left + w * 0.5, top + h * 1.0),
+            (left + w * 0.02, centre_y),
+            (left + w * 0.98, centre_y),
+            (left + w * 0.5, top + h),
         ],
         fill=colour,
     )
@@ -173,17 +139,40 @@ def _glyph_health(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
 
 def _glyph_game(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
     left, top, w, h = _span(box)
-    # A d-pad cross: the most legible gaming shorthand at tray size.
-    arm = STROKE * unit * 1.3
+    # The neck keeps the 0.14D minimum weight; slightly wider terminal caps make
+    # this a controller d-pad rather than a medical cross.
+    neck = STROKE * unit
+    cap = STROKE * unit * 1.42
+    cap_depth = STROKE * unit * 1.12
     cx, cy = left + w / 2, top + h / 2
     d.rounded_rectangle(
-        [cx - arm / 2, top + h * 0.02, cx + arm / 2, top + h * 0.98],
-        radius=arm * 0.3,
+        [cx - neck / 2, top, cx + neck / 2, top + h],
+        radius=neck * 0.18,
         fill=colour,
     )
     d.rounded_rectangle(
-        [left + w * 0.02, cy - arm / 2, left + w * 0.98, cy + arm / 2],
-        radius=arm * 0.3,
+        [left, cy - neck / 2, left + w, cy + neck / 2],
+        radius=neck * 0.18,
+        fill=colour,
+    )
+    d.rounded_rectangle(
+        [cx - cap / 2, top, cx + cap / 2, top + cap_depth],
+        radius=neck * 0.2,
+        fill=colour,
+    )
+    d.rounded_rectangle(
+        [cx - cap / 2, top + h - cap_depth, cx + cap / 2, top + h],
+        radius=neck * 0.2,
+        fill=colour,
+    )
+    d.rounded_rectangle(
+        [left, cy - cap / 2, left + cap_depth, cy + cap / 2],
+        radius=neck * 0.2,
+        fill=colour,
+    )
+    d.rounded_rectangle(
+        [left + w - cap_depth, cy - cap / 2, left + w, cy + cap / 2],
+        radius=neck * 0.2,
         fill=colour,
     )
 
@@ -192,89 +181,106 @@ def _glyph_movie(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
     left, top, w, h = _span(box)
     d.polygon(
         [
-            (left + w * 0.14, top + h * 0.02),
-            (left + w * 0.94, top + h * 0.5),
-            (left + w * 0.14, top + h * 0.98),
+            (left + w * 0.12, top),
+            (left + w * 0.96, top + h * 0.5),
+            (left + w * 0.12, top + h),
         ],
         fill=colour,
     )
 
 
 def _glyph_office(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
-    left, top, w, h = _span(box)
-    # A briefcase: a chunky detached handle over a wide, low body.
+    del box
+    # A briefcase: a wide body with a DETACHED handle floating above it.
     #
-    # Two things fought each other here. Merged into the body, the handle reads
-    # as a folder tab; and a body filling the whole glyph box is just a smaller
-    # copy of the surface it is punched out of. So the body is deliberately
-    # SHORT and wide, with real air above it.
-    handle_w = w * 0.46
-    bar = h * 0.17
+    # This glyph was the hardest of the eight, because every solid-block variant
+    # lands within 0.05 of some other mode at 16 px — measured: a portrait page
+    # collides with `pause` and `movie`, a landscape page collides with
+    # `reading`. What finally separates it is topology rather than proportion:
+    # nothing else in the roster is TWO shapes with a gap between them, so the
+    # gap is the recognition cue and it is the one cue no other glyph can fake.
+    #
+    # The gap is 0.085D (~1.2 px at tray size) — the smallest feature anywhere
+    # in the roster, and load-bearing. Do not close it up.
+    handle_h = STROKE * unit
     d.rounded_rectangle(
-        [left + (w - handle_w) / 2, top, left + (w + handle_w) / 2, top + bar],
-        radius=bar * 0.42,
+        [0.405 * unit, 0.270 * unit, 0.595 * unit, 0.270 * unit + handle_h],
+        radius=handle_h * 0.34,
         fill=colour,
     )
     d.rounded_rectangle(
-        [left, top + bar * 1.75, left + w, top + h], radius=w * 0.09, fill=colour
+        [0.245 * unit, 0.495 * unit, 0.755 * unit, 0.755 * unit],
+        radius=0.05 * unit,
+        fill=colour,
     )
 
 
 def _glyph_editing(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
-    left, top, w, h = _span(box)
-    # A pencil pointing down-left: one thick diagonal shaft plus a tip triangle.
-    # Drawn as a stroked line rather than a hand-built quad — the quad version
-    # collapsed into an unreadable blob once the glyph box grew.
-    shaft = STROKE * unit * 1.45
-    tip_x, tip_y = left + w * 0.06, top + h * 0.94
-    d.line(
-        [
-            (left + w * 0.30, top + h * 0.70),
-            (left + w * 0.86, top + h * 0.14),
-        ],
-        fill=colour,
-        width=round(shaft),
-        joint="curve",
-    )
+    del box
+    # A pencil, as a kite along the 45-degree axis: sharp tip at the lower-left,
+    # widening to a 0.17D shaft, closing on a flat tail cut square across the
+    # axis. LONG and NARROW on purpose — a short fat wedge is a triangular mass
+    # and collides with `movie`'s play triangle at 16 px (measured: 0.031). A
+    # constant-thickness bar, on the other hand, reads as a prohibition slash.
+    # Long + tapered + flat-tailed is the only combination that is neither.
     d.polygon(
         [
-            (tip_x, tip_y),
-            (left + w * 0.10, top + h * 0.56),
-            (left + w * 0.44, top + h * 0.90),
+            (0.252 * unit, 0.748 * unit),
+            (0.286 * unit, 0.594 * unit),
+            (0.594 * unit, 0.286 * unit),
+            (0.714 * unit, 0.406 * unit),
+            (0.406 * unit, 0.714 * unit),
         ],
         fill=colour,
     )
 
 
 def _glyph_reading(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
-    left, top, w, h = _span(box)
-    # An open book: two pages splayed from a centre gutter. Deliberately NOT a
-    # 2x2 grid and NOT split by a straight vertical spine — that reads as the
-    # Windows logo.
-    gutter = STROKE * unit * 0.55
-    for side in (-1, 1):
-        inner = left + w / 2 + side * gutter / 2
-        outer = left + w / 2 + side * (w / 2)
-        d.polygon(
-            [
-                (inner, top + h * 0.12),
-                (outer, top + h * 0.00),
-                (outer, top + h * 0.80),
-                (inner, top + h * 1.00),
-            ],
-            fill=colour,
-        )
+    del box
+    # A bookmark: one upright block with a V notch cut into the BOTTOM.
+    #
+    # Three open-book variants were built and rejected by looking at the 16 px
+    # cells. Two pages either side of a gutter is the same topology as `pause`
+    # — two vertical masses separated by a vertical gap — and no amount of
+    # tilting the pages survives downsampling, so the two modes became
+    # interchangeable. A solid block with a notch in the TOP reads as a bucket.
+    #
+    # A bottom notch is the one cue nothing else in the roster has, it says
+    # "bookmark" rather than "gate", and being a single mass is exactly what
+    # separates it from `pause`.
+    left, right = 0.345 * unit, 0.655 * unit
+    top, bottom = 0.235 * unit, 0.765 * unit
+    d.polygon(
+        [
+            (left, top),
+            (right, top),
+            (right, bottom),
+            (0.50 * unit, 0.630 * unit),
+            (left, bottom),
+        ],
+        fill=colour,
+    )
 
 
 def _glyph_custom(d: ImageDraw.ImageDraw, box, colour, unit: float) -> None:
-    left, top, w, h = _span(box)
-    # Three slider tracks at staggered lengths — "tuned by hand".
+    del box
+    # An equalizer: three bars on a common baseline at three different heights.
+    #
+    # Two rejected predecessors, both killed at 16 px: three stacked HORIZONTAL
+    # bars became a barcode, and a track-plus-handle slider read as an arrowhead
+    # whichever side the handle sat on (measured against `movie`: 0.027).
+    #
+    # What works is the staggered SKYLINE. Nothing else in the roster has an
+    # uneven top edge over a flat base, and unlike a slider handle the cue is
+    # spread across the whole glyph rather than concentrated in one 2 px block.
+    # It is also the most honest picture of what this mode is: levels set by hand.
     bar = STROKE * unit
-    gap = (h - 3 * bar) / 2
-    for i, frac in enumerate((1.0, 0.62, 0.84)):
-        y = top + i * (bar + gap)
+    gap = 0.07 * unit
+    baseline = 0.735 * unit
+    for i, top in enumerate((0.435, 0.235, 0.345)):
+        x = 0.22 * unit + i * (bar + gap)
         d.rounded_rectangle(
-            [left, y, left + w * frac, y + bar], radius=bar / 2, fill=colour
+            [x, top * unit, x + bar, baseline], radius=bar * 0.30, fill=colour
         )
 
 
@@ -288,87 +294,142 @@ MODE_GLYPHS = {
     "reading": _glyph_reading,
     "custom": _glyph_custom,
 }
-"""Mirrors `DISPLAY_MODE_IDS` in `src-tauri/src/settings/mod.rs`."""
+"""Mirrors DISPLAY_MODE_IDS in src-tauri/src/settings/mod.rs."""
 
 
 # ── Rendering ───────────────────────────────────────────────────────────────
 
 
-def _render_mark(unit: int, mode: str, style: MarkStyle) -> Image.Image:
-    """Render the mark alone into a transparent `unit` x `unit` image.
+def _split_mask(unit: int, split_mode: str) -> Image.Image:
+    if split_mode not in SPLIT_MODES:
+        raise ValueError(
+            f"split_mode must be one of {SPLIT_MODES!r}, got {split_mode!r}"
+        )
 
-    Note every "erase" below is an `ImageDraw` fill with alpha 0. ImageDraw
-    REPLACES pixels rather than blending them, which is what lets the seam and
-    the glyph be punched straight through the surface — no masks needed.
-    """
+    mask = Image.new("L", (unit, unit), 0)
+    d = ImageDraw.Draw(mask)
+    centre = unit / 2
+    if split_mode == "vertical":
+        d.rectangle([centre, 0, unit, unit], fill=255)
+        return mask
+
+    angle = math.radians(SPLIT_ANGLE_DEGREES)
+    # In image coordinates this line rises toward the upper-right. Its normal
+    # points down/right, selecting the warm lower-right half-plane.
+    direction = (math.cos(angle), -math.sin(angle))
+    warm_normal = (math.sin(angle), math.cos(angle))
+    reach = unit * 2
+    line_a = (
+        centre - direction[0] * reach,
+        centre - direction[1] * reach,
+    )
+    line_b = (
+        centre + direction[0] * reach,
+        centre + direction[1] * reach,
+    )
+    d.polygon(
+        [
+            line_a,
+            line_b,
+            (
+                line_b[0] + warm_normal[0] * reach,
+                line_b[1] + warm_normal[1] * reach,
+            ),
+            (
+                line_a[0] + warm_normal[0] * reach,
+                line_a[1] + warm_normal[1] * reach,
+            ),
+        ],
+        fill=255,
+    )
+    return mask
+
+
+def _render_mark(
+    unit: int, mode: str, style: MarkStyle, split_mode: str = SPLIT_MODE
+) -> Image.Image:
+    """Render one temperature disc into a transparent square."""
+    if mode not in MODE_GLYPHS:
+        raise ValueError(f"unknown mode {mode!r}")
+
+    disc_box = [0, 0, unit - 1, unit - 1]
     layer = Image.new("RGBA", (unit, unit), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    radius = SURFACE_RADIUS * unit
+    ImageDraw.Draw(layer).ellipse(disc_box, fill=style.surface)
 
-    # The whole silhouette is ONE rounded rectangle; the band is the same shape
-    # clipped to its lower portion, so the outer outline stays a single clean
-    # curve instead of two shapes that almost line up.
-    d.rounded_rectangle([0, 0, unit - 1, unit - 1], radius=radius, fill=style.surface)
+    warm = Image.new("RGBA", (unit, unit), (0, 0, 0, 0))
+    ImageDraw.Draw(warm).ellipse(disc_box, fill=style.band)
+    warm.putalpha(ImageChops.multiply(warm.getchannel("A"), _split_mask(unit, split_mode)))
+    layer.alpha_composite(warm)
 
-    band = Image.new("RGBA", (unit, unit), (0, 0, 0, 0))
-    bd = ImageDraw.Draw(band)
-    bd.rounded_rectangle([0, 0, unit - 1, unit - 1], radius=radius, fill=style.band)
-    bd.rectangle([0, 0, unit, BAND_TOP * unit], fill=(0, 0, 0, 0))
-    layer.alpha_composite(band)
-
-    # The seam: a transparent slot between the two planes.
-    band_top = BAND_TOP * unit
-    d.rectangle([0, band_top - SEAM * unit, unit, band_top], fill=(0, 0, 0, 0))
-
-    # Knock the mode glyph out of the upper plane.
+    knockout = Image.new("L", (unit, unit), 0)
+    glyph_draw = ImageDraw.Draw(knockout)
     gl, gt, gr, gb = GLYPH_BOX
     MODE_GLYPHS[mode](
-        d, (gl * unit, gt * unit, gr * unit, gb * unit), (0, 0, 0, 0), unit
+        glyph_draw,
+        (gl * unit, gt * unit, gr * unit, gb * unit),
+        255,
+        unit,
     )
+
+    centre = unit / 2
+    radius = GLYPH_CONTAINMENT_RADIUS * unit
+    containment = Image.new("L", (unit, unit), 0)
+    ImageDraw.Draw(containment).ellipse(
+        [centre - radius, centre - radius, centre + radius, centre + radius],
+        fill=255,
+    )
+    outside = ImageChops.subtract(knockout, containment)
+    assert outside.getbbox() is None, (
+        f"{mode} glyph exceeds the centred {GLYPH_CONTAINMENT_RADIUS:.2f}D "
+        "containment radius"
+    )
+    knockout = ImageChops.multiply(knockout, containment)
+
+    layer.putalpha(ImageChops.subtract(layer.getchannel("A"), knockout))
     return layer
 
 
-def render_tray(mode: str, phase: str, on_theme: str, size: int) -> Image.Image:
-    """The TRAY icon: the bare mark on transparency, no tile.
-
-    Only optical padding — every remaining pixel goes to the mark, which is the
-    difference between a readable and an unreadable 16 px glyph.
-    """
+def _render_tray_for_split(
+    mode: str, phase: str, on_theme: str, size: int, split_mode: str
+) -> Image.Image:
+    """Internal tray renderer used to exercise both split candidates."""
     n = size * SUPERSAMPLE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    pad = round(n * 0.05)
-    mark = _render_mark(n - 2 * pad, mode, mark_style(phase, on_theme))
+    pad = round(n * TRAY_PAD)
+    mark = _render_mark(
+        n - 2 * pad,
+        mode,
+        mark_style(phase, on_theme),
+        split_mode=split_mode,
+    )
     img.alpha_composite(mark, (pad, pad))
     return img.resize((size, size), Image.Resampling.LANCZOS)
 
 
-def render_app(mode: str, phase: str, size: int) -> Image.Image:
-    """The APP icon: the mark centred on the dark squircle tile.
+def render_tray(mode: str, phase: str, on_theme: str, size: int) -> Image.Image:
+    """Render the bare temperature disc for a tray icon."""
+    return _render_tray_for_split(mode, phase, on_theme, size, SPLIT_MODE)
 
-    Installers, the taskbar button and the About panel want a full tile; the
-    tray does not. `mode`/`phase` are parameters so the same code can render a
-    variant sheet, but the shipped app icon is always the default pair.
-    """
+
+def render_app(mode: str, phase: str, size: int) -> Image.Image:
+    """Render the temperature disc centred on the app icon's dark squircle."""
     n = size * SUPERSAMPLE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     tile_pad = n * 0.055
     d.rounded_rectangle(
-        [tile_pad, tile_pad, n - tile_pad, n - tile_pad], radius=n * 0.225, fill=TILE
+        [tile_pad, tile_pad, n - tile_pad, n - tile_pad],
+        radius=n * 0.225,
+        fill=TILE,
     )
-    unit = round(n * 0.58)
+    unit = round(n * 0.64)
     mark = _render_mark(unit, mode, mark_style(phase, "dark"))
     img.alpha_composite(mark, ((n - unit) // 2, (n - unit) // 2))
     return img.resize((size, size), Image.Resampling.LANCZOS)
 
 
 DEFAULT_APP_MODE = "health"
-"""Mode drawn on the shipped app icon.
-
-`health` is the app's own recommendation and its glyph (a heart) is the one that
-reads best as a standalone brand mark — `pause` would put "switched off" on the
-installer.
-"""
+"""Mode drawn on the shipped app icon."""
 
 DEFAULT_APP_PHASE = "night"
-"""Phase drawn on the shipped app icon: the warm band is the app's whole point."""
+"""Phase drawn on the shipped app icon."""

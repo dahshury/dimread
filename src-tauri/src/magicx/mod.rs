@@ -26,6 +26,11 @@
 //! platform-neutral.
 
 pub mod engine;
+/// HDR-capable capture backend, used for targets the Magnification API refuses.
+#[cfg(all(windows, not(test)))]
+pub(crate) mod engine_wgc;
+#[cfg(windows)]
+pub(crate) mod hdr;
 pub mod theme;
 pub mod toolbar;
 
@@ -33,6 +38,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::AppHandle;
+#[cfg(windows)]
+use windows::Win32::Foundation::RECT;
 
 pub use engine::Effect;
 
@@ -101,6 +108,65 @@ pub(crate) fn foreground_hwnd() -> Hwnd {
     }
 }
 
+// ── Shared Win32 geometry + state helpers (both effect backends) ────────────
+
+/// A window's on-screen bounds, preferring the DWM extended frame bounds over
+/// `GetWindowRect` (which includes the invisible resize border, so a maximized
+/// window reports a top edge ~8 logical px above the visible frame).
+///
+/// Both the Magnification host and the capture overlay pin to this, and the
+/// toolbar tracker uses the same rule, so all three agree on where a window is.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn frame_bounds_of(target: windows::Win32::Foundation::HWND) -> Option<RECT> {
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let mut dwm_rect = RECT::default();
+    // SAFETY: DWM writes a RECT into `dwm_rect`; the size is that of `RECT`.
+    let dwm = unsafe {
+        DwmGetWindowAttribute(
+            target,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut dwm_rect as *mut RECT).cast(),
+            core::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if dwm.is_ok() && dwm_rect.right > dwm_rect.left && dwm_rect.bottom > dwm_rect.top {
+        return Some(dwm_rect);
+    }
+    let mut rect = RECT::default();
+    // SAFETY: `target` valid; `rect` is a live out-param.
+    if unsafe { GetWindowRect(target, &mut rect) }.is_err() {
+        return None;
+    }
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
+}
+
+/// Convert an `(left, top, right, bottom)` rect to `(x, y, width, height)`,
+/// clamping negative extents to zero.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn rect_xywh(left: i32, top: i32, right: i32, bottom: i32) -> (i32, i32, i32, i32) {
+    (left, top, (right - left).max(0), (bottom - top).max(0))
+}
+
+/// Drop a target the platform refused to effect: forget the intent so
+/// [`engine::state_of`] stops reporting an effect that isn't on screen, and push
+/// the corrected flags to the Magic Toolbar so its button doesn't stay lit.
+#[cfg(all(windows, not(test)))]
+pub(crate) fn abandon(hwnd: Hwnd) {
+    forget_target(hwnd);
+    toolbar::refresh_effect_state();
+}
+
+/// Forget a target's effect without touching either backend (the window is
+/// already gone, or its host has just been torn down).
+#[cfg(all(windows, not(test)))]
+pub(crate) fn forget_target(hwnd: Hwnd) {
+    engine::forget_hwnd(hwnd);
+}
+
 // ── Commands ────────────────────────────────────────────────────────────────
 
 /// `magicx_toggle_effect` — toggle a per-window effect (`"dark"` | `"gray"`) on
@@ -110,8 +176,13 @@ pub(crate) fn foreground_hwnd() -> Hwnd {
 pub fn magicx_toggle_effect(effect: String) {
     let effect = Effect::from_wire(&effect);
     let target = toolbar::current_target().unwrap_or_else(foreground_hwnd);
+    log::debug!("[magicx] toggle {effect:?} on target {target:#x}");
     if target != 0 {
         engine::toggle_effect(target, effect);
+    } else {
+        log::warn!(
+            "[magicx] toggle {effect:?} ignored: no toolbar target and no foreground window"
+        );
     }
 }
 

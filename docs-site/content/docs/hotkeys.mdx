@@ -1,0 +1,218 @@
+---
+title: Hotkeys
+description: Bind global shortcuts for brightness, colour temperature, the display modes, the app window, Focus Read/Blur and MagicX — and learn which combinations each OS will actually deliver.
+---
+
+**Settings → Hotkeys** is the one place any global shortcut is bound. Twelve
+actions are listed under **Shortcuts**: four step actions, three mode toggles,
+the window toggle, Focus Read and Focus Blur, and the two MagicX per-window
+effects. The Window effects tab carries only those features' options — their key
+bindings live here.
+
+DimRead ships with **nothing bound**. All twelve defaults are empty, so the tab
+is a list of "Not set" rows until you record something. A binding arms the
+moment you record it; no restart is ever required.
+
+<Screenshot
+	alt="The DimRead settings window on the Hotkeys tab, listing twelve shortcut rows — brightness, colour temperature, mode toggles, Show / hide DimRead, Focus Read and Blur, and the two MagicX effects — each with a recorder box and a record button."
+	caption="Settings → Hotkeys. Rows read 'Not set' until you record a combination; the trash button only appears once a row is bound."
+	priority
+	src="settings-hotkeys.webp"
+/>
+
+## Every action
+
+| Action | What it does | Default |
+| --- | --- | --- |
+| Increase brightness | Steps brightness up 5 percentage points. Clamped to 10–100%, or 0–100% with wide brightness range on. | Not set |
+| Decrease brightness | The same step downward. | Not set |
+| Increase colour temperature | Steps colour temperature up 55 K. Clamped to 1000–6500 K, or 0–10000 K with wide colour range on. | Not set |
+| Decrease colour temperature | The same step downward. | Not set |
+| Toggle blue-light filter | Switches the mode to Pause and back. A second press returns to the mode you came from, or Health if nothing is remembered. | Not set |
+| Toggle Reading mode | Switches to Reading and back; falls back to Pause. | Not set |
+| Toggle Editing mode | Switches to Editing and back; falls back to Pause. | Not set |
+| Show / hide DimRead | Hides the settings window when it's visible and not minimized; otherwise un-minimizes, shows and focuses it — on Windows with a brief always-on-top flick so it lands above the foreground app. | Not set |
+| Toggle Focus Read | Turns the moving clear band on or off. | Not set |
+| Toggle Focus Blur | Turns the background dim on or off. | Not set |
+| Toggle window dark (MagicX) | Inverts the Magic Toolbar's target window, or the foreground window if there is no target. | Not set |
+| Toggle window grayscale (MagicX) | Grayscales that same window. | Not set |
+
+The four step actions edit the mode **currently on screen** — if a per-app rule
+has overridden your mode, the step lands on the override's preset, not on the
+mode picked in Quick controls — and they edit the **current phase's** endpoint,
+so a night-time press leaves your day value alone.
+
+**Note:** the settings file still calls the window toggle `hotkeys.toggleMain`.
+The name predates the removal of a second window and is kept so existing
+bindings survive.
+
+## Recording a shortcut
+
+<Steps>
+
+<Step>
+
+**Click the record button** on the row you want. A pulsing **Recording** badge
+appears and the box reads "Press keys…". DimRead temporarily unregisters that
+row's current binding so pressing it won't fire the action mid-capture.
+
+</Step>
+
+<Step>
+
+**Hold your modifiers**, which appear as chips, then **press the main key**. The
+chord commits the instant a non-modifier key goes down — it does not wait for
+you to let go, because key-up events are routinely swallowed on Windows by
+things like the Alt+Shift layout switch.
+
+</Step>
+
+</Steps>
+
+Press <Kbd>Esc</Kbd> or click the stop button to cancel; moving focus away from
+the window cancels too. A cancelled recording re-arms whatever was bound before.
+
+### Which keys you can bind
+
+Capture reads the **physical** key position, not the character your layout
+produces, matching how the OS fires the shortcut later. Accepted main keys:
+<Kbd>A</Kbd>–<Kbd>Z</Kbd>, the top-row digits <Kbd>0</Kbd>–<Kbd>9</Kbd>,
+<Kbd>F1</Kbd>–<Kbd>F24</Kbd>, the numpad digits, and Space, Tab, Enter,
+Backspace, Delete, Insert, Home, End, Page Up, Page Down and the four arrows.
+
+Everything else is ignored and the recorder keeps listening — punctuation and
+symbol keys (so <Combo keys="Ctrl+," /> can't be bound at all), the numpad
+operators, media keys, Caps Lock, Print Screen, Scroll Lock, Pause, the
+context-menu key and F25 upward. <Kbd>Esc</Kbd> is always taken as *cancel*, so
+it can never be a binding, and the backend rejects any `fn` token.
+
+### Modifier rules
+
+Modifiers are optional — a bare <Combo keys="F5" /> is legal. But **modifiers
+alone never commit**: every combination needs exactly one main key, so there is
+no modifier-only, push-to-talk style binding. Left and right modifiers collapse
+to one token, and the order is always Ctrl, Shift, Alt, Super, then the key —
+record Shift+Ctrl+K and it is stored as <Combo keys="Ctrl+Shift+K" />. Super
+displays as **Cmd** on macOS, **Win** on Windows and **Super** on Linux.
+
+### Clearing a binding
+
+The trash button (**Clear shortcut**) sits to the right of the recorder and only
+appears when the row is bound. Clicking it unregisters the combination with the
+OS and writes an empty string back to settings — the canonical "unbound" value.
+Every change queues a save 400 ms later that re-applies the whole roster
+idempotently. Nothing here needs a restart.
+
+## What you see when a hotkey fires
+
+Nothing, apart from the effect itself. **DimRead does not show the notification
+pill when a hotkey fires** — the pill exists, but the only thing that raises it
+today is the download manager finishing a transfer. Your confirmation is the
+screen changing, every open window's controls re-syncing, and — for a mode
+toggle — the tray icon's artwork switching to the new mode. See
+[Tray and overlay](/docs/tray-and-overlay).
+
+## Conflicts
+
+**Within DimRead**, one combination drives one action. The recorder compares
+your candidate against every other bound row, ignoring order and case, and
+rejects an exact match, a subset **and** a superset — pressing the larger
+combination also satisfies the smaller one, which would fire the wrong action. A
+rejection shows inline, naming the other binding: *"Conflicts with Toggle
+Reading mode (Ctrl + Alt + R)"*. Your previous binding is put back immediately.
+
+**With other applications**, DimRead does no probing and keeps no reserved list.
+It asks the OS to register the combination; if the OS refuses because another
+process owns it, the raw failure appears under the row and the old binding is
+restored. You find out as you record, not later.
+
+<Callout type="warn">
+The subset/superset screening exists only in the settings UI. Two overlapping
+combinations hand-edited into the settings file both register, and the smaller
+one fires unintentionally.
+</Callout>
+
+## Platform notes
+
+### Windows
+
+Full support: combinations register through `RegisterHotKey` and fire from any
+application. It is also the only platform where every action behind a hotkey is
+implemented — Focus Read's cursor tracking, Focus Blur's window tracking,
+Reading mode's grayscale and both MagicX effects are Windows-only.
+
+### macOS
+
+Combinations register through Carbon, which needs no permission — there is no
+Accessibility prompt for ordinary shortcuts. The caveat: **combinations Apple
+reserves register successfully and then silently never fire**, because DimRead
+does not yet screen for them. The step actions, mode toggles and window toggle
+work; the Focus, MagicX and grayscale actions do not.
+
+### Linux and Wayland
+
+On **X11** shortcuts register through `XGrabKey` and work.
+
+<Callout type="error">
+On **Wayland** a hotkey binds and then does nothing. The shortcut plugin is
+X11-only, so under Wayland it grabs against XWayland: registration reports
+success and the key never fires. There is no in-app warning for this. See
+[Nothing happens on Wayland](/docs/troubleshooting#nothing-happens-on-wayland).
+</Callout>
+
+The `org.freedesktop.portal.GlobalShortcuts` portal would fix this on KDE and
+GNOME, at the cost of the compositor — not DimRead — choosing the combination.
+It is not implemented, and on most wlroots-based compositors (sway and the
+rest — Hyprland is the exception), COSMIC and niri the portal does not exist at
+all.
+
+## Troubleshooting
+
+### A MagicX hotkey does nothing
+
+MagicX hotkeys are inert until MagicX itself is enabled, and that switch is off
+by default — turn **Enable MagicX** on under
+[Window effects](/docs/window-effects#magic-window) first. They are also no-ops
+on macOS and Linux, and when no target window can be resolved.
+
+### A brightness or temperature step changes nothing
+
+Either the value is already at a clamp bound — 10% or 100% brightness, 1000 K or
+6500 K — in which case the press deliberately writes nothing, or the step is
+landing on a different mode than you expect because a per-app rule is overriding
+what's on screen. Widen it with
+[wide colour range](/docs/display#wide-colour-range) or
+[wide brightness range](/docs/display#wide-brightness-range), or check
+[App rules](/docs/app-rules).
+
+### A hotkey stops working while DimRead is still running
+
+If the OS drops a registration, nothing re-arms it on its own: the roster is
+applied at startup and on every save that changes the Hotkeys section. Re-record
+the combination, or restart DimRead, and it is repaired idempotently.
+
+### A binding never arms after a restart
+
+The row still shows the combination, but the key does nothing. Registration
+failures at startup are logged and never surfaced, so a combination another
+program has claimed since you bound it silently fails to arm. The only evidence
+is a `[hotkeys] failed to arm …` line in the log — see
+[Diagnostics](/docs/diagnostics). Record a different combination.
+
+### Focus Read toggles but the band doesn't follow the cursor
+
+The overlays are cross-platform; the cursor and foreground-window trackers
+behind Focus Read and Focus Blur are Windows-only, so elsewhere they are inert.
+While Focus Read runs, DimRead also grabs <Kbd>Esc</Kbd> globally so you can
+stop it from anywhere — unless something else already owns Escape.
+
+## Where to go next
+
+- **[Display](/docs/display)** — the modes and ranges the step actions and mode
+  toggles operate on.
+- **[Window effects](/docs/window-effects)** — Focus Read, Focus Blur and the
+  MagicX toolbar these bindings drive.
+- **[Tray and overlay](/docs/tray-and-overlay)** — the tray icon that confirms a
+  mode toggle, and what the notification pill is actually for.
+- **[Troubleshooting](/docs/troubleshooting)** — start here if a shortcut binds
+  and nothing happens.

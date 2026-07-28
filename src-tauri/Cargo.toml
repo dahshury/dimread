@@ -1,6 +1,6 @@
 [package]
 name = "dimread"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 description = "DimRead — Tauri v2 + React 19 desktop app"
 authors = ["dahshury"]
 edition = "2024"
@@ -64,8 +64,12 @@ tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 chrono = "0.4"
 reqwest = { version = "0.13.2", default-features = false, features = ["stream", "rustls"] }
 futures-util = "0.3"
+# Ordering release tags in the About tab's update check. Tauri already pulls
+# this in for `package_info().version`; listing it makes the dependency explicit.
+semver = "1"
 specta = { version = "=2.0.0-rc.22", features = ["serde_json"] }
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+iana-time-zone = "0.1.65"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2.5.1"
@@ -80,13 +84,33 @@ winreg = "0.55"
 # grayscale (Magnification). Only the features the display engine needs.
 # `Win32_System_Threading` backs the per-app rules watcher's process-name lookup
 # (`OpenProcess` + `QueryFullProcessImageNameW`).
+#
+# The `Graphics_Capture` / Direct3D11 / DirectComposition / Dxgi / Fxc features
+# back MagicX's HDR per-window effect backend (`magicx::engine_wgc`): the
+# Magnification API refuses `MagSetColorEffect` with ERROR_NOT_SUPPORTED while a
+# display is in advanced-colour mode, so those targets are captured with
+# Windows.Graphics.Capture and re-composited through a shader instead.
 windows = { version = "0.61", features = [
+  "Foundation",
+  "Graphics",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
   "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Direct3D_Fxc",
+  "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dwm",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
   "Win32_UI_Accessibility",
   "Win32_UI_ColorSystem",
   "Win32_UI_HiDpi",

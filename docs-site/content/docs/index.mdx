@@ -1,0 +1,154 @@
+---
+title: Getting Started
+description: Download DimRead, get past the first-launch warning, and put a warm, dimmed screen behind your first evening of reading.
+---
+
+DimRead is a tray app. It warms your display's colour temperature and dims it in
+software — below the floor your monitor's own brightness control allows — on
+every monitor or on one, on a schedule or on a hotkey.
+
+There is one window: **Settings**. Everything else happens from the tray icon.
+
+## Download
+
+<Downloads />
+
+<Callout type="warn">
+These are **alpha** builds and they are not code-signed or notarized, so each OS
+shows a one-time "unknown developer" prompt on first launch. See
+[First launch](#first-launch) below for the exact click-through on each platform.
+</Callout>
+
+## First launch
+
+<Tabs items={["Windows", "macOS", "Linux"]}>
+
+<Tab value="Windows">
+
+`DimRead.exe` is portable: put it wherever you like and run it. It keeps its
+settings and logs in a `Data/` folder next to the executable and writes nothing
+to the registry.
+
+1. SmartScreen says *"Windows protected your PC."* Click **More info → Run
+   anyway**.
+2. DimRead starts minimized to the tray. Look for its icon in the notification
+   area — you may need to expand the overflow chevron and drag it onto the
+   taskbar.
+3. **Left-click** the tray icon to open the settings window; **right-click** it
+   for the flyout, which carries the same sliders and modes.
+
+The zipped build needs the Microsoft Edge **WebView2** runtime, which ships with
+Windows 11 and with most Windows 10 installs.
+
+</Tab>
+
+<Tab value="macOS">
+
+1. Open the `.dmg` and drag **DimRead** to Applications.
+2. The first launch is blocked because the app is unsigned. Right-click the app
+   → **Open**, then confirm. Alternatively, run:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/DimRead.app
+   ```
+
+3. DimRead appears in the menu bar, not the Dock.
+
+<Callout type="warn">
+The macOS display backend is **alpha**. Colour temperature and brightness apply,
+but per-app rules and the window effects are not wired to a native
+implementation yet — see [Platform support](/docs/troubleshooting#platform-support).
+</Callout>
+
+</Tab>
+
+<Tab value="Linux">
+
+The AppImage is the fastest path:
+
+```bash
+chmod +x DimRead_0.0.3-alpha_amd64.AppImage
+./DimRead_0.0.3-alpha_amd64.AppImage
+```
+
+For the `.deb` / `.rpm`, install the tray dependency first — DimRead's only
+visible surface is the tray icon, and without an AppIndicator host you will have
+no way to reach it:
+
+```bash
+sudo apt install libayatana-appindicator3-1
+```
+
+<Callout type="warn">
+**Your compositor decides whether the filter works.** X11 sessions are fine. On
+Wayland, DimRead drives the `zwlr_gamma_control_v1` protocol, which the
+wlroots family implements — sway, Hyprland, river, labwc. GNOME's Mutter and
+KDE's KWin do not expose it, so on those the sliders move and the screen does
+not change. See
+[Nothing happens on Wayland](/docs/troubleshooting#nothing-happens-on-wayland).
+</Callout>
+
+</Tab>
+
+</Tabs>
+
+## Your first dim
+
+<Steps>
+
+<Step>
+
+**Open the window.** Left-click the tray icon. It opens on the **Display** tab.
+(Right-click gets you the flyout instead — the same controls, without the
+window.)
+
+</Step>
+
+<Step>
+
+**Pick a mode.** The eight buttons at the bottom of Quick controls are presets.
+Click **Reading** — 5500 K at 85% brightness. The screen warms immediately.
+
+</Step>
+
+<Step>
+
+**Adjust.** Drag the temperature slider left to warm further. The readout above
+the sliders shows the exact Kelvin and percentage being applied.
+
+</Step>
+
+<Step>
+
+**Turn on the schedule.** Flip **Auto day/night**. DimRead now applies your day
+profile between sunrise and sunset and your night profile after it, working the
+sun times out from your system timezone with no location permission prompt.
+
+</Step>
+
+<Step>
+
+**Bind a hotkey.** Open the [Hotkeys](/docs/hotkeys) tab, click the record
+button on the **Toggle blue-light filter** row, and press a combination. It arms
+immediately — no restart.
+
+</Step>
+
+</Steps>
+
+<Screenshot
+	alt="The DimRead settings window on the Display tab, showing two monitors, the temperature and brightness sliders reading 5500K and 85%, and Reading selected among the eight preset modes."
+	caption="Settings → Display. Quick controls sit at the top of the tab; the tray flyout drives the same values."
+	priority
+	src="settings-display.webp"
+/>
+
+## Where to go next
+
+- **[Display](/docs/display)** — the sliders, multi-monitor targeting, and what
+  each of the eight modes actually applies.
+- **[Schedule](/docs/schedule)** — sunrise/sunset, fixed times, and how DimRead
+  finds your location offline.
+- **[Hotkeys](/docs/hotkeys)** — every bindable action and the per-OS caveats.
+- **[Troubleshooting](/docs/troubleshooting)** — start here if the screen does
+  not change.

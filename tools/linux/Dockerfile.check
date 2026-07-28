@@ -1,0 +1,39 @@
+# Linux compile gate for the src-tauri crate.
+#
+# Mirrors the `cross-platform (ubuntu-latest)` job in .github/workflows/rust-ci.yml
+# so a Windows (or macOS) developer can reproduce the Linux half of Rust CI
+# locally, before pushing. Driven by tools/linux/check-linux.mjs.
+#
+# The image carries only the toolchain and the system libraries Tauri links
+# against — the crate itself is compiled from a bind-mounted work tree, with
+# the registry and target directory held in named volumes so repeat runs are
+# incremental.
+ARG RUST_VERSION=1
+FROM rust:${RUST_VERSION}-bookworm
+
+# Same package set as the Linux CI jobs. libwebkit2gtk-4.1-dev is the webview,
+# libayatana-appindicator3-dev the tray, librsvg2-dev the icon rasterizer.
+RUN apt-get update \
+	&& apt-get install --no-install-recommends -y \
+		build-essential \
+		curl \
+		file \
+		libayatana-appindicator3-dev \
+		libgtk-3-dev \
+		librsvg2-dev \
+		libssl-dev \
+		libwebkit2gtk-4.1-dev \
+		patchelf \
+		pkg-config \
+		wget \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add clippy rustfmt
+
+# Registry + target live in volumes (see check-linux.mjs); CARGO_HOME stays at
+# the image default so `rustup`/`cargo` keep working when only the registry
+# subdirectory is mounted over.
+ENV CARGO_TARGET_DIR=/linux-target \
+	CARGO_TERM_COLOR=always
+
+WORKDIR /work

@@ -11,6 +11,7 @@ export {
 	collectOtherCombos,
 	type HotkeyId,
 	type HotkeyPatch,
+	HOTKEY_ROW_ORDER,
 	normalizeCombo,
 	type OtherCombo,
 	splitCombo,

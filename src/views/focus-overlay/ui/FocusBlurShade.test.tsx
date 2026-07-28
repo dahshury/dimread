@@ -30,6 +30,10 @@ mock.module("@tauri-apps/api/event", () => ({
 /** The shade paints one absolutely-positioned region container per monitor. */
 const REGION_SELECTOR = ".pointer-events-none.absolute.overflow-hidden";
 
+/** The single monitor's FULL rect — the region set the backend ships while
+ *  `includeTaskbar` is on (the default fixture ships its 1040 px work area). */
+const FULL_MONITOR = { bottom: 1080, left: 0, right: 1920, top: 0 };
+
 /** The shade is built from `m.*` components, which throw outside the strict
  *  LazyMotion provider the `focus-overlay` entry wraps the tree in. */
 function Motion({ children }: { children: ReactNode }) {
@@ -169,6 +173,20 @@ describe("FocusBlurShade", () => {
 		const cutout = container.querySelector(".will-change-transform");
 		return (cutout as HTMLElement | null)?.style.transform ?? "";
 	}
+
+	test("releases the taskbar strip when a later anchor shrinks the regions", async () => {
+		// Turning "include taskbar" off re-emits the anchor with each region back
+		// at its work area; the shade must give the strip up on that sample alone.
+		// It used to keep painting the full monitor rect — a tinted taskbar that
+		// outlived the setting — because the backend never republished the region
+		// set while DimRead's own settings window held the foreground.
+		const { container } = await renderWithAnchor(
+			anchor({ monitors: [FULL_MONITOR], taskbar: true }),
+		);
+		expect((regions(container)[0] as HTMLElement).style.height).toBe("1080px");
+		await emitAnchor(anchor({ sequence: 2 }));
+		expect((regions(container)[0] as HTMLElement).style.height).toBe("1040px");
+	});
 
 	test("snaps the cutout when the SAME window moves", async () => {
 		// The lag fix: a spring chasing a window that is still being dragged is

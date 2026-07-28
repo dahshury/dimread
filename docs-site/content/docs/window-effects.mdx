@@ -1,0 +1,173 @@
+---
+title: Window effects
+description: The Focus Read band, the Focus Blur spotlight on your active window, and Magic Window's per-window dark and grayscale — every control, its range, and where it actually works.
+alpha: true
+---
+
+**Settings → Window effects** collects the three things DimRead paints *on top of*
+your windows, as opposed to the colour filter on the [Display](/docs/display) tab,
+which rewrites the gamma ramp itself. Focus Read draws a reading band. Focus Blur
+dims everything except the window you're working in. Magic Window inverts a
+single window of another app, or converts it to grayscale.
+
+All three only really work on **Windows** today. On macOS and Linux every
+control here still renders and still saves, but the engines behind them are
+stubs — each section below says exactly what happens.
+
+<Screenshot
+	alt="The DimRead settings window on the Window effects tab: a Focus Read section with Transparency at 50%, a black shade colour, Focus height 300 and a Preview button, and below it Focus Blur with its four toggles."
+	caption="Settings → Window effects. Focus Read, Focus Blur and Magic Window, in rising order of how much of the screen they touch."
+	priority
+	src="settings-window-effects.webp"
+/>
+
+## Focus Read
+
+A full-screen shade in your chosen colour, with one horizontal clear band that
+follows your mouse cursor up and down the screen — a reading ruler over whatever
+app you're in.
+
+Start it with the **Preview** button or the *Toggle Focus Read* hotkey; press
+<Kbd>Esc</Kbd> or either again to stop. Focus Read is never on at app start —
+there is no persisted enable flag for it.
+
+- **Transparency** — opacity of the shade outside the band. **0–100%**, step 1,
+  **default 50**. Higher is darker.
+- **Shade colour** — the colour of the dimmed area. **Default `#000000`.** Only
+  6-digit `#rrggbb` is accepted; anything else renders as black.
+- **Focus height** — height of the clear band. **20–4000**, step **10**,
+  **default 300**. The unit is CSS px inside the overlay, so at 200% display
+  scaling a band of 300 covers 600 device pixels.
+- **Preview / Stop preview** — the label follows the *running* state, so it also
+  flips when you toggle by hotkey or quit with <Kbd>Esc</Kbd>.
+
+Edits apply live — dragging Transparency while the preview is up reshades at once.
+
+<Callout type="warn">
+While Focus Read is running, <Kbd>Esc</Kbd> is registered as a **global**
+shortcut — other apps won't see the keypress. And if something else already owns
+Escape, DimRead declines to arm it and <Kbd>Esc</Kbd> will not quit the preview;
+use the button or the hotkey instead.
+</Callout>
+
+**On macOS and Linux** the overlay does appear, but the band never moves — the
+cursor tracker is a compiled-out no-op — and the overlay is sized to a stubbed
+1920×1080 rectangle at the origin instead of your real screen bounds.
+
+## Focus Blur
+
+Dims every monitor and leaves a clear rectangular hole over the active window, so
+the window you're in stands out and everything behind it recedes. The shade is
+painted one region per monitor, which is how the taskbar option applies per
+display and why gaps between non-contiguous monitors stay untinted.
+
+Turn it on with the **Enable Focus Blur** switch, or with the *Toggle Focus Blur*
+hotkey. Only the switch writes the setting, and the setting is what brings Blur
+back at the next launch.
+
+- **Enable Focus Blur** — **default off.** The switch shows the *running* state.
+  Windows belonging to apps running as administrator can't be inspected by a
+  non-elevated process, so they never get a cutout — that's the tooltip here.
+- **Include taskbar** — dim the taskbar too. **Default off**, which shades each
+  monitor's work area and leaves its taskbar clear.
+- **Only current monitor** — restrict the shade to the display the active window
+  is on. **Default off.**
+- **Transition animation** — **default on.** Switching to a *different* window
+  glides the cutout over 0.16 s. The *same* window being dragged or resized always
+  snaps instantly even with this on, because animating there reads as tracking lag.
+- **Transparency** — shade opacity. **0–100%**, step 1, **default 50**.
+- **Background colour** — **default `#000000`.**
+
+<Callout type="info">
+The hotkey toggles the engine only — it never writes **Enable Focus Blur**. So
+turning Blur on by hotkey and restarting won't bring it back, and turning it
+*off* by hotkey while the switch is on will.
+</Callout>
+
+**On macOS and Linux** Focus Blur is inert: the switch reads on, an invisible
+click-through window is shown, and nothing is ever painted.
+
+## Magic Window
+
+Applies a **Dark** effect (colour invert) or a **Gray** effect (Rec. 601
+luminance grayscale) to a *single window of another application* — not to the
+whole screen. One effect per window: toggling the active one clears it, toggling
+the other replaces it. The feature ships **disabled**, and the toolbar rows below
+stay greyed out until you enable it.
+
+With **Enable MagicX** and **Show Magic Toolbar** both on, hovering the top edge
+of the **active** window for the hover delay pops a small toolbar:
+
+| Button | Does |
+| --- | --- |
+| **Dark** | Colour-inverts that window |
+| **Gray** | Converts that window to grayscale |
+| **Close** (✕) | Restores the window — shown only while an effect is active |
+
+The hover zone is a band 46 logical px tall pinned to the window's top edge, and
+roughly the toolbar's own 132 px plus 20 px of padding either side — you have to
+aim reasonably precisely. Minimized windows, zero-size windows and DimRead's own
+windows are never targets.
+
+- **Enable MagicX** — master switch, **default off**. Turning it off clears every
+  per-window effect at once.
+- **Show Magic Toolbar** — **default on**, disabled while MagicX is off. With it
+  off, Dark and Gray are hotkey-only and target the foreground window.
+- **Toolbar colour** — accent for the toolbar's grip and its active buttons.
+  **Default `#14b8a6`** (teal), with a **Reset** link beside it.
+- **Toolbar position** — horizontal alignment on the target window:
+  **Center** (default), **Left**, or **Right**.
+- **Offset** — horizontal nudge on top of that alignment. **−200 to +200 px**,
+  step **4**, **default 0**. Clamped so a large offset can never push the toolbar
+  off its window.
+- **Hover delay** — dwell time before the toolbar appears. **0–2000 ms**, step
+  **50**, **default 400**. `0` shows it the instant you enter the zone.
+
+While at least one window is effected, DimRead re-magnifies it at roughly 60 Hz —
+real, continuous work for as long as the effect is on. Effects are keyed to the
+window handle, so closing the window drops the effect; everything is cleared on
+exit.
+
+**Magic Window is Windows-only.** It's built on the Windowed Magnification API.
+macOS's WindowServer will not let one process composite over another's window
+without disabling SIP, and Wayland forbids it by design, so the macOS and Linux
+builds ship the settings page with no engine behind it.
+
+## Hotkeys
+
+All four bindings live on the [Hotkeys](/docs/hotkeys) tab with every other
+shortcut, and all four are **unbound by default**.
+
+| Action | Effect |
+| --- | --- |
+| **Toggle Focus Read** | Starts or stops the reading band |
+| **Toggle Focus Blur** | Starts or stops the shade — does not change the setting |
+| **Toggle window dark (MagicX)** | Inverts the toolbar's target, else the foreground window |
+| **Toggle window grayscale (MagicX)** | Converts the same target to grayscale |
+
+The two MagicX bindings do nothing while **Enable MagicX** is off.
+
+## Limitations
+
+- **Focus Read and Focus Blur can't run at once.** They share one overlay window;
+  starting either stops the other.
+- **Mixed-DPI multi-monitor isn't modelled.** Both overlays scale the whole
+  virtual screen by a single device pixel ratio, so with different scaling per
+  display the band or the cutout lands offset on the secondary monitor.
+- **The overlays are ordinary always-on-top windows.** They can't dim anything
+  the compositor draws above always-on-top — some exclusive full-screen apps,
+  secure-desktop UI.
+- **Focus Blur's cutout is always a rectangle**, measured from the window's
+  visible frame, so oddly shaped windows still get a rectangular hole.
+- **Magic Window effects cover only the target window's frame.** Menus, tooltips
+  and popups drawn in separate windows are not effected.
+- **Nothing here is reachable from the tray flyout** — it drives the colour
+  filter only.
+
+## Where to go next
+
+- **[Hotkeys](/docs/hotkeys)** — bind the four toggles above, and every other
+  action.
+- **[Display](/docs/display)** — the colour filter these overlays sit on top of.
+- **[Troubleshooting](/docs/troubleshooting)** — start here if a switch is on and
+  the screen looks unchanged.

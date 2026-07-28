@@ -29,18 +29,3 @@ export function patchFocusBlurSettings(
 		}),
 	);
 }
-
-/** Persist the Focus Blur toggle accelerator into the shared `hotkeys` section
- *  (trimmed, "" = unbound). The HotkeyRecorder arms it live via `hotkey_register`
- *  before calling here; this makes the binding durable across restarts. */
-export function patchFocusBlurHotkey(accelerator: string): Promise<void> {
-	getSettingsStoreState().updateHotkeysSettings({
-		focusBlur: accelerator.trim(),
-	});
-	markSectionsEdited("hotkeys");
-	return enqueueSettingsSave(
-		(): PartialSettings => ({
-			hotkeys: getSettingsStoreState().settings.hotkeys,
-		}),
-	);
-}

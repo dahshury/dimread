@@ -5,6 +5,114 @@ All notable changes to DimRead are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.0.3-alpha] - 2026-07-28
+
+### Added
+
+- **Location-aware day and night.** "Time based on location" now offers three
+  sources: **Automatic**, which reads the system timezone and uses that zone's
+  reference locality; **Timezone**, a searchable picker over the full IANA
+  database; and **Coordinates**, the hand-entered pair. Sun times stay pure NOAA
+  math computed offline, so nothing is sent anywhere and no OS location
+  permission is requested. The panel shows which source actually produced the
+  coordinates and today's sunrise and sunset, and says so plainly when a zone
+  cannot be detected or has no known locality — instead of silently falling back
+  to 0°, 0°.
+- The zone table behind it, `src-tauri/src/display/timezones_data.rs`, generated
+  from the IANA tzdb (`zone.tab` plus `backward` aliases) by
+  `tools/timezones/generate-timezones.py`. Tests reject a table that is
+  unsorted, implausible, or contains an alias resolving nowhere.
+- **Per-monitor opt-out.** A display can now sit out filtering entirely. This is
+  a separate axis from monitor sync: sync picks which *values* a screen gets,
+  the opt-out picks whether it participates at all, so one untouched screen no
+  longer means leaving sync mode. An excluded monitor has its original ramp
+  restored while its neighbours keep filtering, and an unplugged display keeps
+  its exclusion across a dock/undock cycle.
+- **Smooth transitions.** Colour and brightness changes ease toward their target
+  (about 360 ms for a mode switch) instead of snapping, including live slider
+  drags. The ease is exponential rather than a fixed-duration ramp precisely
+  because the target moves during a drag.
+- **HDR support for MagicX.** On advanced-colour displays the Magnification API
+  refuses colour effects outright — the same reason Windows Magnifier greys out
+  "Invert colours" there. Those targets now run on a second backend built from
+  Windows.Graphics.Capture, a half-float capture pool, a pixel shader, and a
+  DirectComposition overlay, with the backend chosen per target from the
+  monitor's DXGI colour space. SDR targets keep the cheap composition-time
+  matrix.
+- **The Windows theme schedule can follow the day and night schedule.** On by
+  default, it takes its boundaries from the same sun times the colour filter
+  runs on — including a resolved location's astronomy — so the two cannot
+  disagree about when night starts. The separate HH:MM pair remains as the
+  opt-out.
+- **Check for updates** in the About tab. A manual button asks the GitHub
+  releases API what the newest published version is, compares it with the
+  running build, and offers the download asset for the current OS and
+  architecture. It runs only when pressed — DimRead never contacts the network
+  on its own — and there is no in-app installer, because the alpha builds are
+  unsigned.
+- A public documentation site at `docs-site/` (Fumadocs on React Router + Vite),
+  published to GitHub Pages by `.github/workflows/docs.yml` and linked from the
+  About tab. Twelve pages covering every settings tab plus troubleshooting, an
+  FAQ, and diagnostics.
+- `tools/docs/capture-screenshots.mjs`, which drives the real renderer with
+  Playwright behind a mocked IPC bridge and writes the documentation
+  screenshots. Settings values in the images come from the app's own zod schema
+  and the version from `tauri.conf.json`, so they cannot drift from the code.
+- `bun run check:rust:linux` — the Linux half of Rust CI (fmt, check, clippy
+  with `-D warnings`, tests) reproduced locally in Docker, so the
+  Windows-only-code-goes-dead-on-Linux class of failure is caught before a push
+  instead of on a CI runner.
+
+### Changed
+
+- **The settings rail is grouped on one axis and has three fewer tabs.**
+  *Screen* holds what changes your display — Display, Schedule, App rules,
+  Window effects — and *App* holds what is about DimRead itself: Hotkeys,
+  General, About. "Day & night" and "Auto dark" were one question answered on
+  two tabs and are now **Schedule**; "Magic window" became a section of **Window
+  effects**; "Appearance" became a section of **General**.
+- The monitor strip and the monitor inventory were two controls describing the
+  same hardware in two vocabularies ("Monitor 1" versus the display's real
+  name). They are now one roster that does targeting, opt-out, and inventory
+  together.
+- Every global shortcut is bound on the **Hotkeys** tab. The Focus and MagicX
+  tabs used to carry their own recorder rows, which split the roster across
+  three places and made conflicts hard to see; those tabs now keep only their
+  effect options.
+- "Disable for full-screen apps" moved from the Display tab to **App rules**,
+  where it belongs: it is driven by the same rules watcher as the user's own
+  list, so it is that feature's zeroth rule rather than a display option.
+- The About tab's links now point at the product: the repository, the
+  documentation site, and the releases page — replacing the author profile,
+  Tauri's documentation, and WinSTT.
+- The brand mark generator was reworked, and the tray and application icons
+  regenerated from it.
+
+### Fixed
+
+- Choosing "time based on location" on a fresh install no longer schedules sun
+  times for the Gulf of Guinea. The stored coordinates defaulted to 0°, 0° and
+  were used as-is, which produced an equatorial 06:00/18:00 day everywhere; the
+  new default is detection. Settings files that predate the location source and
+  carry real coordinates keep them.
+- A slider drag no longer snaps. The animator now eases from what was last
+  *written* to each device rather than from the previous apply's target — a
+  value the screen never reached mid-drag.
+- Focus Blur's "Include taskbar" option now takes effect immediately. The
+  foreground tracker retains the window the shade is anchored to, so a settings
+  edit, a taskbar move, or a display change is republished even while DimRead's
+  own window holds focus — previously the shade kept the region set it was last
+  emitted with, which left the taskbar tinted until another app was clicked or
+  the app was restarted.
+- A MagicX target the platform refuses to effect is now dropped rather than
+  remembered, so the Magic Toolbar's button no longer stays lit for an effect
+  that is not on screen.
+- Windows that report an oversized frame (a maximized window's invisible resize
+  border) are pinned to their DWM extended frame bounds, so the effect host, the
+  capture overlay, and the toolbar tracker all agree on where a window is.
+
 ## [0.0.2-alpha] - 2026-07-25
 
 ### Added
@@ -43,3 +151,4 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   display-ID type during macOS monitor resolution.
 
 [0.0.2-alpha]: https://github.com/dahshury/dimread/compare/v0.0.1-alpha...v0.0.2-alpha
+[0.0.3-alpha]: https://github.com/dahshury/dimread/compare/v0.0.2-alpha...v0.0.3-alpha

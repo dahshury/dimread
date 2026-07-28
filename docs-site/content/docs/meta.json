@@ -1,0 +1,17 @@
+{
+  "title": "DimRead docs",
+  "pages": [
+    "index",
+    "display",
+    "schedule",
+    "app-rules",
+    "window-effects",
+    "hotkeys",
+    "tray-and-overlay",
+    "general",
+    "diagnostics",
+    "troubleshooting",
+    "faq",
+    "about"
+  ]
+}

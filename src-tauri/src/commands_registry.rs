@@ -13,7 +13,7 @@ use tauri_specta::{Builder, collect_commands, collect_events};
 
 use crate::{
     display, downloads, events, focus, hotkeys, magicx, overlay, rules, settings, tray_menu,
-    windows,
+    update, windows,
 };
 
 /// `show_app_window` — surface + focus the app's one top-level window (the
@@ -89,6 +89,8 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         display::engine::display_preview,
         display::engine::display_preview_end,
         display::engine::display_set_value,
+        display::location::daynight_list_timezones,
+        display::location::daynight_location_status,
         // ── rules ──
         rules::rules_list_windows,
         // ── focus (F8) ──
@@ -101,6 +103,8 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         magicx::magicx_clear_target,
         magicx::toolbar::magictoolbar_renderer_ready,
         magicx::toolbar::magictoolbar_hide_complete,
+        // ── updates ──
+        update::commands::update_check,
     ]);
 
     builder.events(collect_events![

@@ -133,7 +133,8 @@ pub fn read_settings(app: &AppHandle) -> AppSettings {
     }
     let settings = match settings_store(app) {
         Ok(store) => match store.get(SETTINGS_KEY) {
-            Some(value) => {
+            Some(mut value) => {
+                super::migrate_legacy_location_source(&mut value);
                 let mut parsed =
                     serde_json::from_value::<AppSettings>(value).unwrap_or_else(|err| {
                         log::warn!(

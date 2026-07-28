@@ -1,5 +1,4 @@
 import type { HotkeysSettings } from "@/bindings";
-import type { DisplayHotkeyActionId } from "../model/hotkey-actions";
 
 /**
  * A single hotkey-field patch (one accelerator per press). Keyed by the action
@@ -8,16 +7,16 @@ import type { DisplayHotkeyActionId } from "../model/hotkey-actions";
  */
 export type HotkeyPatch = Partial<HotkeysSettings>;
 
+/** Every hotkey binding id = every `settings.hotkeys` field. */
+export type HotkeyId = keyof HotkeysSettings;
+
 /** Build the settings patch that BINDS `id` to `combo` (trimmed). */
-export function buildHotkeyPatch(
-	id: DisplayHotkeyActionId,
-	combo: string,
-): HotkeyPatch {
+export function buildHotkeyPatch(id: HotkeyId, combo: string): HotkeyPatch {
 	return { [id]: combo.trim() } as HotkeyPatch;
 }
 
 /** Build the settings patch that CLEARS `id` (unbinds it, `"" `). */
-export function clearHotkeyPatch(id: DisplayHotkeyActionId): HotkeyPatch {
+export function clearHotkeyPatch(id: HotkeyId): HotkeyPatch {
 	return { [id]: "" } as HotkeyPatch;
 }
 
@@ -34,10 +33,7 @@ export function normalizeCombo(combo: string): string {
 	return splitCombo(combo).join("+");
 }
 
-/** Every hotkey binding id = every `settings.hotkeys` field. */
-export type HotkeyId = keyof HotkeysSettings;
-
-/** Exhaustive id roster in display order — `Record<HotkeyId, …>` makes adding
+/** Exhaustive id roster — `Record<HotkeyId, …>` makes adding
  *  a `HotkeysSettings` field without listing it here a compile error, so the
  *  conflict set below can never silently miss a binding again. */
 const HOTKEY_ID_ROSTER: Record<HotkeyId, true> = {
@@ -56,6 +52,32 @@ const HOTKEY_ID_ROSTER: Record<HotkeyId, true> = {
 };
 
 export const ALL_HOTKEY_IDS = Object.keys(HOTKEY_ID_ROSTER) as HotkeyId[];
+
+/**
+ * Every hotkey row in the order the Hotkeys tab lists them: the seven display
+ * actions, the window toggle, then the Focus Read/Blur and MagicX bindings.
+ *
+ * ONE tab owns every binding — the Focus and MagicX tabs used to carry their own
+ * recorder rows, which split the roster across three places and made conflicts
+ * hard to see. Those tabs now keep only their effect options.
+ *
+ * `satisfies` types the ids; a unit test keeps this list a permutation of
+ * `ALL_HOTKEY_IDS`, so a new `HotkeysSettings` field can't stay unreachable.
+ */
+export const HOTKEY_ROW_ORDER = [
+	"brightnessUp",
+	"brightnessDown",
+	"tempUp",
+	"tempDown",
+	"toggleFilter",
+	"toggleReading",
+	"toggleEditing",
+	"toggleMain",
+	"focusRead",
+	"focusBlur",
+	"magicDark",
+	"magicGray",
+] as const satisfies readonly HotkeyId[];
 
 /** One other binding a recorder must not collide with. */
 export interface OtherCombo {
