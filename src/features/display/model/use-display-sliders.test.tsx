@@ -34,6 +34,29 @@ afterEach(() => {
 	clearMocks();
 });
 
+/**
+ * Publish a cross-surface edit until a subscriber actually observes it.
+ *
+ * `subscribeNativeEvent` registers through Tauri's `listen()`, which resolves
+ * ASYNCHRONOUSLY, and the mock bridge delivers an emit only to the listeners
+ * registered at that moment — so a broadcast published in the same turn as the
+ * render is silently dropped. Awaiting a fixed number of microtask ticks passes
+ * on a fast machine and fails on a loaded CI runner (it did: these two tests
+ * were green on Windows and timed out on Linux). Republishing until the
+ * expectation holds is timing-independent, and every publish here is idempotent.
+ */
+async function publishUntil(
+	publish: () => Promise<void> | void,
+	expectation: () => void,
+): Promise<void> {
+	await waitFor(async () => {
+		await act(async () => {
+			await publish();
+		});
+		expectation();
+	});
+}
+
 describe("useDisplaySliders", () => {
 	test("drops a stale remote mirror immediately when the target changes", async () => {
 		mockIPC(() => undefined, { shouldMockEvents: true });
@@ -49,16 +72,17 @@ describe("useDisplaySliders", () => {
 			{ initialProps: { selection: ALL_MONITORS } },
 		);
 
-		await act(async () => {
-			await emit(NATIVE_EVENTS.DISPLAY_EDIT, {
-				mode: "office",
-				monitorId: null,
-				origin: "other-window",
-				phase: "day",
-				value: { kelvin: 4200, brightness: null },
-			});
-		});
-		await waitFor(() => expect(result.current.kelvin).toBe(4200));
+		await publishUntil(
+			() =>
+				emit(NATIVE_EVENTS.DISPLAY_EDIT, {
+					mode: "office",
+					monitorId: null,
+					origin: "other-window",
+					phase: "day",
+					value: { kelvin: 4200, brightness: null },
+				}),
+			() => expect(result.current.kelvin).toBe(4200),
+		);
 
 		// An unrelated sender does not own (and therefore cannot erase) the
 		// matching drag that is still in flight.
@@ -108,8 +132,10 @@ describe("useDisplaySliders", () => {
 			}),
 		}));
 
-		act(() => result.current.owner.dragKelvin(4200));
-		await waitFor(() => expect(result.current.mirror.kelvin).toBe(4200));
+		await publishUntil(
+			() => result.current.owner.dragKelvin(4200),
+			() => expect(result.current.mirror.kelvin).toBe(4200),
+		);
 		await waitFor(() => expect(commands).toContain("display_preview"));
 
 		await act(async () => {
