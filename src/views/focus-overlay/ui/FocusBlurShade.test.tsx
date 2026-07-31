@@ -13,19 +13,43 @@ import { FocusBlurShade } from "./FocusBlurShade";
  * `@tauri-apps/api/event`, so that module is the only stable seam; stubbing it
  * lets a test push a `focus:anchor` sample without a real webview.
  *
- * Mocking a module is process-wide in bun, but the blast radius here is nil:
- * this is the only suite that sets `__TAURI_INTERNALS__` truthy, and every other
- * suite explicitly clears it, so no other test ever reaches a real `listen`.
+ * `mock.module` is process-wide and PERMANENT in bun, and suites load in a
+ * different order per platform — the hazard `use-update-check.test.ts` already
+ * documents. The old stub here returned a `listen` that only remembered the last
+ * callback and an `emit` that dropped everything on the floor, which silently
+ * disabled the module for every file loaded afterwards. That is exactly how it
+ * broke the `useDisplaySliders` mirror tests on Linux CI and nowhere else: those
+ * suites publish through `emit` and expect their own `listen` subscribers to
+ * receive it, and here they received nothing.
+ *
+ * So the stub is a REAL in-memory bus: many subscribers per event, and `emit`
+ * delivers to them. It stays a faithful stand-in for this suite (which injects
+ * by calling `deliver` directly) while remaining correct for any other suite
+ * that happens to load after it.
  */
-const listeners = new Map<string, (event: { payload: unknown }) => void>();
+const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
+
+/** Push a payload to every subscriber of `name`, like the backend would. */
+function deliver(name: string, payload: unknown): void {
+	for (const cb of listeners.get(name) ?? []) {
+		cb({ payload });
+	}
+}
 
 mock.module("@tauri-apps/api/event", () => ({
 	listen: (name: string, cb: (event: { payload: unknown }) => void) => {
-		listeners.set(name, cb);
-		return Promise.resolve(() => listeners.delete(name));
+		const set = listeners.get(name) ?? new Set();
+		set.add(cb);
+		listeners.set(name, set);
+		return Promise.resolve(() => {
+			set.delete(cb);
+		});
 	},
 	once: () => Promise.resolve(() => undefined),
-	emit: () => Promise.resolve(),
+	emit: (name: string, payload?: unknown) => {
+		deliver(name, payload);
+		return Promise.resolve();
+	},
 }));
 
 /** The shade paints one absolutely-positioned region container per monitor. */
@@ -116,7 +140,7 @@ describe("FocusBlurShade", () => {
 		// The listen() promise resolves on a microtask; flush before emitting.
 		await act(async () => undefined);
 		await act(async () => {
-			listeners.get("focus:anchor")?.({ payload: event });
+			deliver("focus:anchor", event);
 		});
 		return view;
 	}
@@ -171,7 +195,7 @@ describe("FocusBlurShade", () => {
 	/** Deliver a further anchor sample to an already-rendered shade. */
 	async function emitAnchor(event: FocusAnchorEvent) {
 		await act(async () => {
-			listeners.get("focus:anchor")?.({ payload: event });
+			deliver("focus:anchor", event);
 		});
 	}
 
