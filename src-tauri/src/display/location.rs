@@ -116,23 +116,21 @@ pub fn daynight_list_timezones() -> Vec<timezones::TimeZoneOption> {
 #[tauri::command]
 #[specta::specta]
 pub fn daynight_location_status(app: tauri::AppHandle) -> LocationStatus {
-    use chrono::{Local, Offset};
+    use chrono::Utc;
 
     let settings = crate::settings::store::read_settings(&app);
     let day_night = &settings.day_night;
     let resolved = resolve(day_night);
 
-    let now = Local::now();
-    let (sunrise_minutes, sunset_minutes) = match super::scheduler::schedule_times(
-        day_night,
-        now.date_naive(),
-        now.offset().fix().local_minus_utc() / 60,
-    ) {
-        super::scheduler::ScheduleTimes::Rises { sunrise, sunset } => (Some(sunrise), Some(sunset)),
-        super::scheduler::ScheduleTimes::AlwaysUp | super::scheduler::ScheduleTimes::AlwaysDown => {
-            (None, None)
-        }
-    };
+    let clock = super::scheduler::clock_at(day_night, Utc::now());
+    let (sunrise_minutes, sunset_minutes) =
+        match super::scheduler::schedule_times(day_night, clock.date, clock.utc_offset_minutes) {
+            super::scheduler::ScheduleTimes::Rises { sunrise, sunset } => {
+                (Some(sunrise), Some(sunset))
+            }
+            super::scheduler::ScheduleTimes::AlwaysUp
+            | super::scheduler::ScheduleTimes::AlwaysDown => (None, None),
+        };
 
     LocationStatus {
         resolved,

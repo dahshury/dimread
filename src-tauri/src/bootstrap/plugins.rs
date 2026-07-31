@@ -63,6 +63,7 @@ fn build_log_plugin() -> tauri::plugin::TauriPlugin<Wry> {
                     file_name: Some("dimread".into()),
                 }
             }),
+            crate::diagnostics::live_log_target(),
         ])
         .build()
 }

@@ -9,6 +9,8 @@ import {
 } from "@/shared/lib/surface";
 
 export interface NumberStepperProps {
+	/** Accessible name for the underlying spinbutton. */
+	ariaLabel?: string;
 	/**
 	 * Opt into an accessible announcement when a value change lands on the
 	 * `min`/`max` bound (base-ui clamps step interactions and blurred text
@@ -32,6 +34,7 @@ export interface NumberStepperProps {
 }
 
 export function NumberStepper({
+	ariaLabel,
 	value,
 	onChange,
 	min,
@@ -58,7 +61,9 @@ export function NumberStepper({
 		"number-stepper-value h-8 w-[60px] border-border border-x-0 border-y bg-transparent text-center font-mono text-body text-foreground tabular-nums caret-accent outline-none",
 		scrubbable && "cursor-ew-resize select-none [touch-action:none]",
 	);
-	const input = <NumberField.Input className={inputClassName} />;
+	const input = (
+		<NumberField.Input aria-label={ariaLabel} className={inputClassName} />
+	);
 
 	return (
 		<NumberField.Root

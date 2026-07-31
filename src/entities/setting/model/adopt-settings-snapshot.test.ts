@@ -1,20 +1,25 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { SettingsSnapshot } from "@/bindings";
+import { useLocaleStore } from "@/shared/i18n";
 import { adoptSettingsSnapshot } from "./adopt-settings-snapshot";
 import {
 	markSectionsEdited,
-	resetPendingEditsForTests,
+	clearPendingEdits,
 	settleSections,
 } from "./pending-edits";
 import { useSettingsHydrationStore } from "./settings-hydration-store";
-import { getSettingsStoreState, useSettingsStore } from "./settings-store";
+import {
+	getSettingsStoreState,
+	normalizeSettings,
+	useSettingsStore,
+} from "./settings-store";
 
 /** A snapshot at `revision` whose brightness marks which tree it is. */
 function snapshotWith(
 	revision: number,
 	brightnessDay: number,
 ): SettingsSnapshot {
-	const { settings } = getSettingsStoreState();
+	const settings = normalizeSettings({});
 	return {
 		revision,
 		settings: {
@@ -46,7 +51,8 @@ describe("adoptSettingsSnapshot", () => {
 	beforeEach(() => {
 		useSettingsStore.getState().resetSettings();
 		useSettingsHydrationStore.setState({ revision: 0 });
-		resetPendingEditsForTests();
+		useLocaleStore.setState({ locale: "en" });
+		clearPendingEdits();
 	});
 
 	test("adopts a snapshot at the same revision (first hydration)", () => {
@@ -60,6 +66,12 @@ describe("adoptSettingsSnapshot", () => {
 		expect(adoptSettingsSnapshot(snapshotWith(2, 77))).toBe(true);
 		expect(currentBrightness()).toBe(77);
 		expect(useSettingsHydrationStore.getState().revision).toBe(2);
+	});
+
+	test("keeps the live locale store in sync with an adopted snapshot", () => {
+		useLocaleStore.setState({ locale: "synthetic" as never });
+		adoptSettingsSnapshot(snapshotWith(1, 42));
+		expect(useLocaleStore.getState().locale).toBe("en");
 	});
 
 	test("drops a stale snapshot instead of reverting a newer edit", () => {
@@ -96,6 +108,40 @@ describe("adoptSettingsSnapshot", () => {
 		expect(getSettingsStoreState().settings.hotkeys.brightnessUp).toBe(
 			"Shift+Alt+S",
 		);
+	});
+
+	test("rebases disjoint fields in the same pending section", () => {
+		getSettingsStoreState().updateHotkeysSettings({ brightnessUp: "F6" });
+		markSectionsEdited("hotkeys");
+		const remote = snapshotWith(2, 42);
+		remote.settings.hotkeys.brightnessDown = "F7";
+		remote.settings.hotkeys.brightnessUp = "";
+
+		expect(adoptSettingsSnapshot(remote)).toBe(true);
+		const { hotkeys } = getSettingsStoreState().settings;
+		expect(hotkeys.brightnessUp).toBe("F6");
+		expect(hotkeys.brightnessDown).toBe("F7");
+	});
+
+	test("tracks a nested leaf without protecting its whole object", () => {
+		const current = getSettingsStoreState().settings.display;
+		getSettingsStoreState().updateDisplaySettings({
+			modes: {
+				...current.modes,
+				custom: {
+					...current.modes["custom"]!,
+					brightnessDay: 33,
+				},
+			},
+		});
+		markSectionsEdited("display");
+		const remote = snapshotWith(2, 90);
+		remote.settings.display.modes["custom"]!.kelvinDay = 6200;
+
+		expect(adoptSettingsSnapshot(remote)).toBe(true);
+		const custom = getSettingsStoreState().settings.display.modes["custom"]!;
+		expect(custom.brightnessDay).toBe(33);
+		expect(custom.kelvinDay).toBe(6200);
 	});
 
 	test("a settled section adopts snapshots normally again", () => {

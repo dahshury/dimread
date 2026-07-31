@@ -3,6 +3,7 @@ import type { DisplaySettings } from "@/bindings";
 import {
 	broadcastDisplayEdit,
 	createEditOrigin,
+	type DisplayEditBroadcast,
 	type DisplayEditValue,
 	editTargetsSurface,
 	subscribeDisplayEdit,
@@ -66,6 +67,15 @@ export interface UseDisplaySlidersOptions {
 	 * what night (or day) will look like.
 	 */
 	previewWhenIdle?: boolean;
+	/**
+	 * Preview a DRAG as the raw endpoint value instead of routing it through the
+	 * day/night blend. Set while the schedule is mid-ramp: there the engine
+	 * applies `lerp(night, day, factor)`, so a blended drag preview compresses
+	 * the slider's whole travel into a fraction of the screen's range and the
+	 * control looks broken. The endpoint being authored is what the user needs
+	 * to see; the blend resumes the moment the drag ends.
+	 */
+	rawEndpointPreview?: boolean;
 	/** All monitors, or one specific monitor's override. */
 	selection: MonitorSelection;
 }
@@ -97,6 +107,7 @@ export function useDisplaySliders({
 	mode,
 	phase,
 	previewWhenIdle = false,
+	rawEndpointPreview = false,
 	selection,
 }: UseDisplaySlidersOptions): DisplaySliderControls {
 	const { brightnessWideRange, wideRange } = display;
@@ -115,7 +126,7 @@ export function useDisplaySliders({
 	// Another surface's in-flight drag (the tray flyout and the Display tab show
 	// the same sliders). Display-only: the surface that owns the drag is the one
 	// driving `display_preview`, so mirroring never touches the engine.
-	const [remote, setRemote] = useState<DisplayEditValue | null>(null);
+	const [remote, setRemote] = useState<DisplayEditBroadcast | null>(null);
 	// Lazy `useState`, not a ref written during render: the id must be created
 	// once per surface, and a render-phase mutation is unsafe under concurrent
 	// rendering.
@@ -123,24 +134,35 @@ export function useDisplaySliders({
 
 	const target = readTargetValues(display, mode, selection, phase);
 	const previewId = previewMonitorId(selection);
+	const surface = { mode, monitorId: previewId, phase };
+	const targetKey = JSON.stringify([mode, previewId, phase]);
+	const remoteValue =
+		remote && editTargetsSurface(remote, surface) ? remote.value : null;
 	// Per-axis: local drag wins over a remote one (the surface the user is
 	// actually holding must never lag behind a round trip through the event
 	// bus), and an axis a drag does not carry (`null`) falls through to the
 	// stored value.
-	const kelvin = drag?.kelvin ?? remote?.kelvin ?? target.kelvin;
+	const kelvin = drag?.kelvin ?? remoteValue?.kelvin ?? target.kelvin;
 	const brightness =
-		drag?.brightness ?? remote?.brightness ?? target.brightness;
+		drag?.brightness ?? remoteValue?.brightness ?? target.brightness;
 
 	useEffect(() => {
-		const surface = { mode, monitorId: previewId, phase };
+		const subscribedSurface = { mode, monitorId: previewId, phase };
 		return subscribeDisplayEdit((payload) => {
 			if (payload.origin === origin) {
 				return;
 			}
-			// A drag on a target this surface is not showing (the other phase, a
-			// different monitor) means something different here, so it is ignored
-			// rather than mirrored.
-			setRemote(editTargetsSurface(payload, surface) ? payload.value : null);
+			// Keep the target metadata with the value. The render-time match above
+			// makes an old mirror disappear immediately when this surface changes
+			// phase/mode/monitor, even before another event arrives. An unrelated
+			// surface must not erase a still-valid mirror; only a matching edit, or
+			// the same sender moving/ending its drag, owns that slot.
+			setRemote((current) => {
+				if (editTargetsSurface(payload, subscribedSurface)) {
+					return payload.value === null ? null : payload;
+				}
+				return current?.origin === payload.origin ? null : current;
+			});
 		});
 	}, [mode, origin, phase, previewId]);
 
@@ -155,7 +177,15 @@ export function useDisplaySliders({
 		});
 	};
 
-	const previewActive = drag !== null || previewWhenIdle;
+	// A rejected endpoint commit must end, not immediately restart, its idle
+	// preview. The block is scoped to the exact target and is released by the
+	// next drag or any settled control mutation.
+	const [blockedIdlePreviewTarget, setBlockedIdlePreviewTarget] = useState<
+		string | null
+	>(null);
+	const idlePreviewActive =
+		previewWhenIdle && blockedIdlePreviewTarget !== targetKey;
+	const previewActive = drag !== null || idlePreviewActive;
 	const startedRef = useRef(false);
 
 	// What the engine is asked to preview. An idle (off-phase) preview must show
@@ -163,8 +193,8 @@ export function useDisplaySliders({
 	// other at whatever each monitor currently has applied — the stored value for
 	// the untouched axis may not be what is on screen, and previewing it would
 	// snap the display (see the `drag` comment above).
-	const previewKelvin = previewWhenIdle ? kelvin : (drag?.kelvin ?? null);
-	const previewBrightness = previewWhenIdle
+	const previewKelvin = idlePreviewActive ? kelvin : (drag?.kelvin ?? null);
+	const previewBrightness = idlePreviewActive
 		? brightness
 		: (drag?.brightness ?? null);
 
@@ -175,7 +205,7 @@ export function useDisplaySliders({
 				previewKelvin,
 				previewBrightness,
 				previewId,
-				previewWhenIdle ? null : phase,
+				idlePreviewActive || rawEndpointPreview ? null : phase,
 			);
 		} else if (startedRef.current) {
 			startedRef.current = false;
@@ -187,7 +217,8 @@ export function useDisplaySliders({
 		previewBrightness,
 		previewId,
 		previewKelvin,
-		previewWhenIdle,
+		idlePreviewActive,
+		rawEndpointPreview,
 	]);
 
 	// A preview outliving the surface would pin the screen at the dragged value,
@@ -208,27 +239,55 @@ export function useDisplaySliders({
 		[],
 	);
 
+	// The phase a drag STARTED on. `phase` is derived from the live schedule, so
+	// a ramp crossing while the pointer is down would otherwise land the release
+	// on the endpoint the user never saw — writing a value they picked for Day
+	// into Night. Written from event handlers only, never during render.
+	const dragPhaseRef = useRef<EditPhase | null>(null);
+
 	const commit = async (
 		axis: "brightness" | "kelvin",
 		value: number,
 	): Promise<void> => {
-		// Send the EDIT, never a copy of the settings tree. The backend performs
-		// the read-modify-write under its own lock, so this surface cannot
-		// overwrite a field it did not touch even if its store has drifted.
-		await commitDisplayValue({
-			axis,
-			monitorId: previewMonitorId(selection),
-			phase,
-			value,
-		});
+		const editPhase = dragPhaseRef.current ?? phase;
+		dragPhaseRef.current = null;
+		let committed = false;
+		try {
+			// Send the EDIT, never a copy of the settings tree. The backend performs
+			// the read-modify-write under its own lock, so this surface cannot
+			// overwrite a field it did not touch even if its store has drifted.
+			committed = await commitDisplayValue({
+				axis,
+				monitorId: previewMonitorId(selection),
+				phase: editPhase,
+				value,
+			});
+		} catch (error) {
+			// `commitDisplayValue` converts expected IPC failures to `false`; keep
+			// this guard so an unexpected collaborator failure still cannot strand
+			// either surface in a drag.
+			console.error("[display] slider commit failed", error);
+		}
 		setDrag(null);
+		setRemote(null);
 		// The saved value reaches every window through `settings:changed`;
-		// release the other surfaces from the drag mirror.
+		// release the other surfaces from the drag mirror on success OR failure.
 		publish(null);
+		if (committed) {
+			setBlockedIdlePreviewTarget(null);
+		} else {
+			setBlockedIdlePreviewTarget(targetKey);
+			startedRef.current = false;
+			endDisplayPreview();
+		}
 	};
 
 	/** Set the local drag AND mirror it onto the other surfaces. */
 	const startDrag = (next: DisplayEditValue): void => {
+		if (dragPhaseRef.current === null) {
+			dragPhaseRef.current = phase;
+		}
+		setBlockedIdlePreviewTarget(null);
 		setDrag(next);
 		publish(next);
 	};
@@ -251,6 +310,7 @@ export function useDisplaySliders({
 			commit("brightness", clampBrightness(next, brightnessWideRange)),
 		runSettled: async (mutate) => {
 			const hadPreview = previewActive;
+			setBlockedIdlePreviewTarget(null);
 			await mutate();
 			if (!hadPreview) {
 				endDisplayPreview();

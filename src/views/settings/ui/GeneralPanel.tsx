@@ -17,7 +17,7 @@ import { Toggle } from "@/shared/ui/toggle";
 const APPEARANCE_DEFAULTS = appearanceSettingsSchema.parse({});
 
 /** General tab: everything about the app itself rather than the filter —
- *  desktop-shell behaviour (autostart, tray) and presentation (language,
+ *  desktop-shell behaviour (tray) and presentation (language,
  *  motion), as two sections of ONE tab. They were separate "General" and
  *  "Appearance" tabs; two rows apiece did not earn two rail entries.
  *
@@ -33,26 +33,7 @@ export function GeneralPanel() {
 
 	return (
 		<>
-			<SettingSection
-				boxed
-				divided
-				icon={Settings01Icon}
-				title={t("generalStartupSection")}
-			>
-				<FormControl
-					caption={t("generalAutostartCaption")}
-					label={t("generalAutostart")}
-					labelAddon={
-						<Toggle
-							aria-label={t("generalAutostart")}
-							checked={general.autostart}
-							onCheckedChange={(next) =>
-								patchSettingsSection("general", { autostart: next })
-							}
-						/>
-					}
-					layout="row"
-				/>
+			<SettingSection icon={Settings01Icon} title={t("generalStartupSection")}>
 				<FormControl
 					caption={t("generalMinimizeToTrayCaption")}
 					label={t("generalMinimizeToTray")}
@@ -102,12 +83,7 @@ function AppearanceSection() {
 	};
 
 	return (
-		<SettingSection
-			boxed
-			divided
-			icon={PaintBrush03Icon}
-			title={t("appearance")}
-		>
+		<SettingSection icon={PaintBrush03Icon} title={t("appearance")}>
 			<SettingField
 				caption={t("appearanceLocaleCaption")}
 				defaultValue={APPEARANCE_DEFAULTS.locale}

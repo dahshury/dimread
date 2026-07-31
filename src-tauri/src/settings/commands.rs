@@ -16,7 +16,7 @@ use crate::events::SettingsChangedEvent;
 
 /// The authoritative settings snapshot: the tree plus the revision it was
 /// read/written at.
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub revision: u32,
@@ -27,10 +27,64 @@ pub struct SettingsSnapshot {
 #[tauri::command]
 #[specta::specta]
 pub fn settings_load_snapshot(app: AppHandle) -> SettingsSnapshot {
-    SettingsSnapshot {
-        revision: store::settings_revision(),
-        settings: store::read_settings(&app),
+    let (revision, settings) = store::read_settings_snapshot(&app);
+    SettingsSnapshot { revision, settings }
+}
+
+/// Replace the complete tree for import/reset flows, reconcile native side
+/// effects, and broadcast the authoritative snapshot.
+pub(crate) fn replace_settings(
+    app: &AppHandle,
+    mut next: AppSettings,
+) -> Result<SettingsSnapshot, String> {
+    super::normalize_settings(&mut next);
+    store::with_settings_write_lock(|| {
+        let (_, previous) = store::read_settings_snapshot(app);
+        commit_locked(app, previous, next, |_| {})
+    })
+}
+
+fn apply_runtime_side_effects(app: &AppHandle, previous: &AppSettings, next: &AppSettings) {
+    if previous.general.autostart != next.general.autostart {
+        sync_autostart(app, next.general.autostart);
     }
+    if previous.hotkeys != next.hotkeys {
+        crate::hotkeys::apply_hotkey_settings(app, &next.hotkeys);
+    }
+}
+
+fn broadcast_snapshot(app: &AppHandle, snapshot: &SettingsSnapshot) {
+    if let Err(err) = (SettingsChangedEvent {
+        revision: snapshot.revision,
+        settings: snapshot.settings.clone(),
+    })
+    .emit(app)
+    {
+        log::warn!("[settings] failed to broadcast settings:changed: {err}");
+    }
+}
+
+/// Finish one canonical commit while the settings write lock is held. Native
+/// effects and the event are kept in the same serialized span as persistence,
+/// so an older commit can never run after or broadcast after a newer one.
+fn commit_locked(
+    app: &AppHandle,
+    previous: AppSettings,
+    next: AppSettings,
+    effect: impl FnOnce(&SettingsSnapshot),
+) -> Result<SettingsSnapshot, String> {
+    if next == previous {
+        let (revision, settings) = store::read_settings_snapshot(app);
+        return Ok(SettingsSnapshot { revision, settings });
+    }
+
+    store::write_settings_value(app, &next)?;
+    let (revision, settings) = store::read_settings_snapshot(app);
+    let snapshot = SettingsSnapshot { revision, settings };
+    apply_runtime_side_effects(app, &previous, &snapshot.settings);
+    effect(&snapshot);
+    broadcast_snapshot(app, &snapshot);
+    Ok(snapshot)
 }
 
 /// Read → mutate → durably write the settings tree under the write lock, then
@@ -57,27 +111,39 @@ pub(crate) fn mutate_settings(
     app: &AppHandle,
     mutate: impl FnOnce(&mut AppSettings),
 ) -> Result<SettingsSnapshot, String> {
-    let next = store::with_settings_write_lock(|| {
-        let mut settings = store::read_settings(app);
-        mutate(&mut settings);
-        super::normalize_settings(&mut settings);
-        store::write_settings_value(app, &settings)?;
-        Ok::<_, String>(settings)
-    })?;
-
-    let snapshot = SettingsSnapshot {
-        revision: store::settings_revision(),
-        settings: next,
-    };
-    if let Err(err) = (SettingsChangedEvent {
-        revision: snapshot.revision,
-        settings: snapshot.settings.clone(),
+    store::with_settings_write_lock(|| {
+        let (_, previous) = store::read_settings_snapshot(app);
+        let mut next = previous.clone();
+        mutate(&mut next);
+        super::normalize_settings(&mut next);
+        commit_locked(app, previous, next, |_| {})
     })
-    .emit(app)
-    {
-        log::warn!("[settings] failed to broadcast settings:changed: {err}");
-    }
-    Ok(snapshot)
+}
+
+/// Conditionally mutate settings and run an additional native effect before
+/// the ordered `settings:changed` broadcast. `None` means the mutator reported
+/// no intent to change the tree. The effect runs only when normalization leaves
+/// an actual canonical change.
+pub(crate) fn mutate_settings_with_effect(
+    app: &AppHandle,
+    mutate: impl FnOnce(&mut AppSettings) -> bool,
+    effect: impl FnOnce(&SettingsSnapshot),
+) -> Result<Option<SettingsSnapshot>, String> {
+    store::with_settings_write_lock(|| {
+        let (_, previous) = store::read_settings_snapshot(app);
+        let mut next = previous.clone();
+        if !mutate(&mut next) {
+            return Ok(None);
+        }
+        super::normalize_settings(&mut next);
+        let changed = next != previous;
+        let snapshot = commit_locked(app, previous, next, |snapshot| {
+            if changed {
+                effect(snapshot);
+            }
+        })?;
+        Ok(Some(snapshot))
+    })
 }
 
 /// Apply a section-granular patch on top of revision `revision`.
@@ -93,46 +159,16 @@ pub fn settings_save(
     patch: PartialSettings,
     revision: u32,
 ) -> Result<SettingsSnapshot, String> {
-    let (previous, next, new_revision) = store::with_settings_write_lock(|| {
-        let actual = store::settings_revision();
+    store::with_settings_write_lock(|| {
+        let (actual, previous) = store::read_settings_snapshot(&app);
         if revision != actual {
             return Err(format!(
                 "settings revision conflict: expected {revision}, current {actual}"
             ));
         }
-        let previous = store::read_settings(&app);
         let next = merge_patch(&previous, patch);
-        if next == previous {
-            // No-op save: skip the disk write, keep the revision stable.
-            return Ok((previous, next, actual));
-        }
-        store::write_settings_value(&app, &next)?;
-        Ok((previous, next, store::settings_revision()))
-    })?;
-
-    if previous.general.autostart != next.general.autostart {
-        sync_autostart(&app, next.general.autostart);
-    }
-    // Hot-swap global hotkeys the moment the section changes — no restart.
-    // Failures are logged inside (a bad persisted combo must not fail the
-    // save that is correcting it).
-    if previous.hotkeys != next.hotkeys {
-        crate::hotkeys::apply_hotkey_settings(&app, &next.hotkeys);
-    }
-
-    let snapshot = SettingsSnapshot {
-        revision: new_revision,
-        settings: next,
-    };
-    if let Err(err) = (SettingsChangedEvent {
-        revision: snapshot.revision,
-        settings: snapshot.settings.clone(),
+        commit_locked(&app, previous, next, |_| {})
     })
-    .emit(&app)
-    {
-        log::warn!("[settings] failed to broadcast settings:changed: {err}");
-    }
-    Ok(snapshot)
 }
 
 /// Reconcile the OS launch-at-login registration with the persisted setting.
@@ -150,6 +186,12 @@ pub fn sync_autostart(app: &AppHandle, enabled: bool) {
         };
         if let Err(err) = result {
             log::warn!("[autostart] failed to set launch-at-login = {enabled}: {err}");
+            crate::diagnostics::record_issue(
+                "startup",
+                "autostart",
+                "Start-on-login registration failed",
+                err.to_string(),
+            );
         } else {
             log::debug!("[autostart] launch-at-login = {enabled}");
         }

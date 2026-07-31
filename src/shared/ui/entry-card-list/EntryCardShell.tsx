@@ -14,7 +14,7 @@ export function EntryCardShell({
 	bare = false,
 	children,
 }: {
-	/** Drop the painted fill + border — the list sits on a `boxed` section card
+	/** Drop the painted fill + border — the list sits on a `SettingSection` card
 	 *  that already supplies the single surface, so a second one would double. */
 	bare?: boolean;
 	children: ReactNode;

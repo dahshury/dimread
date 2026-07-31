@@ -1,6 +1,6 @@
 import type { AppSettings, PartialSettings } from "@/bindings";
 import { markSectionsEdited } from "./pending-edits";
-import { enqueueSettingsSave } from "./settings-saver";
+import { enqueueSettingsSave, waitForSettingsSaves } from "./settings-saver";
 import { useSettingsStore } from "./settings-store";
 
 /**
@@ -48,7 +48,6 @@ function buildPatch(sections: ReadonlySet<SectionKey>): PartialSettings {
 	return {
 		appearance: pick(current, "appearance", sections.has("appearance")),
 		general: pick(current, "general", sections.has("general")),
-		downloads: pick(current, "downloads", sections.has("downloads")),
 		hotkeys: pick(current, "hotkeys", sections.has("hotkeys")),
 		display: pick(current, "display", sections.has("display")),
 		dayNight: pick(current, "dayNight", sections.has("dayNight")),
@@ -60,21 +59,38 @@ function buildPatch(sections: ReadonlySet<SectionKey>): PartialSettings {
 	};
 }
 
-function persistDirty(): void {
+function persistDirty(): Promise<void> {
 	clearTimer();
 	if (dirty.size === 0) {
-		return;
+		return waitForSettingsSaves();
 	}
 	// Snapshot which sections to flush, then hand the build off to the shared
 	// coordinator (it reads the live store values at execution time).
 	const sections = new Set(dirty);
 	dirty.clear();
-	void enqueueSettingsSave(() => buildPatch(sections));
+	const save = enqueueSettingsSave(() => buildPatch(sections)).catch(
+		(error: unknown) => {
+			// A terminal error must not turn an unsaved edit into apparently-clean
+			// state. Put every attempted section back so the next explicit flush or
+			// edit retries it.
+			for (const section of sections) {
+				dirty.add(section);
+			}
+			throw error;
+		},
+	);
+	// Some lifecycle callers intentionally fire-and-forget. Attach a handler so
+	// those calls do not create an unhandled rejection; callers that await the
+	// original promise still receive the failure.
+	void save.catch(() => undefined);
+	return save;
 }
 
 function scheduleFlush(): void {
 	clearTimer();
-	timer = setTimeout(persistDirty, SAVE_DELAY_MS);
+	timer = setTimeout(() => {
+		void persistDirty().catch(() => undefined);
+	}, SAVE_DELAY_MS);
 }
 
 type SectionPatcher<K extends SectionKey> = (
@@ -91,7 +107,6 @@ export function patchSettingsSection<K extends SectionKey>(
 	const patchers: { [S in SectionKey]: SectionPatcher<S> } = {
 		appearance: state.updateAppearanceSettings,
 		general: state.updateGeneralSettings,
-		downloads: state.updateDownloadsSettings,
 		hotkeys: state.updateHotkeysSettings,
 		// The display section carries HashMap fields (`monitorOverrides`, `modes`),
 		// which tauri-specta types as `Partial<Record<…>>` while the Zod store types
@@ -118,6 +133,12 @@ export function patchSettingsSection<K extends SectionKey>(
 }
 
 /** Persist any pending edits immediately (e.g. when the window hides). */
-export function flushPendingSettings(): void {
-	persistDirty();
+export function flushPendingSettings(): Promise<void> {
+	return persistDirty();
+}
+
+/** Test-only: clear module-local debounce/dirty state between cases. */
+export function resetSettingsPatcherForTests(): void {
+	clearTimer();
+	dirty.clear();
 }

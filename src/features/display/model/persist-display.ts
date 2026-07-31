@@ -42,22 +42,28 @@ import { hasNativeRuntime } from "@/shared/api";
  * the read-modify-write in Rust under the settings write lock, so concurrent
  * editors serialize instead of clobbering. See `src-tauri/src/display/values.rs`.
  */
-export async function commitDisplayValue(edit: DisplayEdit): Promise<void> {
+export async function commitDisplayValue(edit: DisplayEdit): Promise<boolean> {
 	if (!hasNativeRuntime()) {
-		return;
+		return true;
 	}
-	const result = await commands.displaySetValue(edit);
-	if (result.status === "error") {
-		console.error(`[display] failed to persist edit: ${result.error}`);
-		return;
+	try {
+		const result = await commands.displaySetValue(edit);
+		if (result.status === "error") {
+			console.error(`[display] failed to persist edit: ${result.error}`);
+			return false;
+		}
+		// Adopt the authoritative post-write snapshot HERE, before the caller drops
+		// its local drag override. Relying on the `settings:changed` broadcast
+		// instead loses the race every time: that event is delivered asynchronously,
+		// so the store still holds the PRE-drag value at the moment the override is
+		// released, and the slider visibly snaps back before jumping to the value
+		// that was just committed.
+		adoptSettingsSnapshot(result.data);
+		return true;
+	} catch (error) {
+		console.error("[display] failed to persist edit", error);
+		return false;
 	}
-	// Adopt the authoritative post-write snapshot HERE, before the caller drops
-	// its local drag override. Relying on the `settings:changed` broadcast
-	// instead loses the race every time: that event is delivered asynchronously,
-	// so the store still holds the PRE-drag value at the moment the override is
-	// released, and the slider visibly snaps back before jumping to the value
-	// that was just committed.
-	adoptSettingsSnapshot(result.data);
 }
 
 type Section = "dayNight" | "display";

@@ -70,9 +70,6 @@ export default defineConfig(({ command }) => {
 					// `/`. Secondary windows live under `windows/`; build output mirrors
 					// the input layout (dist/windows/*).
 					app: resolve(rootDir, "index.html"),
-					picker: resolve(rootDir, "windows/picker.html"),
-					gallery: resolve(rootDir, "windows/gallery.html"),
-					overlay: resolve(rootDir, "windows/overlay.html"),
 					"focus-overlay": resolve(rootDir, "windows/focus-overlay.html"),
 					"magic-toolbar": resolve(rootDir, "windows/magic-toolbar.html"),
 					"tray-menu": resolve(rootDir, "windows/tray-menu.html"),

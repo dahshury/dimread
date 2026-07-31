@@ -1,6 +1,6 @@
 import type { SettingsSnapshot } from "@/bindings";
-import type { AppSettingsOutput } from "@/shared/config/settings-schema";
-import { pendingSectionKeys, type SettingsSectionKey } from "./pending-edits";
+import { isLocale, useLocaleStore } from "@/shared/i18n";
+import { overlayPendingEdits } from "./pending-edits";
 import { useSettingsHydrationStore } from "./settings-hydration-store";
 import { getSettingsStoreState, normalizeSettings } from "./settings-store";
 
@@ -34,19 +34,15 @@ export function adoptSettingsSnapshot(snapshot: SettingsSnapshot): boolean {
 	}
 	const store = getSettingsStoreState();
 	const incoming = normalizeSettings(snapshot.settings);
-	for (const section of pendingSectionKeys()) {
-		overlaySection(incoming, store.settings, section);
-	}
+	overlayPendingEdits(incoming, store.settings);
 	store.setSettings(incoming);
+	// The persisted settings tree and the per-window locale store intentionally
+	// coexist: the latter drives use-intl immediately. Whole-tree adoption
+	// (import, reset, or another window's save) must update both just like the
+	// locale picker does, otherwise the UI language and persisted value diverge.
+	if (isLocale(incoming.appearance.locale)) {
+		useLocaleStore.getState().setLocale(incoming.appearance.locale);
+	}
 	setRevision(snapshot.revision);
 	return true;
-}
-
-/** Keep one locally-edited section: copy it from the store over the snapshot. */
-function overlaySection<K extends SettingsSectionKey>(
-	target: AppSettingsOutput,
-	source: AppSettingsOutput,
-	key: K,
-): void {
-	target[key] = source[key];
 }

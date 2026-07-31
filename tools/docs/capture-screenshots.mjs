@@ -162,7 +162,6 @@ function installMockBridge({
 	display,
 	label,
 	monitors,
-	notification,
 	openWindows,
 	settings,
 	timezones,
@@ -200,9 +199,6 @@ function installMockBridge({
 		focus_active_state: () => ({ read: false, blur: false }),
 		focus_read_toggle: () => null,
 		focus_blur_toggle: () => null,
-		overlay_snapshot: () => ({ sequence: 1, notification }),
-		overlay_hide_complete: () => null,
-		download_list: () => [],
 		show_app_window: () => null,
 		hide_app_window: () => null,
 		tray_menu_resize: () => null,
@@ -328,21 +324,6 @@ const SHOTS = [
 		size: { width: 300, height: 460 },
 		trim: true,
 	},
-	{
-		id: "overlay-pill",
-		title: "The hotkey notification pill",
-		path: "/windows/overlay.html",
-		label: "overlay",
-		size: { width: 720, height: 140 },
-		trim: true,
-		notification: {
-			sequence: 1,
-			title: "Reading",
-			message: "5500 K · 85%",
-			tone: "success",
-			durationMs: 2400,
-		},
-	},
 ];
 
 async function capture(browser, shot) {
@@ -380,11 +361,11 @@ async function capture(browser, shot) {
 			brightness: 85,
 			mode: settings.display.mode,
 			phase: "day",
+			factor: 1,
 			grayscaleApplied: false,
 		},
 		label: shot.label,
 		monitors: MONITORS,
-		notification: shot.notification ?? null,
 		openWindows: OPEN_WINDOWS,
 		settings,
 		timezones: TIMEZONES,
@@ -436,7 +417,7 @@ async function capture(browser, shot) {
 /**
  * The rectangle the window actually PAINTS.
  *
- * The tray flyout and the notification pill live in windows Rust resizes to
+ * The tray flyout lives in a window Rust resizes to
  * their content at runtime, so a fixed-viewport capture leaves a large
  * transparent margin below the card. Rather than hard-code a crop per shot,
  * measure the union of every element that paints an opaque-ish background —

@@ -9,6 +9,8 @@ import {
 	BRIGHTNESS_STEP,
 	brightnessRange,
 	type EditPhase,
+	editPhaseFor,
+	isRampingPhase,
 	KELVIN_STEP,
 	kelvinRange,
 	patchDisplaySettings,
@@ -101,7 +103,10 @@ export function TrayMenuPanel() {
 	const mode = display.mode;
 	// The flyout always edits the LIVE phase and ALL monitors: it is the quick
 	// surface, and per-phase / per-monitor targeting belongs to the full panel.
-	const phase: EditPhase = state?.phase === "night" ? "night" : "day";
+	// Mid-ramp "live" means the endpoint that dominates the screen, not day —
+	// this surface has no phase selector, so a wrong guess here leaves the user
+	// with a slider that moves and a screen that does not (see `editPhaseFor`).
+	const phase: EditPhase = editPhaseFor(state);
 
 	const {
 		brightness,
@@ -115,6 +120,7 @@ export function TrayMenuPanel() {
 		display,
 		mode,
 		phase,
+		rawEndpointPreview: isRampingPhase(state),
 		selection: ALL_MONITORS,
 	});
 
@@ -232,11 +238,7 @@ export function TrayMenuPanel() {
 					<MenuRow
 						icon={Settings01Icon}
 						label={tTray("settings")}
-						onClick={() =>
-							runAndClose(() =>
-								commands.openWindow("settings", null, null, null, null),
-							)
-						}
+						onClick={() => runAndClose(() => commands.openWindow("settings"))}
 					/>
 					<MenuRow
 						icon={Cancel01Icon}

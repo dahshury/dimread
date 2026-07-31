@@ -46,7 +46,7 @@ describe("SearchableSelect", () => {
 			/>,
 		);
 		expect(screen.getByRole("combobox")).toBeDefined();
-		expect(screen.getByRole("button", { name: "Open popup" })).toBeDefined();
+		expect(screen.getByRole("button", { name: "Open options" })).toBeDefined();
 	});
 
 	test("uses the custom placeholder when provided", () => {
@@ -72,7 +72,7 @@ describe("SearchableSelect", () => {
 		);
 		const input = screen.getByRole("combobox") as HTMLInputElement;
 		const trigger = screen.getByRole("button", {
-			name: "Open popup",
+			name: "Open options",
 		}) as HTMLButtonElement;
 		expect(input.disabled).toBe(true);
 		expect(trigger.disabled).toBe(true);
@@ -110,7 +110,7 @@ describe("SearchableSelect", () => {
 			/>,
 		);
 		// Open the popup so the rows (and their trailing buttons) mount.
-		fireEvent.click(screen.getByRole("button", { name: "Open popup" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open options" }));
 		const rowPreview = await screen.findByRole("button", {
 			name: "Preview Base",
 		});
@@ -128,7 +128,7 @@ describe("SearchableSelect", () => {
 				value="af_heart"
 			/>,
 		);
-		fireEvent.click(screen.getByRole("button", { name: "Open popup" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open options" }));
 		// Both country headers and every voice row mount.
 		expect(screen.getByText("English (US)")).toBeDefined();
 		expect(screen.getByText("English (UK)")).toBeDefined();
@@ -146,7 +146,7 @@ describe("SearchableSelect", () => {
 				value="af_heart"
 			/>,
 		);
-		fireEvent.click(screen.getByRole("button", { name: "Open popup" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open options" }));
 		fireEvent.click(screen.getByText("Adam"));
 		expect(onChange).toHaveBeenCalledWith("am_adam");
 	});
@@ -159,7 +159,7 @@ describe("SearchableSelect", () => {
 				value="tiny"
 			/>,
 		);
-		fireEvent.click(screen.getByRole("button", { name: "Open popup" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open options" }));
 		// MenuHighlightLayer finds the selected/highlighted rows via this attr —
 		// if Base UI ever stops forwarding it the animated pills go dark, so pin it.
 		expect(
@@ -184,7 +184,7 @@ describe("SearchableSelect", () => {
 				value="af_heart"
 			/>,
 		);
-		fireEvent.click(screen.getByRole("button", { name: "Open popup" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open options" }));
 		fireEvent.change(screen.getByRole("combobox"), {
 			target: { value: "emma" },
 		});
@@ -208,7 +208,7 @@ describe("SearchableSelect", () => {
 				value="parakeet-v3"
 			/>,
 		);
-		fireEvent.click(screen.getByRole("button", { name: "Open popup" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open options" }));
 		fireEvent.change(screen.getByRole("combobox"), {
 			target: { value: "Parkeet v3" },
 		});

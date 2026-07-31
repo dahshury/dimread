@@ -88,6 +88,20 @@ const SURFACE_BG_90: Record<Level, string> = {
 	8: "bg-surface-8/90",
 };
 
+// The raw token behind `bg-surface-N`, for the rare case that needs the colour
+// as a CSS *value* (a background-image layer, a gradient stop) rather than a
+// utility class.
+const SURFACE_COLOR_VAR: Record<Level, string> = {
+	1: "var(--color-surface-1)",
+	2: "var(--color-surface-2)",
+	3: "var(--color-surface-3)",
+	4: "var(--color-surface-4)",
+	5: "var(--color-surface-5)",
+	6: "var(--color-surface-6)",
+	7: "var(--color-surface-7)",
+	8: "var(--color-surface-8)",
+};
+
 const SURFACE_POPUP_OPEN_BG: Record<Level, string> = {
 	1: "data-[popup-open]:bg-surface-1",
 	2: "data-[popup-open]:bg-surface-2",
@@ -124,6 +138,10 @@ export function surfaceBg(level: number): string {
 
 export function surfaceShadow(level: number): string {
 	return SURFACE_SHADOW[clamp(level)];
+}
+
+export function surfaceColorVar(level: number): string {
+	return SURFACE_COLOR_VAR[clamp(level)];
 }
 
 export function surfaceHoverBg(level: number): string {

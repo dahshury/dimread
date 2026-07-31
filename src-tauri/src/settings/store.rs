@@ -20,7 +20,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tauri::AppHandle;
@@ -37,16 +36,23 @@ pub const SETTINGS_FILE: &str = "dimread-settings.json";
 static RESOLVED_STORE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Process-wide cached handle to the settings store (see module docs).
 static SETTINGS_STORE: OnceLock<Arc<Store<tauri::Wry>>> = OnceLock::new();
-/// In-memory cache of the last parsed tree so hot readers skip JSON decode.
-static SETTINGS_CACHE: Mutex<Option<AppSettings>> = Mutex::new(None);
-/// Monotonic process-local revision for the canonical settings snapshot.
-/// Every durable write advances it while holding `SETTINGS_WRITE_LOCK`.
-static SETTINGS_REVISION: AtomicU32 = AtomicU32::new(0);
+/// The canonical in-process snapshot. Keeping the revision and tree behind the
+/// same mutex prevents readers from ever pairing one commit's revision with
+/// another commit's settings.
+static SETTINGS_STATE: Mutex<SettingsState> = Mutex::new(SettingsState {
+    revision: 0,
+    settings: None,
+});
 /// Process-wide serializer for every read-modify-write of the settings file.
 static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+struct SettingsState {
+    revision: u32,
+    settings: Option<AppSettings>,
+}
+
 pub fn settings_revision() -> u32 {
-    SETTINGS_REVISION.load(Ordering::Acquire)
+    lock_recover(&SETTINGS_STATE).revision
 }
 
 /// Recover a possibly-poisoned mutex: settings writes must keep working after
@@ -62,7 +68,10 @@ fn resolve_store_dir(app: &AppHandle) {
     let _ = RESOLVED_STORE_DIR.get_or_init(|| {
         crate::portable::app_data_dir(app).unwrap_or_else(|err| {
             log::error!("[settings] app-data dir unresolved ({err}); falling back to CWD");
-            PathBuf::from(".")
+            std::env::current_dir().unwrap_or_else(|cwd_err| {
+                log::error!("[settings] current directory unresolved too: {cwd_err}");
+                PathBuf::from(".")
+            })
         })
     });
 }
@@ -104,15 +113,33 @@ pub fn init_settings_store(app: &AppHandle) {
     seed_defaults(app);
 }
 
-/// Build the store handle with the plugin's debounced auto-save DISABLED: the
-/// default auto-save is a plain non-atomic `fs::write` fired 100 ms after every
-/// `set`, which could tear the file after our durable write already committed
-/// it. Disabling it makes the atomic path the only writer.
+/// Build an in-memory plugin store, then detach it from the plugin resource
+/// registry. The plugin unconditionally saves every registered store with a
+/// plain `fs::write` on `RunEvent::Exit`, even when auto-save is disabled.
+/// Detaching keeps the convenient synchronized cache while ensuring this
+/// module's atomic writer remains the only writer for the file.
 fn build_settings_store(app: &AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
-    app.store_builder(store_path())
+    let path = store_path();
+    match recover_settings_file(&path) {
+        Ok(RecoveryStatus::Recovered) => {
+            log::warn!(
+                "[settings] recovered settings from {}",
+                backup_path(&path).display()
+            );
+        }
+        Ok(RecoveryStatus::Unavailable(reason)) => {
+            log::warn!("[settings] no valid persisted settings were available: {reason}");
+        }
+        Ok(RecoveryStatus::PrimaryValid) => {}
+        Err(err) => log::error!("[settings] backup recovery failed: {err}"),
+    }
+    let store = app
+        .store_builder(path)
         .disable_auto_save()
         .build()
-        .map_err(|err| format!("settings store: {err}"))
+        .map_err(|err| format!("settings store: {err}"))?;
+    store.close_resource();
+    Ok(store)
 }
 
 fn settings_store(app: &AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
@@ -125,35 +152,50 @@ fn settings_store(app: &AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
     Ok(store)
 }
 
-/// Read the persisted settings. Defaults cleanly on a missing/partial blob —
-/// every field is `#[serde(default)]`.
-pub fn read_settings(app: &AppHandle) -> AppSettings {
-    if let Some(settings) = lock_recover(&SETTINGS_CACHE).clone() {
-        return settings;
-    }
-    let settings = match settings_store(app) {
+fn parse_settings_value(mut value: serde_json::Value) -> Result<AppSettings, String> {
+    super::migrate_legacy_location_source(&mut value);
+    let mut settings =
+        serde_json::from_value::<AppSettings>(value).map_err(|err| err.to_string())?;
+    normalize_settings(&mut settings);
+    Ok(settings)
+}
+
+fn load_settings(app: &AppHandle) -> AppSettings {
+    match settings_store(app) {
         Ok(store) => match store.get(SETTINGS_KEY) {
-            Some(mut value) => {
-                super::migrate_legacy_location_source(&mut value);
-                let mut parsed =
-                    serde_json::from_value::<AppSettings>(value).unwrap_or_else(|err| {
-                        log::warn!(
-                            "[settings] persisted settings failed to parse ({err}); using defaults"
-                        );
-                        AppSettings::default()
-                    });
-                normalize_settings(&mut parsed);
-                parsed
-            }
+            Some(value) => parse_settings_value(value).unwrap_or_else(|err| {
+                log::warn!("[settings] persisted settings failed to parse ({err}); using defaults");
+                AppSettings::default()
+            }),
             None => AppSettings::default(),
         },
         Err(err) => {
             log::warn!("[settings] failed to open settings store: {err}");
             AppSettings::default()
         }
-    };
-    *lock_recover(&SETTINGS_CACHE) = Some(settings.clone());
-    settings
+    }
+}
+
+/// Read the canonical settings tree and its matching revision atomically.
+pub(crate) fn read_settings_snapshot(app: &AppHandle) -> (u32, AppSettings) {
+    let mut state = lock_recover(&SETTINGS_STATE);
+    if state.settings.is_none() {
+        state.settings = Some(load_settings(app));
+    }
+    (
+        state.revision,
+        state
+            .settings
+            .as_ref()
+            .expect("settings state was initialized above")
+            .clone(),
+    )
+}
+
+/// Read the persisted settings. Defaults cleanly on a missing/partial blob —
+/// every field is `#[serde(default)]`.
+pub fn read_settings(app: &AppHandle) -> AppSettings {
+    read_settings_snapshot(app).1
 }
 
 /// Run `f` with the process-wide settings write lock held. Do NOT call from
@@ -168,10 +210,32 @@ pub(crate) fn with_settings_write_lock<R>(f: impl FnOnce() -> R) -> R {
 pub(crate) fn write_settings_value(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
     let store = settings_store(app)?;
     let value = serde_json::to_value(settings).map_err(|e| e.to_string())?;
+    let next_revision = lock_recover(&SETTINGS_STATE)
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "settings revision exhausted".to_string())?;
+    set_store_value_durably(&store, value)?;
+    let mut state = lock_recover(&SETTINGS_STATE);
+    state.settings = Some(settings.clone());
+    state.revision = next_revision;
+    Ok(())
+}
+
+fn set_store_value_durably(
+    store: &Store<tauri::Wry>,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let previous = store.get(SETTINGS_KEY);
     store.set(SETTINGS_KEY, value);
-    durable_save_store(&store)?;
-    *lock_recover(&SETTINGS_CACHE) = Some(settings.clone());
-    SETTINGS_REVISION.fetch_add(1, Ordering::AcqRel);
+    if let Err(err) = durable_save_store(store) {
+        match previous {
+            Some(value) => store.set(SETTINGS_KEY, value),
+            None => {
+                store.delete(SETTINGS_KEY);
+            }
+        }
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -182,16 +246,18 @@ fn seed_defaults(app: &AppHandle) {
         let Ok(store) = settings_store(app) else {
             return;
         };
-        if store.get(SETTINGS_KEY).is_some() {
+        if store
+            .get(SETTINGS_KEY)
+            .is_some_and(|value| parse_settings_value(value).is_ok())
+        {
             return;
         }
         let defaults = AppSettings::default();
         if let Ok(value) = serde_json::to_value(&defaults) {
-            store.set(SETTINGS_KEY, value);
-            if let Err(err) = durable_save_store(&store) {
+            if let Err(err) = set_store_value_durably(&store, value) {
                 log::error!("[settings] failed to persist fresh defaults: {err}");
             } else {
-                *lock_recover(&SETTINGS_CACHE) = Some(defaults);
+                lock_recover(&SETTINGS_STATE).settings = Some(defaults);
             }
         }
     });
@@ -210,34 +276,104 @@ fn durable_save_store(store: &Store<tauri::Wry>) -> Result<(), String> {
     atomic_write_json(&store_path(), &serde_json::Value::Object(map))
 }
 
-fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("settings store path has no parent dir: {}", path.display()))?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+fn appended_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut appended = path.as_os_str().to_owned();
+    appended.push(suffix);
+    PathBuf::from(appended)
+}
 
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        file.write_all(&bytes).map_err(|e| e.to_string())?;
-        // fsync the bytes to stable storage BEFORE the rename so the swap can't
-        // publish an empty/partial inode after a power loss.
-        file.sync_all().map_err(|e| e.to_string())?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, path) {
+fn backup_path(path: &Path) -> PathBuf {
+    appended_path(path, ".bak")
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    appended_path(path, ".tmp")
+}
+
+fn atomic_replace_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = temp_path(path);
+    let result = (|| {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("settings store path has no parent dir: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create settings directory {}: {err}", parent.display()))?;
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|err| format!("create settings temp file {}: {err}", tmp.display()))?;
+        file.write_all(bytes)
+            .map_err(|err| format!("write settings temp file {}: {err}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|err| format!("sync settings temp file {}: {err}", tmp.display()))?;
+        drop(file);
+        std::fs::rename(&tmp, path).map_err(|err| {
+            format!(
+                "replace settings file {} from {}: {err}",
+                path.display(),
+                tmp.display()
+            )
+        })
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(err.to_string());
     }
-    // Best-effort: keep a copy of the last known-good file for boot recovery.
-    let mut bak = path.as_os_str().to_owned();
-    bak.push(".bak");
-    if let Err(err) = std::fs::copy(path, PathBuf::from(bak)) {
+    result
+}
+
+fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    atomic_replace_bytes(path, &bytes)?;
+
+    // Recovery is only useful if refreshing it cannot tear the old backup.
+    let backup = backup_path(path);
+    if let Err(err) = atomic_replace_bytes(&backup, &bytes) {
         log::debug!("[settings] failed to refresh settings .bak (non-fatal): {err}");
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryStatus {
+    PrimaryValid,
+    Recovered,
+    Unavailable(String),
+}
+
+fn read_valid_store_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("read {}: {err}", path.display())),
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|err| format!("parse {}: {err}", path.display()))?;
+    let settings = value
+        .get(SETTINGS_KEY)
+        .cloned()
+        .ok_or_else(|| format!("{} has no '{SETTINGS_KEY}' tree", path.display()))?;
+    parse_settings_value(settings).map_err(|err| format!("validate {}: {err}", path.display()))?;
+    Ok(Some(value))
+}
+
+fn recover_settings_file(path: &Path) -> Result<RecoveryStatus, String> {
+    let primary_problem = match read_valid_store_json(path) {
+        Ok(Some(_)) => return Ok(RecoveryStatus::PrimaryValid),
+        Ok(None) => format!("{} is missing", path.display()),
+        Err(err) => err,
+    };
+    let backup = backup_path(path);
+    match read_valid_store_json(&backup) {
+        Ok(Some(value)) => {
+            atomic_write_json(path, &value)?;
+            Ok(RecoveryStatus::Recovered)
+        }
+        Ok(None) => Ok(RecoveryStatus::Unavailable(format!(
+            "{primary_problem}; {} is missing",
+            backup.display()
+        ))),
+        Err(backup_problem) => Ok(RecoveryStatus::Unavailable(format!(
+            "{primary_problem}; {backup_problem}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +396,56 @@ mod tests {
                 .unwrap();
         assert_eq!(bak, value);
         assert!(!dir.path().join("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn atomic_write_json_replaces_existing_primary_and_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        atomic_write_json(&path, &serde_json::json!({ "settings": {} }))
+            .expect("first atomic write succeeds");
+        let expected = serde_json::json!({
+            "settings": { "general": { "autostart": true } }
+        });
+
+        atomic_write_json(&path, &expected).expect("replacement atomic write succeeds");
+
+        let primary: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let backup: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(backup_path(&path)).unwrap()).unwrap();
+        assert_eq!((primary, backup), (expected.clone(), expected));
+    }
+
+    #[test]
+    fn atomic_write_json_removes_temp_file_when_replace_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+
+        let error = atomic_write_json(&path, &serde_json::json!({ "settings": {} }))
+            .expect_err("a file cannot replace a directory");
+
+        assert!(error.contains("replace settings file"));
+        assert!(!temp_path(&path).exists());
+    }
+
+    #[test]
+    fn recovery_restores_valid_backup_before_defaults_are_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let expected = serde_json::json!({
+            "settings": { "general": { "autostart": true } }
+        });
+        atomic_write_json(&path, &expected).expect("seed valid primary and backup");
+        std::fs::write(&path, b"{ corrupt").unwrap();
+
+        let status = recover_settings_file(&path).expect("backup recovery succeeds");
+
+        assert_eq!(status, RecoveryStatus::Recovered);
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored, expected);
     }
 
     #[test]
@@ -292,7 +478,7 @@ mod tests {
             for _ in 0..200 {
                 with_settings_write_lock(|| {
                     let mut tree = lock_recover(&s2).clone();
-                    tree.downloads.concurrency = 4;
+                    tree.appearance.reduced_motion = true;
                     *lock_recover(&s2) = tree;
                 });
             }
@@ -303,6 +489,6 @@ mod tests {
 
         let final_tree = lock_recover(&store).clone();
         assert!(final_tree.general.autostart);
-        assert_eq!(final_tree.downloads.concurrency, 4);
+        assert!(final_tree.appearance.reduced_motion);
     }
 }

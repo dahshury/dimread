@@ -292,4 +292,13 @@ mod tests {
         let (_, _, blue) = kelvin_to_rgb(2000.0);
         assert!(blue < 0.6, "warm light should suppress blue, got {blue}");
     }
+
+    #[test]
+    fn kelvin_conversion_has_a_real_1000_k_floor() {
+        // Slider/settings writers advertise this same floor. Values below it
+        // are not additional colours: the approximation intentionally clamps
+        // them to the 1000 K white point.
+        assert_eq!(kelvin_to_rgb(0.0), kelvin_to_rgb(1000.0));
+        assert_eq!(kelvin_to_rgb(999.0), kelvin_to_rgb(1000.0));
+    }
 }

@@ -68,7 +68,7 @@ const FALLBACK_MODE: &str = "custom";
 
 /// Colour-temperature bounds (Kelvin), narrow and wide.
 const KELVIN_RANGE: (u32, u32) = (1000, 6500);
-const KELVIN_RANGE_WIDE: (u32, u32) = (0, 10_000);
+const KELVIN_RANGE_WIDE: (u32, u32) = (1000, 10_000);
 /// Brightness bounds (percent). The narrow floor avoids a fully black screen.
 const BRIGHTNESS_RANGE: (u32, u32) = (10, 100);
 const BRIGHTNESS_RANGE_WIDE: (u32, u32) = (0, 100);
@@ -144,14 +144,17 @@ pub(crate) fn apply_edit_to(settings: &mut AppSettings, edit: &DisplayEdit) -> S
         Some(id) => {
             let existing = settings.display.monitor_overrides.get(id).copied();
             let mut preset = existing.map_or_else(
+                // No override means this monitor currently inherits the active
+                // mode. Seed the first override from that exact preset so the
+                // named edit cannot replace the other three endpoints with a
+                // neutral default.
                 || {
-                    let d = MonitorOverride::default();
-                    ModePreset {
-                        kelvin_day: d.kelvin_day,
-                        kelvin_night: d.kelvin_night,
-                        brightness_day: d.brightness_day,
-                        brightness_night: d.brightness_night,
-                    }
+                    settings
+                        .display
+                        .modes
+                        .get(&mode)
+                        .copied()
+                        .unwrap_or_default()
                 },
                 |ov| ModePreset {
                     kelvin_day: ov.kelvin_day,
@@ -281,6 +284,8 @@ mod tests {
         assert_eq!(s.display.modes["office"].brightness_day, 0);
         apply_edit_to(&mut s, &edit(DisplayAxis::Kelvin, DisplayPhase::Day, 9000));
         assert_eq!(s.display.modes["office"].kelvin_day, 9000);
+        apply_edit_to(&mut s, &edit(DisplayAxis::Kelvin, DisplayPhase::Day, 0));
+        assert_eq!(s.display.modes["office"].kelvin_day, 1000);
     }
 
     #[test]
@@ -294,6 +299,10 @@ mod tests {
             s.display.monitor_overrides["\\\\.\\DISPLAY2"].kelvin_night,
             3000
         );
+        let override_ = s.display.monitor_overrides["\\\\.\\DISPLAY2"];
+        assert_eq!(override_.kelvin_day, before.kelvin_day);
+        assert_eq!(override_.brightness_day, before.brightness_day);
+        assert_eq!(override_.brightness_night, before.brightness_night);
         assert_eq!(s.display.modes["office"], before);
     }
 

@@ -7,15 +7,10 @@
 export const commands = {
 /**
  * `open_window` — create-if-needed, then show + focus the labelled window.
- *
- * For the picker the renderer passes the trigger's viewport rect
- * (`anchor_x`/`anchor_y`/`anchor_w`/`anchor_h`); we convert it to a screen
- * anchor via the CALLING window and place the popup. For the plain windows
- * the rect is absent and we center + show.
  */
-async openWindow(label: string, anchorX: number | null, anchorY: number | null, anchorW: number | null, anchorH: number | null) : Promise<Result<null, string>> {
+async openWindow(label: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("open_window", { label, anchorX, anchorY, anchorW, anchorH }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_window", { label }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return __commandError__(e);
@@ -47,32 +42,6 @@ async closeSelfWindow() : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return __commandError__(e);
 }
-},
-async pickerAnchorSnapshot() : Promise<PickerLifecycleSnapshot> {
-    return await TAURI_INVOKE("picker_anchor_snapshot");
-},
-/**
- * Begin the one-time compositor warmup after the picker renderer mounts.
- * The renderer waits for real animation-frame callbacks before acknowledging
- * completion, replacing the old arbitrary 800 ms sleep.
- */
-async pickerCompositorWarmupStart() : Promise<number | null> {
-    return await TAURI_INVOKE("picker_compositor_warmup_start");
-},
-/**
- * Renderer acknowledgement that the off-screen picker has received actual
- * animation frames. A real open increments [`PICKER_SEQ`] and therefore owns
- * the window; a late warmup completion cannot hide it.
- */
-async pickerCompositorWarmupComplete(sequence: number) : Promise<void> {
-    await TAURI_INVOKE("picker_compositor_warmup_complete", { sequence });
-},
-/**
- * Renderer acknowledgement that the dropdown's real CSS exit completed.
- * A new open clears `closing`, so a late callback cannot hide its window.
- */
-async pickerHideComplete() : Promise<void> {
-    await TAURI_INVOKE("picker_hide_complete");
 },
 /**
  * `show_app_window` — surface + focus the app's one top-level window (the
@@ -151,63 +120,35 @@ async settingsSave(patch: PartialSettings, revision: number) : Promise<Result<Se
     else return __commandError__(e);
 }
 },
-/**
- * Start (or restart) a download. `id` is the caller-chosen registry key; the
- * file lands in the app-data downloads dir as `file_name` (a bare file name,
- * no path separators).
- */
-async downloadStart(id: string, url: string, fileName: string) : Promise<Result<null, string>> {
+async settingsExportBackup() : Promise<SettingsTransferResult> {
+    return await TAURI_INVOKE("settings_export_backup");
+},
+async settingsImportBackup() : Promise<SettingsTransferResult> {
+    return await TAURI_INVOKE("settings_import_backup");
+},
+async settingsResetDefaults() : Promise<Result<SettingsSnapshot, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("download_start", { id, url, fileName }) };
+    return { status: "ok", data: await TAURI_INVOKE("settings_reset_defaults") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return __commandError__(e);
 }
 },
-async downloadPause(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_pause", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return __commandError__(e);
-}
+async diagnosticsOpenLogsFolder() : Promise<DiagnosticActionResult> {
+    return await TAURI_INVOKE("diagnostics_open_logs_folder");
 },
-async downloadResume(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_resume", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return __commandError__(e);
-}
+async diagnosticsSaveBundle() : Promise<DiagnosticActionResult> {
+    return await TAURI_INVOKE("diagnostics_save_bundle");
 },
-async downloadCancel(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_cancel", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return __commandError__(e);
-}
+async diagnosticsRecentIssues(limit: number | null) : Promise<OperationalIssue[]> {
+    return await TAURI_INVOKE("diagnostics_recent_issues", { limit });
 },
-/**
- * Delete the downloaded file (and any partial) and drop the registry entry.
- */
-async downloadRemove(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_remove", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return __commandError__(e);
-}
+async diagnosticsClearIssues() : Promise<number> {
+    return await TAURI_INVOKE("diagnostics_clear_issues");
 },
-async downloadList() : Promise<DownloadSnapshot[]> {
-    return await TAURI_INVOKE("download_list");
-},
-/**
- * Reveal the downloads directory in the OS file manager.
- */
-async openDownloadsDir() : Promise<Result<null, string>> {
+async diagnosticsSetLogStreaming(enabled: boolean) : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("open_downloads_dir") };
+    return { status: "ok", data: await TAURI_INVOKE("diagnostics_set_log_streaming", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return __commandError__(e);
@@ -238,40 +179,10 @@ async hotkeyUnregister(id: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * `hotkey_list` — every live registration (id + accelerator), sorted by id.
+ * `hotkey_list` — every active or unavailable shortcut, sorted by id.
  */
 async hotkeyList() : Promise<HotkeyInfo[]> {
     return await TAURI_INVOKE("hotkey_list");
-},
-/**
- * `overlay_notify` — show the overlay pill with the given notification.
- */
-async overlayNotify(payload: OverlayNotifyPayload) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("overlay_notify", { payload }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return __commandError__(e);
-}
-},
-/**
- * `overlay_dismiss` — dismiss the pill early (renderer exit + delayed hide).
- */
-async overlayDismiss() : Promise<void> {
-    await TAURI_INVOKE("overlay_dismiss");
-},
-/**
- * Latest notification for a race-free subscribe-then-snapshot handshake.
- */
-async overlaySnapshot() : Promise<OverlaySnapshot> {
-    return await TAURI_INVOKE("overlay_snapshot");
-},
-/**
- * Renderer acknowledgement that the CSS exit really completed. A newer
- * notification keeps the native window alive, making late callbacks harmless.
- */
-async overlayHideComplete(sequence: number) : Promise<void> {
-    await TAURI_INVOKE("overlay_hide_complete", { sequence });
 },
 /**
  * `display_list_monitors` — every physical monitor the engine can drive.
@@ -431,35 +342,27 @@ async updateCheck() : Promise<Result<UpdateCheck, string>> {
 
 export const events = __makeEvents__<{
 autodarkChanged: AutoDarkChangedEvent,
+diagnosticsLogLine: DiagnosticsLogLineEvent,
 displayState: DisplayStateEvent,
 displayTopology: DisplayTopologyEvent,
-downloadUpdate: DownloadUpdateEvent,
 focusAnchor: FocusAnchorEvent,
 focusCursor: FocusCursorEvent,
 focusState: FocusStateEvent,
 hotkeyTriggered: HotkeyTriggeredEvent,
 magictoolbarHide: MagicToolbarHideEvent,
 magictoolbarShow: MagicToolbarShowEvent,
-overlayDismiss: OverlayDismissEvent,
-overlayNotify: OverlayNotifyEvent,
-pickerAnchor: PickerAnchorEvent,
-pickerClosing: PickerClosingEvent,
 settingsChanged: SettingsChangedEvent
 }>({
 autodarkChanged: "autodark:changed",
+diagnosticsLogLine: "diagnostics:log-line",
 displayState: "display:state",
 displayTopology: "display:topology",
-downloadUpdate: "download:update",
 focusAnchor: "focus:anchor",
 focusCursor: "focus:cursor",
 focusState: "focus:state",
 hotkeyTriggered: "hotkey:triggered",
 magictoolbarHide: "magictoolbar:hide",
 magictoolbarShow: "magictoolbar:show",
-overlayDismiss: "overlay:dismiss",
-overlayNotify: "overlay:notify",
-pickerAnchor: "picker:anchor",
-pickerClosing: "picker:closing",
 settingsChanged: "settings:changed"
 })
 
@@ -480,7 +383,7 @@ export type AnchorRect = { left: number; top: number; right: number; bottom: num
  * missing/partial persisted blob falls back per-field instead of failing the
  * whole parse (mirrors Zod `.catch` on the frontend).
  */
-export type AppSettings = { appearance: AppearanceSettings; general: GeneralSettings; downloads: DownloadsSettings; hotkeys: HotkeysSettings; display: DisplaySettings; dayNight: DayNightSettings; rules: RulesSettings; focusRead: FocusReadSettings; focusBlur: FocusBlurSettings; magicx: MagicxSettings; autoDark: AutoDarkSettings }
+export type AppSettings = { appearance: AppearanceSettings; general: GeneralSettings; hotkeys: HotkeysSettings; display: DisplaySettings; dayNight: DayNightSettings; rules: RulesSettings; focusRead: FocusReadSettings; focusBlur: FocusBlurSettings; magicx: MagicxSettings; autoDark: AutoDarkSettings }
 /**
  * Appearance section — renderer-owned presentation knobs.
  */
@@ -569,6 +472,12 @@ sunset: string;
  * Width of the day↔night ramp window, in minutes.
  */
 transitionMinutes: number }
+export type DiagnosticActionResult = { ok: boolean; cancelled?: boolean | null; error?: string | null; path?: string | null }
+/**
+ * `diagnostics:log-line` — one Rust log record forwarded only while the
+ * Settings > About live viewer is explicitly enabled.
+ */
+export type DiagnosticsLogLineEvent = { level: string; message: string; target: string; timestampMs: number }
 /**
  * Which axis an edit targets.
  */
@@ -588,6 +497,16 @@ monitorId: string | null; value: number }
  * the `display:state` event. `brightness` is a percentage (0..=100).
  */
 export type DisplayOutput = { kelvin: number; brightness: number; mode: string; phase: string;
+/**
+ * Where the day/night ramp currently sits: `1.0` = full day, `0.0` = full
+ * night, in between = the applied output is `lerp(night, day, factor)`.
+ *
+ * Surfaced alongside [`Self::phase`] because "transition" alone does not
+ * say WHICH endpoint an edit should land on. A renderer that guesses gets
+ * it wrong for half the ramp and presents a slider that cannot move the
+ * screen — see `scheduler::current_edit_phase`.
+ */
+factor: number;
 /**
  * True only when Reading mode's compositor-wide grayscale matrix was
  * successfully installed. Other Reading-mode adjustments may still be
@@ -661,34 +580,6 @@ export type DisplayStateEvent = DisplayOutput
  * this instead of periodically re-enumerating monitors.
  */
 export type DisplayTopologyEvent = MonitorInfo[]
-export type DownloadPhase = "queued" | "downloading" | "paused" | "completed" | "cancelled" | "failed"
-/**
- * One download's renderer-facing state. Emitted as the `download:update`
- * payload on every phase change (plus throttled progress) and returned as a
- * list by `download_list`.
- */
-export type DownloadSnapshot = {
-/**
- * Caller-chosen stable id (also the registry key).
- */
-id: string; url: string; fileName: string; phase: DownloadPhase;
-/**
- * Canonical progress ratio in `[0, 1]`; `0` while the total is unknown.
- */
-progress: number; downloadedBytes: number; totalBytes: number | null; speedBps: number | null; etaSeconds: number | null; error: string | null }
-/**
- * `download:update` — one download's full snapshot, emitted on every state
- * change plus throttled (~10 Hz) progress while downloading.
- */
-export type DownloadUpdateEvent = DownloadSnapshot
-/**
- * Downloads section — download-manager tuning.
- */
-export type DownloadsSettings = {
-/**
- * Parallel download worker count, clamped to `1..=4`.
- */
-concurrency: number }
 /**
  * `focus:anchor` — the foreground-window rect + its monitor bounds (physical
  * px) while Focus Blur is active, so the renderer cuts a hole for the active
@@ -794,13 +685,18 @@ export type GeneralSettings = {
  */
 autostart: boolean;
 /**
+ * Allow privacy-scrubbed anonymous diagnostics when a reporting transport
+ * is configured.
+ */
+anonymousReports: boolean;
+/**
  * Closing the app window hides to the tray instead of quitting.
  */
 minimizeToTray: boolean }
 /**
- * One live registration, as reported by `hotkey_list`.
+ * One configured shortcut's runtime status, as reported by `hotkey_list`.
  */
-export type HotkeyInfo = { id: string; accelerator: string }
+export type HotkeyInfo = { id: string; accelerator: string; active: boolean; error: string | null }
 /**
  * `hotkey:triggered` — a registered global hotkey fired (key-down edge).
  * Built-in behaviors (e.g. `toggleMain`) run Rust-side BEFORE this broadcast;
@@ -1012,57 +908,12 @@ title: string;
  * Win32 window class name.
  */
 className: string }
-/**
- * `overlay:dismiss` — the overlay is being dismissed; the renderer plays its
- * exit animation and acknowledges its real completion to the backend.
- */
-export type OverlayDismissEvent = { sequence: number }
-/**
- * The resolved notification broadcast via `overlay:notify`: optional inputs
- * filled with their effective values (tone default, duration clamped).
- */
-export type OverlayNotification = {
-/**
- * Process-monotonic ordering for event/snapshot races.
- */
-sequence: number; title?: string | null; message: string; tone: OverlayTone; durationMs: number }
-/**
- * `overlay:notify` — show a notification in the overlay pill window. The
- * payload is the RESOLVED notification (tone/duration defaults filled in).
- */
-export type OverlayNotifyEvent = OverlayNotification
-/**
- * `overlay_notify` input: everything but the message is optional.
- */
-export type OverlayNotifyPayload = { title?: string | null; message: string; tone?: OverlayTone | null; durationMs?: number | null }
-/**
- * Authoritative lifecycle snapshot read only after event listeners are live.
- */
-export type OverlaySnapshot = { sequence: number; notification?: OverlayNotification | null }
-/**
- * Notification tone → the renderer maps it to status color tokens.
- */
-export type OverlayTone = "neutral" | "success" | "warning" | "error"
+export type OperationalIssue = { id: number; timestampMs: number; severity: string; area: string; operation: string; summary: string; detail: string; remediation: string }
 /**
  * A section-granular patch: only the sections present are replaced (whole
  * section at a time, exactly like the renderer posts them).
  */
-export type PartialSettings = { appearance?: AppearanceSettings | null; general?: GeneralSettings | null; downloads?: DownloadsSettings | null; hotkeys?: HotkeysSettings | null; display?: DisplaySettings | null; dayNight?: DayNightSettings | null; rules?: RulesSettings | null; focusRead?: FocusReadSettings | null; focusBlur?: FocusBlurSettings | null; magicx?: MagicxSettings | null; autoDark?: AutoDarkSettings | null }
-/**
- * `picker:anchor` — the WINDOW-LOCAL rect of the visible picker panel inside
- * the full-work-area transparent backdrop window. The picker renderer stays
- * invisible until this lands, then draws the panel at the given rect.
- */
-export type PickerAnchorEvent = { x: number; y: number; width: number; height: number }
-/**
- * `picker:closing` — the close animation is starting; the renderer plays its
- * fade-out and acknowledges its actual completion (see `windows::placement`).
- */
-export type PickerClosingEvent = Record<string, never>
-/**
- * Latest panel rect for a race-free subscribe-then-snapshot handshake.
- */
-export type PickerLifecycleSnapshot = { anchor?: PickerAnchorEvent | null; closing: boolean }
+export type PartialSettings = { appearance?: AppearanceSettings | null; general?: GeneralSettings | null; hotkeys?: HotkeysSettings | null; display?: DisplaySettings | null; dayNight?: DayNightSettings | null; rules?: RulesSettings | null; focusRead?: FocusReadSettings | null; focusBlur?: FocusBlurSettings | null; magicx?: MagicxSettings | null; autoDark?: AutoDarkSettings | null }
 /**
  * The outcome of resolving `day_night` to a point on the globe.
  */
@@ -1102,6 +953,7 @@ export type SettingsChangedEvent = { revision: number; settings: AppSettings }
  * read/written at.
  */
 export type SettingsSnapshot = { revision: number; settings: AppSettings }
+export type SettingsTransferResult = { ok: boolean; cancelled?: boolean | null; error?: string | null; path?: string | null; snapshot?: SettingsSnapshot | null }
 /**
  * A selectable timezone, as sent to the picker.
  */

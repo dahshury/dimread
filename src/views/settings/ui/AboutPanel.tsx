@@ -12,7 +12,11 @@ import {
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { useEffect, useState } from "react";
 import { useTranslations } from "use-intl";
-import { SettingSection } from "@/entities/setting";
+import {
+	patchSettingsSection,
+	SettingSection,
+	useSettingsStore,
+} from "@/entities/setting";
 import { hasNativeRuntime } from "@/shared/api";
 import { PRODUCT_LINKS } from "@/shared/config/product-links";
 import { cn } from "@/shared/lib/cn";
@@ -24,6 +28,10 @@ import {
 	type UpdateCheckState,
 	useUpdateCheck,
 } from "../model/use-update-check";
+import { DiagnosticsSection } from "./about/DiagnosticsSection";
+import { ResetSection } from "./about/ResetSection";
+import { SettingsTransferSection } from "./about/SettingsTransferSection";
+import { StartupSection } from "./about/StartupSection";
 
 interface AppInfo {
 	name: string;
@@ -189,7 +197,7 @@ function UpdatesSection() {
 			icon={RefreshIcon}
 			title={t("aboutUpdates")}
 		>
-			<div className="flex flex-wrap items-center gap-3 pt-2">
+			<div className="flex flex-wrap items-center gap-3 py-2">
 				<Button
 					className="h-8 gap-1.5 rounded-md border border-border bg-surface-3 px-3 text-foreground-secondary text-sm transition-colors hover:bg-surface-4"
 					disabled={!available || checking}
@@ -218,7 +226,7 @@ function UpdatesSection() {
 				) : null}
 			</div>
 			{outdated && result ? (
-				<div className="flex flex-wrap gap-2 pt-3">
+				<div className="flex flex-wrap gap-2 py-3">
 					{result.downloadUrl && result.downloadName ? (
 						<Button
 							className="h-8 gap-1.5 rounded-md bg-accent px-3 text-on-accent text-sm transition-colors hover:bg-accent-hover"
@@ -244,15 +252,11 @@ function UpdatesSection() {
 export function AboutPanel() {
 	const t = useTranslations("settings");
 	const info = useAppInfo();
+	const general = useSettingsStore((state) => state.settings.general);
 
 	return (
 		<>
-			<SettingSection
-				boxed
-				divided
-				icon={InformationCircleIcon}
-				title={t("aboutApp")}
-			>
+			<SettingSection icon={InformationCircleIcon} title={t("aboutApp")}>
 				<FormControl label={t("aboutName")} layout="row">
 					<span className="font-medium text-body text-foreground">
 						{info.name}
@@ -272,8 +276,19 @@ export function AboutPanel() {
 
 			<UpdatesSection />
 
+			<StartupSection
+				general={general}
+				onPatch={(patch) => patchSettingsSection("general", patch)}
+			/>
+
+			<SettingsTransferSection />
+
+			<DiagnosticsSection />
+
+			<ResetSection />
+
 			<SettingSection icon={Link01Icon} title={t("aboutLinks")}>
-				<div className="flex flex-wrap gap-2 pt-2">
+				<div className="flex flex-wrap gap-2 py-2">
 					<LinkButton
 						icon={GithubIcon}
 						label={t("aboutLinkSource")}
@@ -293,7 +308,7 @@ export function AboutPanel() {
 			</SettingSection>
 
 			<SettingSection icon={InformationCircleIcon} title={t("aboutCredits")}>
-				<p className="max-w-xl pt-2 text-body-sm text-foreground-muted leading-relaxed">
+				<p className="max-w-xl py-2 text-body-sm text-foreground-muted leading-relaxed">
 					{t("aboutCreditsBody")}
 				</p>
 			</SettingSection>

@@ -65,11 +65,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::AppHandle;
-#[cfg(windows)]
-use tauri::Listener;
 
 /// Whether Focus Blur currently owns the overlay.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Last persisted `focus_blur.enabled` value observed by the settings listener.
+/// Reconciliation is edge-driven so an unrelated save cannot undo a runtime
+/// toggle made by the global hotkey.
+static LAST_PERSISTED_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Bumped on every [`start`]/[`stop`] so a superseded foreground tracker winds
 /// down even if a `stop()`+`start()` pair lands before the old tracker has
 /// processed its `WM_QUIT` (each tracker captures its generation and exits when
@@ -95,14 +97,73 @@ static AUTOSTART_CHECKED: AtomicBool = AtomicBool::new(false);
 const OVERLAY_LABEL: &str = "focus-overlay";
 
 /// Per-sub-engine init hook. Restores the persisted `enabled` state across
-/// restarts (CareUEyes parity). The actual restore is callback-driven by
-/// [`on_page_load`], once the overlay renderer has finished loading; [`start`]
-/// otherwise lazily shows the overlay + tracker.
-pub fn init(_app: &AppHandle) {
-    #[cfg(windows)]
-    let _ = _app.listen_any("settings:changed", |_event| {
+/// restarts (CareUEyes parity) and follows later persisted enable/disable edges
+/// from imports, resets, or another window. The initial restore remains
+/// callback-driven by [`on_page_load`], once the overlay renderer is ready.
+pub fn init(app: &AppHandle) {
+    use tauri::Listener;
+
+    LAST_PERSISTED_ENABLED.store(
+        crate::settings::store::read_settings(app)
+            .focus_blur
+            .enabled,
+        Ordering::SeqCst,
+    );
+    let handle = app.clone();
+    let _ = app.listen_any("settings:changed", move |_event| {
+        let enabled = crate::settings::store::read_settings(&handle)
+            .focus_blur
+            .enabled;
+        let previous = LAST_PERSISTED_ENABLED.swap(enabled, Ordering::SeqCst);
+        match persisted_enabled_change(previous, enabled) {
+            PersistedEnabledChange::Enable => start(),
+            PersistedEnabledChange::Disable => stop(),
+            PersistedEnabledChange::Unchanged => {}
+        }
+        #[cfg(windows)]
         windows_impl::request_environment_refresh();
     });
+}
+
+#[cfg(test)]
+mod persisted_enabled_tests {
+    use super::{PersistedEnabledChange, persisted_enabled_change};
+
+    #[test]
+    fn persisted_enabled_reconciliation_only_runs_on_field_edges() {
+        assert_eq!(
+            persisted_enabled_change(false, true),
+            PersistedEnabledChange::Enable
+        );
+        assert_eq!(
+            persisted_enabled_change(true, false),
+            PersistedEnabledChange::Disable
+        );
+        // An unrelated settings save must not undo a runtime-only hotkey toggle.
+        assert_eq!(
+            persisted_enabled_change(false, false),
+            PersistedEnabledChange::Unchanged
+        );
+        assert_eq!(
+            persisted_enabled_change(true, true),
+            PersistedEnabledChange::Unchanged
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersistedEnabledChange {
+    Unchanged,
+    Enable,
+    Disable,
+}
+
+fn persisted_enabled_change(previous: bool, current: bool) -> PersistedEnabledChange {
+    match (previous, current) {
+        (false, true) => PersistedEnabledChange::Enable,
+        (true, false) => PersistedEnabledChange::Disable,
+        _ => PersistedEnabledChange::Unchanged,
+    }
 }
 
 /// Handle Tauri's page-load callback. Persisted Focus Blur is restored exactly

@@ -28,6 +28,8 @@ function renderTargets(
 				monitors={MONITORS}
 				onSelect={() => undefined}
 				onSetEnabled={() => undefined}
+				onUseModeValues={() => undefined}
+				overridden={[]}
 				selection={ALL_MONITORS}
 				{...props}
 			/>
@@ -99,13 +101,44 @@ describe("MonitorTargets", () => {
 		expect(onSetEnabled).not.toHaveBeenCalled();
 	});
 
-	test("a single display degrades to a read-only identity row", () => {
-		renderTargets({ monitors: [MONITORS[0] as MonitorInfo] });
+	test("a single enabled display cannot be opted out", () => {
+		const onSetEnabled = mock((_id: string, _enabled: boolean) => undefined);
+		renderTargets({
+			monitors: [MONITORS[0] as MonitorInfo],
+			onSetEnabled,
+		});
 		expect(screen.queryByRole("radio")).toBeNull();
-		expect(screen.queryByRole("switch")).toBeNull();
+		fireEvent.click(screen.getByRole("switch", { name: /Dell U2720Q/ }));
+		expect(onSetEnabled).not.toHaveBeenCalled();
 		// Still answers "which display does DimRead see, and under what id".
 		expect(screen.getByText("Dell U2720Q")).toBeDefined();
 		expect(screen.getByText(PRIMARY)).toBeDefined();
+	});
+
+	test("a sole excluded display remains re-enableable", () => {
+		const onSetEnabled = mock((_id: string, _enabled: boolean) => undefined);
+		renderTargets({
+			excluded: [PRIMARY],
+			monitors: [MONITORS[0] as MonitorInfo],
+			onSetEnabled,
+		});
+
+		fireEvent.click(screen.getByRole("switch", { name: /Dell U2720Q/ }));
+
+		expect(onSetEnabled).toHaveBeenCalledWith(PRIMARY, true);
+	});
+
+	test("an overridden monitor can be returned to the active mode", () => {
+		const onUseModeValues = mock((_id: string) => undefined);
+		renderTargets({ overridden: [SECOND], onUseModeValues });
+
+		fireEvent.click(
+			screen.getByRole("button", {
+				name: /Use mode values for Generic PnP Monitor/,
+			}),
+		);
+
+		expect(onUseModeValues).toHaveBeenCalledWith(SECOND);
 	});
 
 	test("reports an empty roster instead of rendering an empty group", () => {

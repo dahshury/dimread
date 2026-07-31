@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { formatHm, parseHm } from "./hm-time";
+import {
+	formatHm,
+	manualScheduleKind,
+	normalizeTransitionMinutes,
+	parseHm,
+} from "./hm-time";
 
 describe("parseHm", () => {
 	test("parses a well-formed clock string", () => {
@@ -33,5 +38,28 @@ describe("formatHm", () => {
 	test("round-trips through parseHm", () => {
 		const parsed = parseHm("06:47");
 		expect(formatHm(parsed.hours, parsed.minutes)).toBe("06:47");
+	});
+});
+
+describe("manualScheduleKind", () => {
+	test("classifies an ordinary same-day daylight interval", () => {
+		expect(manualScheduleKind("07:00", "19:00")).toBe("sameDay");
+	});
+
+	test("classifies a daylight interval that wraps through midnight", () => {
+		expect(manualScheduleKind("19:00", "07:00")).toBe("overnight");
+	});
+
+	test("treats matching boundaries as a zero-length daylight interval", () => {
+		expect(manualScheduleKind("07:00", "07:00")).toBe("equal");
+	});
+});
+
+describe("normalizeTransitionMinutes", () => {
+	test("commits finite integers within the settings range", () => {
+		expect(normalizeTransitionMinutes(12.75)).toBe(12);
+		expect(normalizeTransitionMinutes(-3)).toBe(0);
+		expect(normalizeTransitionMinutes(300)).toBe(240);
+		expect(normalizeTransitionMinutes(Number.NaN)).toBe(0);
 	});
 });

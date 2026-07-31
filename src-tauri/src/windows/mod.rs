@@ -14,19 +14,8 @@
 //! Creation policy:
 //!   - `settings` (== {@link PRIMARY_WINDOW}) is created eagerly in lib.rs setup
 //!     and HIDDEN on close, so re-open preserves renderer state.
-//!   - `gallery` is created LAZILY on first `open_window` and hidden on close.
-//!   - `picker` is PREWARMED hidden shortly after startup (plus a compositor
-//!     warm cycle) so its first open animates instead of cold-compositing.
-//!
-//! Two placement regimes:
-//!   - PLAIN windows (settings/gallery): fixed size, centered (gallery on the
-//!     primary window when it is up), shown + focused, hide-on-close.
-//!   - The PICKER: a frameless transparent popup. The renderer sends the
-//!     trigger's viewport rect in `open_window`; we convert it to screen space
-//!     via the OPENER window's bounds, resize the picker window to fill the
-//!     display work area (a click-to-dismiss backdrop), and EMIT `picker:anchor`
-//!     with the window-local panel rect so the renderer draws the visible panel
-//!     there (it stays invisible until that event lands).
+//!   - Every other window is PREWARMED hidden shortly after startup and shown
+//!     on demand by the feature that owns it (focus, magicx, the tray flyout).
 //!
 //! GOTCHAS carried from WinSTT:
 //!   - Every webview in the process MUST share ONE WebView2 user-data folder
@@ -36,17 +25,15 @@
 //!     transparent window repaints its transparent regions with the webview's
 //!     opaque default (white) the moment it gains focus.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub(crate) mod placement;
 
+use placement::center_window;
 pub use placement::virtual_screen_bounds;
-use placement::{
-    anchor_from_rect, center_window, close_picker_with_animation, place_picker, resolve_opener,
-};
 
 /// Per-window chrome/geometry spec.
 struct WindowSpec {
@@ -78,10 +65,6 @@ struct WindowSpec {
     background: Option<(u8, u8, u8, u8)>,
 }
 
-/// Dark substrate (`#09090b`) used as the opaque window background to kill the
-/// white flash on opaque windows. Matches the renderer's page background.
-const SUBSTRATE: Option<(u8, u8, u8, u8)> = Some((9, 9, 11, 255));
-
 /// The app's ONE top-level window. It is built eagerly in lib.rs setup, shown
 /// by the tray / the `toggleMain` hotkey, and hidden (or the app quits) on
 /// close — the role the removed `main` window used to play.
@@ -112,70 +95,6 @@ const WINDOW_SPECS: &[WindowSpec] = &[
         skip_taskbar: false,
         shadow: false,
         click_through: false,
-        non_activating: false,
-        background: None,
-    },
-    // Picker — full-work-area transparent backdrop; the visible anchored panel
-    // is positioned by the renderer via the `picker:anchor` event. The listed
-    // size is only the seed footprint before the first open resizes it.
-    WindowSpec {
-        label: "picker",
-        url: "windows/picker.html",
-        title: "DimRead — Picker",
-        width: 360.0,
-        height: 420.0,
-        min_width: 1.0,
-        min_height: 1.0,
-        resizable: false,
-        decorations: false,
-        transparent: true,
-        always_on_top: true,
-        skip_taskbar: true,
-        shadow: false,
-        click_through: false,
-        non_activating: false,
-        background: None,
-    },
-    // Gallery — resizable opaque window demoing every shared/ui primitive.
-    WindowSpec {
-        label: "gallery",
-        url: "windows/gallery.html",
-        title: "DimRead — Component Gallery",
-        width: 1000.0,
-        height: 720.0,
-        min_width: 640.0,
-        min_height: 480.0,
-        resizable: true,
-        decorations: false,
-        transparent: false,
-        always_on_top: false,
-        skip_taskbar: false,
-        shadow: true,
-        click_through: false,
-        non_activating: false,
-        background: SUBSTRATE,
-    },
-    // Overlay — the notification pill: a transparent, click-through,
-    // NON-FOCUSABLE always-on-top strip docked top-center of the work area
-    // (placement in `crate::overlay`). Never opened via `open_window`; the
-    // `overlay_notify` command shows it and a Rust timer hides it. Prewarmed
-    // hidden post-startup so the first notification animates instead of
-    // cold-compositing.
-    WindowSpec {
-        label: "overlay",
-        url: "windows/overlay.html",
-        title: "DimRead — Overlay",
-        width: 720.0,
-        height: 140.0,
-        min_width: 1.0,
-        min_height: 1.0,
-        resizable: false,
-        decorations: false,
-        transparent: true,
-        always_on_top: true,
-        skip_taskbar: true,
-        shadow: false,
-        click_through: true,
         non_activating: false,
         background: None,
     },
@@ -286,8 +205,6 @@ fn is_window_operation_allowed(caller: &str, operation: WindowOperation, target:
             // The tray flyout's "Settings" row surfaces the app window — the
             // tray's only cross-window reach.
             "settings" => caller == "tray-menu",
-            "gallery" => caller == PRIMARY_WINDOW,
-            "picker" => matches!(caller, "settings" | "gallery"),
             _ => false,
         },
         WindowOperation::Close => match target {
@@ -295,8 +212,6 @@ fn is_window_operation_allowed(caller: &str, operation: WindowOperation, target:
             // to the hide-to-tray / quit decision. A generic `close_window`
             // would hide it and skip that, so it is not allowed here.
             "settings" => false,
-            "gallery" => caller == target,
-            "picker" => matches!(caller, "settings" | "gallery" | "picker"),
             // The flyout dismisses itself through `tray_menu_hide` (a park, not
             // a hide) — never through the generic window commands.
             _ => false,
@@ -321,51 +236,6 @@ fn authorize_window_operation(
         "window '{caller_label}' may not {} '{target}'",
         operation.as_str()
     ))
-}
-
-// ── Picker placement state ──────────────────────────────────────────────────
-
-/// Anchor = the screen-space rect of the trigger that opened the picker.
-#[derive(Clone, Copy)]
-pub(crate) struct PickerAnchor {
-    pub(crate) screen_left: f64,
-    pub(crate) screen_right: f64,
-    pub(crate) screen_top: f64,
-    pub(crate) screen_bottom: f64,
-}
-
-#[derive(Clone)]
-pub(crate) struct PickerState {
-    anchor: Option<PickerAnchor>,
-    /// Last panel rect emitted while open. Renderers subscribe first and then
-    /// read this snapshot so a newly resumed WebView never needs timed replays.
-    current_panel: Option<crate::events::PickerAnchorEvent>,
-    /// Desired panel footprint (logical px). Fixed for the starter's single
-    /// generic picker; widened to the trigger width at placement time.
-    width: f64,
-    height: f64,
-    /// True from close-animation start until the renderer acknowledges the
-    /// actual CSS animation completion or a new anchored open supersedes it.
-    closing: bool,
-}
-
-static PICKER_STATE: Mutex<Option<PickerState>> = Mutex::new(None);
-
-/// Default panel footprint (the seed size in `WINDOW_SPECS` matches).
-const PICKER_PANEL_SIZE: (f64, f64) = (360.0, 420.0);
-
-pub(crate) fn with_picker_state<R>(f: impl FnOnce(&mut PickerState) -> R) -> R {
-    let mut guard = PICKER_STATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let entry = guard.get_or_insert_with(|| PickerState {
-        anchor: None,
-        current_panel: None,
-        width: PICKER_PANEL_SIZE.0,
-        height: PICKER_PANEL_SIZE.1,
-        closing: false,
-    });
-    f(entry)
 }
 
 /// Ensure the labelled window exists (creating it lazily from its spec) and
@@ -466,29 +336,11 @@ fn build_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, St
 
     // Mouse events fall through to whatever is underneath. On Linux, Tao
     // unwraps the native GTK window for cursor-ignore requests and a hidden
-    // prewarmed window is not realized yet — so the show path
-    // (`overlay::notify`) re-asserts this after `show()`.
+    // prewarmed window is not realized yet — so the feature that shows the
+    // window re-asserts this after `show()`.
     if spec.click_through {
         #[cfg(not(target_os = "linux"))]
         let _ = window.set_ignore_cursor_events(true);
-    }
-
-    // Click-to-dismiss: hide the picker (with its close animation) when it
-    // loses focus.
-    if spec.label == "picker" {
-        let app_handle = app.clone();
-        window.on_window_event(move |event| {
-            if !matches!(event, tauri::WindowEvent::Focused(false)) {
-                return;
-            }
-            let Some(window) = app_handle.get_webview_window("picker") else {
-                return;
-            };
-            if !window.is_visible().unwrap_or(false) {
-                return;
-            }
-            close_picker_with_animation(&app_handle, &window);
-        });
     }
 
     Ok(window)
@@ -498,25 +350,14 @@ fn build_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, St
 
 static POST_STARTUP_PREWARMED: OnceLock<()> = OnceLock::new();
 
-/// Secondary windows worth prewarming shortly after first paint. The picker
-/// gets an extra compositor warm cycle (see `warm_picker_compositor`); the
-/// overlay is pre-created so the first notification only has to reveal an
-/// already-loaded transparent webview.
+/// Secondary windows prewarmed shortly after first paint.
 ///
-/// The gallery is prewarmed too — EVERY secondary window is. A webview built
-/// lazily inside a command's `run_on_main_thread` hop can come up wedged at
-/// `about:blank` and ignore navigation (WebView2 created from a nested
-/// dispatch context). Prewarm at idle is the reliable creation path; keep any
-/// new window on this list unless it is truly rare AND you have verified its
-/// lazy build navigates.
-const POST_STARTUP_PREWARM_LABELS: &[&str] = &[
-    "picker",
-    "overlay",
-    "gallery",
-    "focus-overlay",
-    "magic-toolbar",
-    "tray-menu",
-];
+/// EVERY secondary window is on this list. A webview built lazily inside a
+/// command's `run_on_main_thread` hop can come up wedged at `about:blank` and
+/// ignore navigation (WebView2 created from a nested dispatch context). Prewarm
+/// at idle is the reliable creation path; keep any new window on this list
+/// unless it is truly rare AND you have verified its lazy build navigates.
+const POST_STARTUP_PREWARM_LABELS: &[&str] = &["focus-overlay", "magic-toolbar", "tray-menu"];
 
 /// Pre-create hidden secondary windows after the app window paints. WebView2
 /// creation happens on the main thread (required) but off the first-paint path.
@@ -579,21 +420,12 @@ pub(crate) fn on_primary_page_loaded(app: &AppHandle) {
 // ── Commands ────────────────────────────────────────────────────────────────
 
 /// `open_window` — create-if-needed, then show + focus the labelled window.
-///
-/// For the picker the renderer passes the trigger's viewport rect
-/// (`anchor_x`/`anchor_y`/`anchor_w`/`anchor_h`); we convert it to a screen
-/// anchor via the CALLING window and place the popup. For the plain windows
-/// the rect is absent and we center + show.
 #[tauri::command]
 #[specta::specta]
 pub fn open_window(
     app: AppHandle,
     webview: tauri::WebviewWindow,
     label: String,
-    anchor_x: Option<f64>,
-    anchor_y: Option<f64>,
-    anchor_w: Option<f64>,
-    anchor_h: Option<f64>,
 ) -> Result<(), String> {
     log::debug!("open_window('{label}') invoked");
     let label = known_window_label(&label)?;
@@ -601,22 +433,8 @@ pub fn open_window(
     let window = ensure_window(&app, label)
         .inspect_err(|e| log::error!("open_window('{label}') ensure_window failed: {e}"))?;
 
-    if label == "picker" {
-        // Stash the trigger anchor (converted to screen space via the opener =
-        // the calling window).
-        if let (Some(x), Some(y), Some(w), Some(h)) = (anchor_x, anchor_y, anchor_w, anchor_h)
-            && let Some(opener) = resolve_opener(&app, &webview, label)
-        {
-            let anchor = anchor_from_rect(&opener, x, y, w, h);
-            with_picker_state(|s| s.anchor = Some(anchor));
-        }
-        place_picker(&app, &window);
-        return Ok(());
-    }
-
     // The app window keeps whatever position the user last dragged it to, so
-    // re-opening it from the tray must NOT recenter. The gallery is a transient
-    // demo window and centers on the app window when that is up.
+    // re-opening it from the tray must NOT recenter.
     if label == PRIMARY_WINDOW {
         crate::window_state::show_primary_window(&app);
         return Ok(());
@@ -636,15 +454,7 @@ pub(crate) fn close_window_internal(app: &AppHandle, label: &str) -> Result<(), 
         return Err("the app window closes through close_primary_window".into());
     }
     if let Some(window) = app.get_webview_window(label) {
-        if label == "picker" {
-            close_picker_with_animation(app, &window);
-            return Ok(());
-        }
         window.hide().map_err(|e| e.to_string())?;
-    }
-    // A closed picker forgets its anchor so a stray open can't reuse it.
-    if label == "picker" {
-        with_picker_state(|s| s.anchor = None);
     }
     Ok(())
 }
@@ -674,10 +484,6 @@ pub fn close_self_window(app: AppHandle, webview: tauri::WebviewWindow) -> Resul
     match webview.label() {
         PRIMARY_WINDOW => {
             crate::window_state::close_primary_window(&app);
-            Ok(())
-        }
-        "picker" => {
-            close_picker_with_animation(&app, &webview);
             Ok(())
         }
         // The flyout is parked off-screen, never hidden — a bare `hide()` here
@@ -742,19 +548,12 @@ mod tests {
             .filter(|spec| !spec.skip_taskbar)
             .map(|spec| spec.label)
             .collect();
-        assert_eq!(top_level, vec![PRIMARY_WINDOW, "gallery"]);
+        assert_eq!(top_level, vec![PRIMARY_WINDOW]);
     }
 
     #[test]
     fn known_labels_resolve() {
-        for label in [
-            "settings",
-            "picker",
-            "gallery",
-            "overlay",
-            "focus-overlay",
-            "magic-toolbar",
-        ] {
+        for label in ["settings", "focus-overlay", "magic-toolbar", "tray-menu"] {
             assert!(spec_for(label).is_some(), "missing spec for {label}");
         }
         assert!(spec_for("nope").is_none());
@@ -806,26 +605,10 @@ mod tests {
     }
 
     #[test]
-    fn gallery_is_a_resizable_opaque_window() {
-        let spec = spec_for("gallery").expect("gallery spec");
-        assert_eq!((spec.width, spec.height), (1000.0, 720.0));
-        assert!(spec.resizable);
-        assert!(!spec.transparent);
-        assert!(spec.background.is_some());
-    }
-
-    #[test]
-    fn overlay_is_a_click_through_notification_strip() {
-        let spec = spec_for("overlay").expect("overlay spec");
-        assert_eq!((spec.width, spec.height), (720.0, 140.0));
-        assert!(spec.transparent);
-        assert!(spec.always_on_top);
-        assert!(spec.skip_taskbar);
-        assert!(spec.click_through);
-        assert!(!spec.shadow);
-        assert!(spec.background.is_none());
-        // Every OTHER window keeps normal input handling.
-        for label in ["settings", "picker", "gallery"] {
+    fn only_the_engine_owned_overlays_are_click_through() {
+        assert!(spec_for("focus-overlay").unwrap().click_through);
+        // Every window the user actually interacts with keeps normal input.
+        for label in ["settings", "tray-menu", "magic-toolbar"] {
             assert!(!spec_for(label).unwrap().click_through, "{label}");
         }
     }
@@ -844,50 +627,28 @@ mod tests {
 
     #[test]
     fn window_open_authorization_allows_renderer_flows() {
-        assert_window_rules(
-            &[
-                ("tray-menu", WindowOperation::Open, "settings"),
-                ("settings", WindowOperation::Open, "gallery"),
-                ("settings", WindowOperation::Open, "picker"),
-                ("gallery", WindowOperation::Open, "picker"),
-            ],
-            true,
-        );
+        assert_window_rules(&[("tray-menu", WindowOperation::Open, "settings")], true);
     }
 
     #[test]
     fn window_authorization_blocks_cross_window_control() {
         assert_window_rules(
             &[
-                ("picker", WindowOperation::Open, "settings"),
+                ("magic-toolbar", WindowOperation::Open, "settings"),
                 // Only the tray flyout may surface the app window; it must not
                 // be able to re-open itself into a second show path.
                 ("settings", WindowOperation::Open, "settings"),
-                ("gallery", WindowOperation::Open, "gallery"),
-                ("gallery", WindowOperation::Close, "settings"),
                 // The app window's close is a hide-to-tray/quit decision that
                 // only `close_self_window` makes.
                 ("settings", WindowOperation::Close, "settings"),
-                // The overlay is backend-owned: shown by `overlay_notify`,
-                // hidden by its timer / `overlay_dismiss` — never by
-                // renderer window commands.
-                ("settings", WindowOperation::Open, "overlay"),
-                ("settings", WindowOperation::Close, "overlay"),
+                // The engine-owned overlays are shown and hidden by the feature
+                // that drives them, never by renderer window commands.
+                ("settings", WindowOperation::Open, "focus-overlay"),
+                ("settings", WindowOperation::Close, "focus-overlay"),
+                ("settings", WindowOperation::Open, "magic-toolbar"),
+                ("settings", WindowOperation::Close, "tray-menu"),
             ],
             false,
-        );
-    }
-
-    #[test]
-    fn window_close_authorization_allows_renderer_flows() {
-        assert_window_rules(
-            &[
-                ("gallery", WindowOperation::Close, "gallery"),
-                ("picker", WindowOperation::Close, "picker"),
-                ("settings", WindowOperation::Close, "picker"),
-                ("gallery", WindowOperation::Close, "picker"),
-            ],
-            true,
         );
     }
 }

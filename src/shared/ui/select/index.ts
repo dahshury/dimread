@@ -7,11 +7,6 @@ export {
 	type SelectOption,
 	type SelectOptionGroup,
 } from "./Select";
-export {
-	OptionDragHandle,
-	SortableOptionRows,
-	type SortableOptionLike,
-} from "./sortable-option-rows";
 export { StopBubble } from "./stop-bubble";
 export {
 	type PopupSurfaceLevels,

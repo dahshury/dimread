@@ -1,4 +1,5 @@
 import {
+	ArrowReloadHorizontalIcon,
 	CheckmarkBadge01Icon,
 	ComputerIcon,
 	Layers01Icon,
@@ -10,6 +11,7 @@ import { ALL_MONITORS, type MonitorSelection } from "@/features/display";
 import { cn } from "@/shared/lib/cn";
 import { Elevated } from "@/shared/lib/surface";
 import { Badge } from "@/shared/ui/badge";
+import { IconButton } from "@/shared/ui/icon-button";
 import { Toggle } from "@/shared/ui/toggle";
 
 export interface MonitorTargetsProps {
@@ -20,6 +22,10 @@ export interface MonitorTargetsProps {
 	onSetEnabled: (monitorId: string, enabled: boolean) => void;
 	/** Point the sliders at every monitor, or at one specific display. */
 	onSelect: (selection: MonitorSelection) => void;
+	/** Remove a monitor override so it follows the active mode again. */
+	onUseModeValues: (monitorId: string) => void;
+	/** Monitor ids that currently have an explicit value override. */
+	overridden: readonly string[];
 	selection: MonitorSelection;
 }
 
@@ -47,20 +53,23 @@ export interface MonitorTargetsProps {
  * never applied, which is exactly the phantom-setting trap. Its radio is
  * disabled and the caller drops the selection back to "All monitors".
  *
- * With a single display both axes are meaningless — there is nothing to choose
- * between, and opting the only monitor out is just `pause` by another name — so
- * the control degrades to one read-only row. That row still earns its space: it
- * is the answer to "does DimRead actually see my display, and under what
- * name/id", which is the first thing to check when filtering does nothing.
+ * With a single display both axes normally degrade to an identity row. Its
+ * participation switch stays visible but disabled while filtering is on: if a
+ * previously excluded monitor becomes the sole connected display, that same
+ * switch remains available so the user can recover it.
  */
 export function MonitorTargets({
 	excluded,
 	monitors,
 	onSelect,
 	onSetEnabled,
+	onUseModeValues,
+	overridden,
 	selection,
 }: MonitorTargetsProps) {
 	const t = useTranslations("displayTab");
+	const excludedIds = new Set(excluded);
+	const overriddenIds = new Set(overridden);
 
 	if (monitors.length === 0) {
 		return (
@@ -70,15 +79,27 @@ export function MonitorTargets({
 		);
 	}
 
-	// Single display: inventory only — no target to pick, no opt-out to offer.
+	// Single display: no target to pick and no new opt-out to offer. Keep the
+	// disabled participation switch visible so a persisted exclusion can always
+	// be reversed after unplugging the other displays.
 	if (monitors.length === 1 && monitors[0]) {
-		return <MonitorIdentity monitor={monitors[0]} />;
+		const monitor = monitors[0];
+		const enabled = !excludedIds.has(monitor.id);
+		return (
+			<MonitorIdentity
+				enabled={enabled}
+				hasOverride={overriddenIds.has(monitor.id)}
+				monitor={monitor}
+				onSetEnabled={(next) => onSetEnabled(monitor.id, next)}
+				onUseModeValues={() => onUseModeValues(monitor.id)}
+			/>
+		);
 	}
 
 	// Never let the last participating monitor be switched off: that is `pause`
 	// expressed as a roster, and it strands the readout reporting a filter no
 	// display is showing. The mode grid is where "stop filtering" lives.
-	const enabledCount = monitors.filter((m) => !excluded.includes(m.id)).length;
+	const enabledCount = monitors.filter((m) => !excludedIds.has(m.id)).length;
 
 	return (
 		<div
@@ -93,16 +114,18 @@ export function MonitorTargets({
 				selected={selection === ALL_MONITORS}
 			/>
 			{monitors.map((monitor) => {
-				const enabled = !excluded.includes(monitor.id);
+				const enabled = !excludedIds.has(monitor.id);
 				return (
 					<MonitorRow
 						enabled={enabled}
+						hasOverride={overriddenIds.has(monitor.id)}
 						icon={ComputerIcon}
 						key={monitor.id}
 						label={monitor.friendlyName}
 						monitor={monitor}
 						onSelect={() => onSelect(monitor.id)}
 						onSetEnabled={(next) => onSetEnabled(monitor.id, next)}
+						onUseModeValues={() => onUseModeValues(monitor.id)}
 						selected={selection === monitor.id}
 						toggleDisabled={enabled && enabledCount <= 1}
 					/>
@@ -122,7 +145,24 @@ export function MonitorTargets({
  * is broken. Rendered at caption altitude instead — a label for the controls
  * below, which is all it ever was.
  */
-function MonitorIdentity({ monitor }: { monitor: MonitorInfo }) {
+function MonitorIdentity({
+	enabled,
+	hasOverride,
+	monitor,
+	onSetEnabled,
+	onUseModeValues,
+}: {
+	enabled: boolean;
+	hasOverride: boolean;
+	monitor: MonitorInfo;
+	onSetEnabled: (enabled: boolean) => void;
+	onUseModeValues: () => void;
+}) {
+	const t = useTranslations("displayTab");
+	const inheritLabel = t("monitorUseModeValuesLabel", {
+		name: monitor.friendlyName,
+	});
+
 	return (
 		<div className="flex items-center gap-2 px-1.5 text-foreground-dim">
 			<HugeiconsIcon
@@ -137,6 +177,20 @@ function MonitorIdentity({ monitor }: { monitor: MonitorInfo }) {
 			<span className="min-w-0 flex-1 truncate text-right font-mono text-2xs">
 				{monitor.id}
 			</span>
+			{hasOverride ? (
+				<IconButton
+					aria-label={inheritLabel}
+					icon={<HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={14} />}
+					onClick={onUseModeValues}
+					tooltip={inheritLabel}
+				/>
+			) : null}
+			<Toggle
+				aria-label={t("monitorEnabledLabel", { name: monitor.friendlyName })}
+				checked={enabled}
+				disabled={enabled}
+				onCheckedChange={onSetEnabled}
+			/>
 		</div>
 	);
 }
@@ -144,12 +198,14 @@ function MonitorIdentity({ monitor }: { monitor: MonitorInfo }) {
 interface MonitorRowProps {
 	/** Whether this monitor participates in filtering. Absent on the "All" row. */
 	enabled?: boolean;
+	hasOverride?: boolean;
 	icon: typeof ComputerIcon;
 	label: string;
 	/** Absent on the "All monitors" row, which has no hardware behind it. */
 	monitor?: MonitorInfo;
 	onSelect: () => void;
 	onSetEnabled?: (enabled: boolean) => void;
+	onUseModeValues?: () => void;
 	selected: boolean;
 	/** True for the last participating monitor — it may not be switched off. */
 	toggleDisabled?: boolean;
@@ -157,15 +213,20 @@ interface MonitorRowProps {
 
 function MonitorRow({
 	enabled = true,
+	hasOverride = false,
 	icon,
 	label,
 	monitor,
 	onSelect,
 	onSetEnabled,
+	onUseModeValues,
 	selected,
 	toggleDisabled,
 }: MonitorRowProps) {
 	const t = useTranslations("displayTab");
+	const inheritLabel = monitor
+		? t("monitorUseModeValuesLabel", { name: monitor.friendlyName })
+		: "";
 
 	return (
 		<Elevated
@@ -229,6 +290,14 @@ function MonitorRow({
 					)}
 				</span>
 			</button>
+			{monitor && hasOverride && onUseModeValues ? (
+				<IconButton
+					aria-label={inheritLabel}
+					icon={<HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={14} />}
+					onClick={onUseModeValues}
+					tooltip={inheritLabel}
+				/>
+			) : null}
 			{monitor && onSetEnabled ? (
 				<Toggle
 					aria-label={t("monitorEnabledLabel", { name: monitor.friendlyName })}

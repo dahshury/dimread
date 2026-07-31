@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { commands, type LocationStatus, type TimeZoneOption } from "@/bindings";
+import { flushPendingSettings, useSettingsStore } from "@/entities/setting";
 import { hasNativeRuntime } from "@/shared/api";
-import { useSettingsStore } from "@/entities/setting";
 
 /**
  * The day/night schedule's LOCATION, read from the engine rather than recomputed
@@ -19,16 +19,52 @@ import { useSettingsStore } from "@/entities/setting";
  * in it can move the answer.
  */
 export interface DayNightLocation {
+	/** True when the latest location-status request failed. */
+	locationLoadError: boolean;
+	/** Re-run the location-status request after a failure. */
+	retryLocation: () => void;
+	/** Re-run the timezone-roster request after a failure. */
+	retryTimezones: () => void;
 	/** Null until the first snapshot lands (and in a non-native preview). */
 	status: LocationStatus | null;
 	/** Every zone the picker can offer. Empty until loaded. */
 	timezones: TimeZoneOption[];
+	/** True when the latest timezone-roster request failed. */
+	timezonesLoadError: boolean;
 }
 
 export function useDayNightLocation(): DayNightLocation {
 	const dayNight = useSettingsStore((s) => s.settings.dayNight);
+	// Settings normalization may rebuild section objects when an unrelated
+	// section changes. Depend on the actual schedule values so a Focus/Hotkey
+	// edit cannot cancel an in-flight location request and silently replace it
+	// with a second request.
+	const locationSettingsKey = [
+		dayNight.enabled,
+		dayNight.useLocation,
+		dayNight.locationSource,
+		dayNight.timezone,
+		dayNight.latitude,
+		dayNight.longitude,
+		dayNight.sunrise,
+		dayNight.sunset,
+		dayNight.transitionMinutes,
+	].join("\u0000");
 	const [status, setStatus] = useState<LocationStatus | null>(null);
 	const [timezones, setTimezones] = useState<TimeZoneOption[]>([]);
+	const [locationLoadError, setLocationLoadError] = useState(false);
+	const [timezonesLoadError, setTimezonesLoadError] = useState(false);
+	const [locationRequest, setLocationRequest] = useState(0);
+	const [timezonesRequest, setTimezonesRequest] = useState(0);
+
+	const retryLocation = useCallback(() => {
+		setLocationLoadError(false);
+		setLocationRequest((request) => request + 1);
+	}, []);
+	const retryTimezones = useCallback(() => {
+		setTimezonesLoadError(false);
+		setTimezonesRequest((request) => request + 1);
+	}, []);
 
 	// The roster is a build-time constant on the backend, so it is fetched once
 	// rather than on every settings change.
@@ -42,31 +78,52 @@ export function useDayNightLocation(): DayNightLocation {
 			.then((list) => {
 				if (!disposed) {
 					setTimezones(list);
+					setTimezonesLoadError(false);
 				}
 			})
-			.catch(() => undefined);
+			.catch(() => {
+				if (!disposed) {
+					setTimezonesLoadError(true);
+				}
+			});
 		return () => {
 			disposed = true;
 		};
-	}, []);
+	}, [timezonesRequest]);
 
 	useEffect(() => {
 		if (!hasNativeRuntime()) {
 			return;
 		}
 		let disposed = false;
-		void commands
-			.daynightLocationStatus()
+		// Settings edits are optimistic and debounced. Querying the backend on the
+		// same render would resolve the PRE-edit location and the authoritative
+		// save echo would not retrigger this effect (its scalar key is identical).
+		// Flush first so the readout always describes the schedule just selected.
+		void flushPendingSettings()
+			.then(() => commands.daynightLocationStatus())
 			.then((next) => {
 				if (!disposed) {
 					setStatus(next);
+					setLocationLoadError(false);
 				}
 			})
-			.catch(() => undefined);
+			.catch(() => {
+				if (!disposed) {
+					setLocationLoadError(true);
+				}
+			});
 		return () => {
 			disposed = true;
 		};
-	}, [dayNight]);
+	}, [locationSettingsKey, locationRequest]);
 
-	return { status, timezones };
+	return {
+		locationLoadError,
+		retryLocation,
+		retryTimezones,
+		status,
+		timezones,
+		timezonesLoadError,
+	};
 }

@@ -4,6 +4,7 @@ export {
 	surfaceBg,
 	surfaceBg90,
 	surfaceClasses,
+	surfaceColorVar,
 	surfaceHighlightedBg,
 	surfaceHoverBg,
 	surfacePopupOpenBg,

@@ -25,8 +25,11 @@
 //!
 //! The table itself is generated — see `tools/timezones/generate-timezones.py`.
 
+use chrono::{DateTime, NaiveDate, Offset, Timelike, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::time::Duration;
 
 use super::timezones_data::{ALIASES, ZONES};
 
@@ -50,6 +53,14 @@ pub struct TimeZoneOption {
     pub country: String,
     pub latitude: f64,
     pub longitude: f64,
+}
+
+/// Local civil-time components for a UTC instant in one IANA timezone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ZonedTime {
+    pub date: NaiveDate,
+    pub minutes: f64,
+    pub utc_offset_minutes: i32,
 }
 
 /// Every zone DimRead can resolve to coordinates, sorted by id.
@@ -87,6 +98,71 @@ fn canonical(id: &str) -> Option<&str> {
     }
 }
 
+/// Convert an absolute instant to the civil date, time, and UTC offset in an
+/// IANA timezone. The bundled tzdb applies the zone's historical and future
+/// daylight-saving transitions; the host timezone is not consulted.
+pub(crate) fn time_at(id: &str, instant: DateTime<Utc>) -> Option<ZonedTime> {
+    let timezone = canonical(id)?.parse::<Tz>().ok()?;
+    let local = instant.with_timezone(&timezone);
+    Some(ZonedTime {
+        date: local.date_naive(),
+        minutes: f64::from(local.hour()) * 60.0
+            + f64::from(local.minute())
+            + f64::from(local.second()) / 60.0
+            + f64::from(local.nanosecond()) / 60_000_000_000.0,
+        utc_offset_minutes: local.offset().fix().local_minus_utc() / 60,
+    })
+}
+
+/// Find the first UTC-offset transition after `instant`, bounded by `within`.
+///
+/// `chrono-tz` exposes offset lookup rather than a public transition iterator,
+/// so the bounded horizon is sampled hourly and the first changed interval is
+/// binary-searched to the transition second. Runtime horizons never exceed the
+/// scheduler's next wall-clock deadline (at most the next local midnight), and
+/// tzdb offset transitions are separated by far more than one hour.
+pub(crate) fn next_offset_change(
+    id: &str,
+    instant: DateTime<Utc>,
+    within: Duration,
+) -> Option<Duration> {
+    let timezone = canonical(id)?.parse::<Tz>().ok()?;
+    let horizon = instant + chrono::Duration::from_std(within).ok()?;
+    let initial_offset = offset_seconds(timezone, instant);
+    let mut lower = instant;
+
+    while lower < horizon {
+        let upper = (lower + chrono::Duration::hours(1)).min(horizon);
+        if offset_seconds(timezone, upper) != initial_offset {
+            let mut lower_second = lower.timestamp();
+            let mut upper_second = upper.timestamp();
+            while upper_second - lower_second > 1 {
+                let midpoint = lower_second + (upper_second - lower_second) / 2;
+                let midpoint = DateTime::from_timestamp(midpoint, 0)?;
+                if offset_seconds(timezone, midpoint) == initial_offset {
+                    lower_second = midpoint.timestamp();
+                } else {
+                    upper_second = midpoint.timestamp();
+                }
+            }
+
+            let transition = DateTime::from_timestamp(upper_second, 0)?;
+            return (transition - instant).to_std().ok();
+        }
+        lower = upper;
+    }
+
+    None
+}
+
+fn offset_seconds(timezone: Tz, instant: DateTime<Utc>) -> i32 {
+    instant
+        .with_timezone(&timezone)
+        .offset()
+        .fix()
+        .local_minus_utc()
+}
+
 /// The IANA zone id this machine is configured for, whatever the platform calls
 /// it internally (Windows registry key → CLDR mapping, `/etc/localtime` on
 /// Unix, `CFTimeZone` on macOS).
@@ -114,6 +190,7 @@ pub fn detect() -> Option<&'static TimeZoneLocation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn the_generated_table_covers_the_world() {
@@ -210,5 +287,60 @@ mod tests {
         for id in ["Asia/Saigon", "America/Buenos_Aires", "Europe/Kiev"] {
             assert!(lookup(id).is_some(), "{id} should resolve to a locality");
         }
+    }
+
+    #[test]
+    fn sydney_time_uses_its_local_date_and_summer_offset() {
+        let instant = Utc
+            .with_ymd_and_hms(2024, 1, 15, 13, 30, 0)
+            .single()
+            .unwrap();
+        let local = time_at("Australia/Sydney", instant).unwrap();
+
+        assert_eq!(local.date, NaiveDate::from_ymd_opt(2024, 1, 16).unwrap());
+        assert_eq!(local.minutes, 30.0);
+        assert_eq!(local.utc_offset_minutes, 11 * 60);
+    }
+
+    #[test]
+    fn sydney_time_applies_dst_for_the_instant() {
+        let summer = Utc
+            .with_ymd_and_hms(2024, 1, 15, 13, 30, 0)
+            .single()
+            .unwrap();
+        let winter = Utc
+            .with_ymd_and_hms(2024, 7, 15, 14, 30, 0)
+            .single()
+            .unwrap();
+
+        assert_eq!(
+            time_at("Australia/Sydney", summer)
+                .unwrap()
+                .utc_offset_minutes,
+            11 * 60
+        );
+        assert_eq!(
+            time_at("Australia/Sydney", winter)
+                .unwrap()
+                .utc_offset_minutes,
+            10 * 60
+        );
+    }
+
+    #[test]
+    fn sydney_next_offset_change_finds_the_spring_dst_transition() {
+        let instant = Utc
+            .with_ymd_and_hms(2024, 10, 5, 15, 30, 0)
+            .single()
+            .unwrap();
+
+        assert_eq!(
+            next_offset_change(
+                "Australia/Sydney",
+                instant,
+                Duration::from_secs(4 * 60 * 60)
+            ),
+            Some(Duration::from_secs(30 * 60))
+        );
     }
 }

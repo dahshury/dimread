@@ -36,8 +36,20 @@ pub const TOGGLE_MAIN_ID: &str = "toggleMain";
 /// Live registrations: id → the accelerator string it is bound to.
 static REGISTERED: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+/// Persisted bindings that could not be armed at startup/hot-swap. Keeping
+/// these separate from `REGISTERED` lets the UI distinguish "saved" from
+/// "actually active" without pretending Tauri's process-local
+/// `is_registered` can see another application.
+static UNAVAILABLE: Mutex<BTreeMap<String, (String, String)>> = Mutex::new(BTreeMap::new());
+
 fn lock_registry() -> std::sync::MutexGuard<'static, BTreeMap<String, String>> {
     REGISTERED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_unavailable() -> std::sync::MutexGuard<'static, BTreeMap<String, (String, String)>> {
+    UNAVAILABLE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -58,6 +70,40 @@ const MODIFIER_TOKENS: &[&str] = &[
     "commandorcontrol",
     "cmdorctrl",
 ];
+
+#[cfg(target_os = "windows")]
+fn validate_windows_reserved(tokens: &[String]) -> Result<(), String> {
+    let has = |token: &str| tokens.iter().any(|part| part == token);
+    let has_any = |candidates: &[&str]| candidates.iter().any(|token| has(token));
+
+    if has_any(&["win", "windows", "super", "meta", "command", "cmd"]) {
+        return Err("Windows-key shortcuts are reserved by the operating system".into());
+    }
+    if has("f12") {
+        return Err("F12 is reserved by Windows for debuggers".into());
+    }
+    if has_any(&["printscreen", "printscrn", "prtsc", "snapshot"]) {
+        return Err("Print Screen shortcuts are reserved by Windows".into());
+    }
+
+    let ctrl = has_any(&["ctrl", "control"]);
+    let alt = has_any(&["alt", "option"]);
+    let shift = has("shift");
+    let reserved = (ctrl && alt && has("delete"))
+        || (alt && has("tab"))
+        || (alt && has("f4"))
+        || (ctrl && has_any(&["escape", "esc"]))
+        || (ctrl && shift && has_any(&["escape", "esc"]));
+    if reserved {
+        return Err("this shortcut is reserved by Windows".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn validate_windows_reserved(_tokens: &[String]) -> Result<(), String> {
+    Ok(())
+}
 
 /// Validate + parse an accelerator for the Tauri global-shortcut backend:
 /// non-empty, no `fn` key (unsupported), and at least one non-modifier main
@@ -84,6 +130,7 @@ pub(crate) fn validate_accelerator(raw: &str) -> Result<Shortcut, String> {
                 .into(),
         );
     }
+    validate_windows_reserved(&tokens)?;
     raw.parse::<Shortcut>()
         .map_err(|e| format!("invalid accelerator '{raw}': {e}"))
 }
@@ -178,12 +225,6 @@ pub(crate) fn register_hotkey_internal(
         return Err(format!("'{canonical}' is already in use"));
     }
 
-    // Replace: drop the id's previous registration before arming the new one.
-    if let Some(previous) = previous {
-        unregister_shortcut_string(app, &previous);
-        lock_registry().remove(id);
-    }
-
     let handler_id = id.to_string();
     let handler_accel = canonical.clone();
     app.global_shortcut()
@@ -194,67 +235,161 @@ pub(crate) fn register_hotkey_internal(
         })
         .map_err(|e| format!("couldn't register '{canonical}': {e}"))?;
 
+    // The OS registration above is the availability check and the reservation.
+    // Keep it claimed while committing the swap; probing and releasing here
+    // would create a race with another application.
+    if let Some(previous) = previous.as_deref()
+        && !previous
+            .parse::<Shortcut>()
+            .is_ok_and(|old| old == shortcut)
+        && let Err(err) = unregister_shortcut_string(app, previous)
+    {
+        let rollback = unregister_shortcut_string(app, &canonical);
+        return Err(match rollback {
+            Ok(()) => format!("couldn't replace '{previous}': {err}"),
+            Err(rollback_err) => format!(
+                "couldn't replace '{previous}': {err}; candidate rollback also failed: {rollback_err}"
+            ),
+        });
+    }
+
     lock_registry().insert(id.to_string(), canonical);
+    lock_unavailable().remove(id);
     Ok(())
 }
 
 /// Unregister the binding for `id`. Unknown ids are a silent no-op so
 /// settings-driven disarms stay idempotent.
 pub(crate) fn unregister_hotkey_internal(app: &AppHandle, id: &str) -> Result<(), String> {
-    let Some(accelerator) = lock_registry().remove(id) else {
+    let Some(accelerator) = lock_registry().get(id).cloned() else {
+        lock_unavailable().remove(id);
         return Ok(());
     };
-    unregister_shortcut_string(app, &accelerator);
+    unregister_shortcut_string(app, &accelerator)?;
+    lock_registry().remove(id);
+    lock_unavailable().remove(id);
     Ok(())
 }
 
-fn unregister_shortcut_string(app: &AppHandle, accelerator: &str) {
+fn unregister_shortcut_string(app: &AppHandle, accelerator: &str) -> Result<(), String> {
     let Ok(shortcut) = accelerator.parse::<Shortcut>() else {
-        return;
+        return Ok(());
     };
     if !app.global_shortcut().is_registered(shortcut) {
-        return;
+        return Ok(());
     }
-    if let Err(err) = app.global_shortcut().unregister(shortcut) {
-        log::warn!("[hotkeys] failed to unregister '{accelerator}': {err}");
+    app.global_shortcut()
+        .unregister(shortcut)
+        .map_err(|err| format!("failed to unregister '{accelerator}': {err}"))
+}
+
+/// The complete persisted roster in UI order. Keeping it centralized is what
+/// makes whole-section reconfiguration coherent: a two-row swap is validated
+/// as the desired end state instead of being rejected halfway through because
+/// the first row still sees the second row's old registration.
+fn configured_bindings(h: &HotkeysSettings) -> [(&'static str, &str); 12] {
+    [
+        ("brightnessUp", h.brightness_up.as_str()),
+        ("brightnessDown", h.brightness_down.as_str()),
+        ("tempUp", h.temp_up.as_str()),
+        ("tempDown", h.temp_down.as_str()),
+        ("toggleFilter", h.toggle_filter.as_str()),
+        ("toggleReading", h.toggle_reading.as_str()),
+        ("toggleEditing", h.toggle_editing.as_str()),
+        (TOGGLE_MAIN_ID, h.toggle_main.as_str()),
+        ("focusRead", h.focus_read.as_str()),
+        ("focusBlur", h.focus_blur.as_str()),
+        ("magicDark", h.magic_dark.as_str()),
+        ("magicGray", h.magic_gray.as_str()),
+    ]
+}
+
+/// Validate a desired roster before touching the OS. Exact duplicate parsed
+/// shortcuts make BOTH rows unavailable; subset/superset chords remain valid
+/// because the global-shortcut backend matches complete accelerators.
+fn validate_desired_bindings(bindings: &[(&'static str, &str)]) -> BTreeMap<String, String> {
+    let mut errors = BTreeMap::new();
+    let mut parsed: Vec<(&str, &str, Shortcut)> = Vec::new();
+    for (id, raw) in bindings {
+        let accelerator = raw.trim();
+        if accelerator.is_empty() {
+            continue;
+        }
+        let shortcut = match validate_accelerator(accelerator) {
+            Ok(shortcut) => shortcut,
+            Err(error) => {
+                errors.insert((*id).to_string(), error);
+                continue;
+            }
+        };
+        for (other_id, other_accelerator, other_shortcut) in &parsed {
+            if other_shortcut == &shortcut {
+                errors.insert(
+                    (*id).to_string(),
+                    format!("'{accelerator}' is already assigned to hotkey '{other_id}'"),
+                );
+                errors.entry((*other_id).to_string()).or_insert_with(|| {
+                    format!("'{other_accelerator}' is also assigned to hotkey '{id}'")
+                });
+            }
+        }
+        parsed.push((id, accelerator, shortcut));
     }
+    errors
 }
 
 /// Arm/disarm every persisted hotkey from the settings tree. Called once at
-/// startup (lib.rs setup) and after every save that changed the `hotkeys`
-/// section, so rebinds go live immediately — hot-swap, not startup-only.
-/// Failures are logged, never propagated: a stale persisted combo must not
-/// fail the save that is trying to fix it.
+/// startup and after every hotkeys-section save. Existing managed bindings are
+/// released as a roster before the desired roster is armed, which makes swaps
+/// work and guarantees a failed desired binding cannot leave a hidden stale
+/// accelerator active under that id. Individual OS failures are reported by
+/// `hotkey_list` and never reject the settings save.
 pub fn apply_hotkey_settings(app: &AppHandle, hotkeys: &HotkeysSettings) {
-    apply_one(app, TOGGLE_MAIN_ID, &hotkeys.toggle_main);
-    // Arm the seven display-action accelerators (owned by `actions`) so their
-    // persisted bindings are live from boot, not only after a re-record.
-    actions::apply_action_hotkeys(app, hotkeys);
-    // focus-read
-    apply_one(app, "focusRead", &hotkeys.focus_read);
-}
+    let bindings = configured_bindings(hotkeys);
+    let mut errors = validate_desired_bindings(&bindings);
 
-fn apply_one(app: &AppHandle, id: &str, accelerator: &str) {
-    let accelerator = accelerator.trim();
-    if accelerator.is_empty() {
-        if let Err(err) = unregister_hotkey_internal(app, id) {
-            log::debug!("[hotkeys] '{id}' not disarmed: {err}");
+    // Release the complete managed roster first. Unknown ids registered by a
+    // future extension remain untouched.
+    for (id, _) in &bindings {
+        if let Err(error) = unregister_hotkey_internal(app, id) {
+            errors.entry((*id).to_string()).or_insert(error);
         }
-        return;
     }
-    if let Err(err) = register_hotkey_internal(app, id, accelerator) {
-        log::warn!("[hotkeys] failed to arm '{id}' = '{accelerator}': {err}");
+
+    {
+        let mut unavailable = lock_unavailable();
+        for (id, _) in &bindings {
+            unavailable.remove(*id);
+        }
+    }
+
+    for (id, raw) in bindings {
+        let accelerator = raw.trim();
+        if accelerator.is_empty() {
+            continue;
+        }
+        if let Some(error) = errors.get(id) {
+            lock_unavailable().insert(id.to_string(), (accelerator.to_string(), error.clone()));
+            log::warn!("[hotkeys] failed to arm '{id}' = '{accelerator}': {error}");
+            continue;
+        }
+        if let Err(error) = register_hotkey_internal(app, id, accelerator) {
+            lock_unavailable().insert(id.to_string(), (accelerator.to_string(), error.clone()));
+            log::warn!("[hotkeys] failed to arm '{id}' = '{accelerator}': {error}");
+        }
     }
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
-/// One live registration, as reported by `hotkey_list`.
+/// One configured shortcut's runtime status, as reported by `hotkey_list`.
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeyInfo {
     pub id: String,
     pub accelerator: String,
+    pub active: bool,
+    pub error: Option<String>,
 }
 
 /// `hotkey_register` — validate + register `accelerator` under `id` (replacing
@@ -277,22 +412,44 @@ pub fn hotkey_unregister(app: AppHandle, id: String) -> Result<(), String> {
     unregister_hotkey_internal(&app, id.trim())
 }
 
-/// `hotkey_list` — every live registration (id + accelerator), sorted by id.
+/// `hotkey_list` — every active or unavailable shortcut, sorted by id.
 #[tauri::command]
 #[specta::specta]
 pub fn hotkey_list() -> Vec<HotkeyInfo> {
-    lock_registry()
+    let registered = lock_registry();
+    let unavailable = lock_unavailable();
+    let mut rows: BTreeMap<String, HotkeyInfo> = registered
         .iter()
-        .map(|(id, accelerator)| HotkeyInfo {
-            id: id.clone(),
-            accelerator: accelerator.clone(),
+        .map(|(id, accelerator)| {
+            (
+                id.clone(),
+                HotkeyInfo {
+                    id: id.clone(),
+                    accelerator: accelerator.clone(),
+                    active: true,
+                    error: None,
+                },
+            )
         })
-        .collect()
+        .collect();
+    for (id, (accelerator, error)) in unavailable.iter() {
+        rows.insert(
+            id.clone(),
+            HotkeyInfo {
+                id: id.clone(),
+                accelerator: accelerator.clone(),
+                active: false,
+                error: Some(error.clone()),
+            },
+        );
+    }
+    rows.into_values().collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_accelerator;
+    use super::{configured_bindings, validate_accelerator, validate_desired_bindings};
+    use crate::settings::HotkeysSettings;
 
     #[test]
     fn rejects_empty_and_whitespace() {
@@ -309,13 +466,7 @@ mod tests {
 
     #[test]
     fn accepts_tauri_vocabulary() {
-        for accel in [
-            "Ctrl+Shift+Space",
-            "Alt+ArrowUp",
-            "F5",
-            "Super+K",
-            "Ctrl+Alt+Delete",
-        ] {
+        for accel in ["Ctrl+Shift+Space", "Alt+ArrowUp", "F5"] {
             assert!(
                 validate_accelerator(accel).is_ok(),
                 "expected '{accel}' to validate"
@@ -331,7 +482,52 @@ mod tests {
     }
 
     #[test]
+    fn configured_roster_contains_every_persisted_binding_once() {
+        let hotkeys = HotkeysSettings::default();
+        let bindings = configured_bindings(&hotkeys);
+        assert_eq!(bindings.len(), 12);
+        let ids: std::collections::BTreeSet<_> = bindings.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids.len(), bindings.len());
+        assert!(ids.contains("toggleMain"));
+        assert!(ids.contains("focusRead"));
+        assert!(ids.contains("magicGray"));
+    }
+
+    #[test]
+    fn desired_roster_rejects_exact_duplicates_but_allows_supersets() {
+        let bindings = [
+            ("first", "Ctrl+V"),
+            ("second", "Shift+Ctrl+V"),
+            ("third", "ctrl+v"),
+        ];
+        let errors = validate_desired_bindings(&bindings);
+        assert!(errors.contains_key("first"));
+        assert!(!errors.contains_key("second"));
+        assert!(errors.contains_key("third"));
+    }
+
+    #[test]
     fn rejects_garbage_tokens() {
         assert!(validate_accelerator("Ctrl+NotAKey").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_windows_reserved_shortcuts() {
+        for accel in [
+            "F12",
+            "Ctrl+Alt+Delete",
+            "Alt+Tab",
+            "Alt+F4",
+            "Ctrl+Escape",
+            "Ctrl+Shift+Escape",
+            "PrintScreen",
+            "Super+K",
+        ] {
+            assert!(
+                validate_accelerator(accel).is_err(),
+                "expected '{accel}' to be reserved"
+            );
+        }
     }
 }

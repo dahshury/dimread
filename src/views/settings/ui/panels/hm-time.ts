@@ -29,3 +29,30 @@ export function parseHm(value: string): { hours: number; minutes: number } {
 export function formatHm(hours: number, minutes: number): string {
 	return `${pad2(clampInt(hours, 0, 23))}:${pad2(clampInt(minutes, 0, 59))}`;
 }
+
+export type ManualScheduleKind = "equal" | "overnight" | "sameDay";
+
+/**
+ * Describe the daylight interval implied by a manual sunrise/sunset pair.
+ * Sunrise is inclusive and sunset is exclusive: a later sunset is a normal
+ * same-day interval, an earlier sunset wraps through midnight, and matching
+ * boundaries are a zero-length daylight interval (night for the full day).
+ */
+export function manualScheduleKind(
+	sunrise: string,
+	sunset: string,
+): ManualScheduleKind {
+	const start = parseHm(sunrise);
+	const end = parseHm(sunset);
+	const startMinutes = start.hours * 60 + start.minutes;
+	const endMinutes = end.hours * 60 + end.minutes;
+	if (startMinutes === endMinutes) {
+		return "equal";
+	}
+	return startMinutes < endMinutes ? "sameDay" : "overnight";
+}
+
+/** Clamp transition text input to the integer range accepted by settings. */
+export function normalizeTransitionMinutes(value: number): number {
+	return clampInt(value, 0, 240);
+}

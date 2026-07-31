@@ -60,19 +60,19 @@ function RuleRow({
 				{rule.pattern}
 			</span>
 			<Select
-				aria-label={t("mode")}
+				aria-label={t("modeFor", { pattern: rule.pattern })}
 				className="w-32 shrink-0"
 				onChange={onModeChange}
 				options={modeOptions}
 				value={rule.mode}
 			/>
 			<IconButton
-				aria-label={t("edit")}
+				aria-label={t("editRule", { pattern: rule.pattern })}
 				icon={<HugeiconsIcon icon={PencilEdit02Icon} size={15} />}
 				onClick={onEdit}
 			/>
 			<IconButton
-				aria-label={t("remove")}
+				aria-label={t("removeRule", { pattern: rule.pattern })}
 				icon={<HugeiconsIcon icon={Delete02Icon} size={15} />}
 				onClick={onDelete}
 			/>
@@ -106,7 +106,7 @@ export function RulesPanel() {
 	const [editingRule, setEditingRule] = useState<Rule | null>(null);
 
 	// Persist any debounced edit if the panel unmounts before it fires.
-	useEffect(() => () => flushPendingSettings(), []);
+	useEffect(() => () => void flushPendingSettings(), []);
 
 	function openAdd(): void {
 		setEditingRule(null);
@@ -133,7 +133,7 @@ export function RulesPanel() {
 		: undefined;
 
 	return (
-		<div className="flex flex-col gap-3">
+		<div className="flex flex-col">
 			<SettingSection
 				description={t("builtInCaption")}
 				icon={FullScreenIcon}
@@ -155,60 +155,60 @@ export function RulesPanel() {
 				/>
 			</SettingSection>
 
-			<FormControl
-				caption={t("subtitle")}
-				label={t("enable")}
-				labelAddon={
-					<Toggle
-						aria-label={t("enable")}
-						checked={rules.enabled}
-						onCheckedChange={(enabled) =>
-							patchSettingsSection("rules", { enabled })
-						}
-					/>
+			<SettingSection
+				description={t("subtitle")}
+				headerAction={
+					<Button className={ADD_BUTTON} onClick={openAdd}>
+						<HugeiconsIcon icon={PlusSignIcon} size={14} />
+						{t("add")}
+					</Button>
 				}
-				layout="row"
-			/>
+				title={t("title")}
+			>
+				<FormControl
+					label={t("enable")}
+					labelAddon={
+						<Toggle
+							aria-label={t("enable")}
+							checked={rules.enabled}
+							onCheckedChange={(enabled) =>
+								patchSettingsSection("rules", { enabled })
+							}
+						/>
+					}
+					layout="row"
+				/>
 
-			<div className="flex items-center justify-between gap-3">
-				<span className="font-medium text-body text-foreground-secondary">
-					{t("title")}
-				</span>
-				<Button className={ADD_BUTTON} onClick={openAdd}>
-					<HugeiconsIcon icon={PlusSignIcon} size={14} />
-					{t("add")}
-				</Button>
-			</div>
-
-			{rules.items.length === 0 ? (
-				<p className="rounded-lg border border-border border-dashed px-4 py-6 text-center text-body-sm text-foreground-muted">
-					{t("empty")}
-				</p>
-			) : (
-				<EntryCardShell>
-					<ul className="divide-y divide-border">
-						{rules.items.map((rule) => (
-							<RuleRow
-								key={rule.id}
-								matchKindLabel={matchKindLabel}
-								modeOptions={modeOptions}
-								onDelete={() =>
-									patchSettingsSection("rules", {
-										items: removeRule(rules.items, rule.id),
-									})
-								}
-								onEdit={() => openEdit(rule)}
-								onModeChange={(mode) =>
-									patchSettingsSection("rules", {
-										items: updateRule(rules.items, rule.id, { mode }),
-									})
-								}
-								rule={rule}
-							/>
-						))}
-					</ul>
-				</EntryCardShell>
-			)}
+				{rules.items.length === 0 ? (
+					<p className="px-4 py-6 text-center text-body-sm text-foreground-muted">
+						{t("empty")}
+					</p>
+				) : (
+					<EntryCardShell bare>
+						<ul className="divide-y divide-border">
+							{rules.items.map((rule) => (
+								<RuleRow
+									key={rule.id}
+									matchKindLabel={matchKindLabel}
+									modeOptions={modeOptions}
+									onDelete={() =>
+										patchSettingsSection("rules", {
+											items: removeRule(rules.items, rule.id),
+										})
+									}
+									onEdit={() => openEdit(rule)}
+									onModeChange={(mode) =>
+										patchSettingsSection("rules", {
+											items: updateRule(rules.items, rule.id, { mode }),
+										})
+									}
+									rule={rule}
+								/>
+							))}
+						</ul>
+					</EntryCardShell>
+				)}
+			</SettingSection>
 
 			<RuleDialog
 				editing={editingRule !== null}

@@ -3,6 +3,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import { domAnimation, LazyMotion } from "motion/react";
 import type { ReactNode } from "react";
 import type { FocusAnchorEvent } from "@/bindings";
+import { appSettingsSchema } from "@/shared/config/settings-schema";
 import { FocusBlurShade } from "./FocusBlurShade";
 
 /**
@@ -85,6 +86,12 @@ describe("FocusBlurShade", () => {
 			invoke: (command) => {
 				if (command === "focus_blur_anchor_snapshot") {
 					return Promise.resolve(null);
+				}
+				if (command === "settings_load_snapshot") {
+					return Promise.resolve({
+						revision: 0,
+						settings: appSettingsSchema.parse({}),
+					});
 				}
 				return Promise.reject(new Error(`unhandled test command: ${command}`));
 			},

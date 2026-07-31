@@ -207,6 +207,14 @@ export function useKeyRecorder({
 			window.removeEventListener("keydown", onKeyDown, { capture: true });
 			window.removeEventListener("keyup", onKeyUp, { capture: true });
 			window.removeEventListener("blur", onBlur);
+			// Leaving the owning view is a cancellation too. In particular, the
+			// HotkeyRecorder suspends its live global binding at capture start; it
+			// must receive this final signal so it can restore that binding instead
+			// of leaving the shortcut disarmed for the rest of the process lifetime.
+			if (refs.recordingRef.current) {
+				refs.recordingRef.current = false;
+				refs.onRecordingChangeRef.current?.(false, null);
+			}
 		};
 	}, []);
 

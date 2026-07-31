@@ -27,10 +27,10 @@ describe("compareHotkeys", () => {
 });
 
 describe("isHotkeyConflict", () => {
-	it("flags every non-disjoint relation", () => {
+	it("flags equal chords but permits distinct subset/superset chords", () => {
 		expect(isHotkeyConflict("equal")).toBe(true);
-		expect(isHotkeyConflict("subset")).toBe(true);
-		expect(isHotkeyConflict("superset")).toBe(true);
+		expect(isHotkeyConflict("subset")).toBe(false);
+		expect(isHotkeyConflict("superset")).toBe(false);
 		expect(isHotkeyConflict("disjoint")).toBe(false);
 	});
 });

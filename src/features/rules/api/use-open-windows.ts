@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { commands, type OpenWindow } from "@/bindings";
-import { commandOrDefault, hasNativeRuntime } from "@/shared/api";
+import { hasNativeRuntime } from "@/shared/api";
 
 /**
  * Loads the running top-level windows from the `rules_list_windows` IPC command
@@ -9,6 +9,7 @@ import { commandOrDefault, hasNativeRuntime } from "@/shared/api";
  * exposes a manual refresh.
  */
 export interface UseOpenWindows {
+	error: string | null;
 	windows: OpenWindow[];
 	loading: boolean;
 	refresh: () => void;
@@ -20,24 +21,35 @@ export function useOpenWindows(active: boolean): UseOpenWindows {
 	const [windows, setWindows] = useState<OpenWindow[]>(EMPTY);
 	const [reloadToken, setReloadToken] = useState(0);
 	const [loadedToken, setLoadedToken] = useState(-1);
+	const [failure, setFailure] = useState<{
+		message: string;
+		token: number;
+	} | null>(null);
+	const native = hasNativeRuntime();
 
 	const refresh = useCallback(() => {
 		setReloadToken((token) => token + 1);
 	}, []);
 
 	useEffect(() => {
-		if (!(active && hasNativeRuntime())) {
+		if (!(active && native)) {
 			return;
 		}
 		let disposed = false;
-		void commandOrDefault(
-			"rules_list_windows",
-			() => commands.rulesListWindows(),
-			EMPTY,
-		)
+		void commands
+			.rulesListWindows()
 			.then((list) => {
 				if (!disposed) {
 					setWindows(list);
+					setFailure(null);
+				}
+			})
+			.catch((error: unknown) => {
+				if (!disposed) {
+					setFailure({
+						message: error instanceof Error ? error.message : String(error),
+						token: reloadToken,
+					});
 				}
 			})
 			.finally(() => {
@@ -48,11 +60,12 @@ export function useOpenWindows(active: boolean): UseOpenWindows {
 		return () => {
 			disposed = true;
 		};
-	}, [active, reloadToken]);
+	}, [active, native, reloadToken]);
 
 	// Derived (no synchronous setState in the effect body): a fetch is in flight
 	// whenever the dialog is open and the latest reload hasn't resolved yet.
-	const loading = active && loadedToken !== reloadToken;
+	const loading = active && native && loadedToken !== reloadToken;
+	const error = failure?.token === reloadToken ? failure.message : null;
 
-	return { windows, loading, refresh };
+	return { error, windows, loading, refresh };
 }

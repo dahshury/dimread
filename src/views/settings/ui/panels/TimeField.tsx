@@ -24,8 +24,9 @@ export function TimeField({
 
 	return (
 		<div className="flex items-center gap-1.5">
-			<div aria-label={ariaHourLabel}>
+			<div aria-label={ariaHourLabel} role="group">
 				<NumberStepper
+					ariaLabel={ariaHourLabel}
 					max={23}
 					min={0}
 					onChange={(next) => onChange(formatHm(next, minutes))}
@@ -35,8 +36,9 @@ export function TimeField({
 			<span aria-hidden="true" className="font-mono text-foreground-muted">
 				:
 			</span>
-			<div aria-label={ariaMinuteLabel}>
+			<div aria-label={ariaMinuteLabel} role="group">
 				<NumberStepper
+					ariaLabel={ariaMinuteLabel}
 					max={59}
 					min={0}
 					onChange={(next) => onChange(formatHm(hours, next))}

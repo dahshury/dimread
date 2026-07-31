@@ -23,13 +23,12 @@ mod app_exit;
 mod bootstrap;
 mod commands_registry;
 mod crash;
+pub mod diagnostics;
 pub mod display;
-pub mod downloads;
 pub mod events;
 pub mod focus;
 pub mod hotkeys;
 pub mod magicx;
-pub mod overlay;
 pub mod portable;
 pub mod rules;
 pub mod session_guard;
@@ -88,8 +87,6 @@ pub fn run() {
             if let Some(policy) = stale_session.as_ref().and_then(|s| s.taskbar_accent) {
                 magicx::theme::recover_taskbar_accent(policy);
             }
-
-            app_handle.manage(downloads::manager::DownloadManager::default());
 
             // Create the app window eagerly, from its `WINDOW_SPECS` entry, so
             // the one window roster stays in one place. `ensure_window` also

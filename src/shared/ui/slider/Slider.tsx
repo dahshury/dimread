@@ -1,6 +1,11 @@
 import { Slider as BaseSlider } from "@base-ui/react/slider";
 import { cn } from "@/shared/lib/cn";
-import { surfaceBg, surfaceShadow, useSurface } from "@/shared/lib/surface";
+import {
+	surfaceBg,
+	surfaceColorVar,
+	surfaceShadow,
+	useSurface,
+} from "@/shared/lib/surface";
 import { SliderHashMarks } from "./SliderHashMarks";
 
 type SliderVariant = "brightness" | "temperature";
@@ -79,6 +84,7 @@ export function Slider({
 	const trackLevel = Math.min(substrate + 1, 8);
 	const valueLevel = Math.min(substrate + 2, 8);
 	const trackBgClass = surfaceBg(trackLevel);
+	const trackColor = surfaceColorVar(trackLevel);
 	const valueBgClass = surfaceBg(valueLevel);
 	const valueShadowClass = surfaceShadow(valueLevel);
 	const displayValue = formatValue
@@ -92,6 +98,26 @@ export function Slider({
 		discreteSteps <= 10 ? Math.max(0, Math.round(discreteSteps) - 1) : 9;
 	const hashMarkPct = (i: number) =>
 		discreteSteps <= 10 ? (((i + 1) * step) / range) * 100 : (i + 1) * 10;
+
+	// The spectrum spans the whole track and a neutral rail covers the unfilled
+	// (right) portion, so only the value's colour shows — keeping the "fill grows
+	// from the left" reading of the neutral variant while the fill itself carries
+	// the warm→cool / dim→bright meaning.
+	//
+	// Both live as background LAYERS on the track rather than as an overlaid
+	// child: a square-cornered child clipped by the track's `overflow-hidden
+	// rounded-lg` leaves an antialiasing hairline in each right-hand corner,
+	// where the bright end of the spectrum bleeds past the rail. Layers are
+	// composited before the border-radius clip, so the corners resolve to the
+	// rail's flat colour and no seam can form.
+	const variantTrackStyle = variant
+		? {
+				backgroundImage: `linear-gradient(${trackColor}, ${trackColor}), ${TRACK_GRADIENT[variant]}`,
+				backgroundPosition: "right center, left center",
+				backgroundRepeat: "no-repeat",
+				backgroundSize: `${100 - pct}% 100%, 100% 100%`,
+			}
+		: undefined;
 
 	return (
 		<BaseSlider.Root
@@ -118,24 +144,12 @@ export function Slider({
 				<BaseSlider.Track
 					className={cn(
 						"relative h-full overflow-hidden rounded-lg shadow-elevated ring-1 ring-divider",
-						variant ? null : trackBgClass,
+						trackBgClass,
 					)}
 					data-slot="elastic-slider-track"
-					style={variant ? { background: TRACK_GRADIENT[variant] } : undefined}
+					style={variantTrackStyle}
 				>
-					{variant ? (
-						// The spectrum spans the whole track; this neutral rail masks the
-						// unfilled (right) portion so only the value's colour shows —
-						// keeping the "fill grows from the left" reading of the neutral
-						// variant while the fill itself carries the warm→cool / dim→bright
-						// meaning.
-						<div
-							aria-hidden="true"
-							className={cn("absolute inset-y-0 right-0", trackBgClass)}
-							data-slot="elastic-slider-mask"
-							style={{ left: `${pct}%` }}
-						/>
-					) : (
+					{variant ? null : (
 						<BaseSlider.Indicator
 							className={cn(
 								// Round only the LEFT corners (to sit flush in the track's rounded

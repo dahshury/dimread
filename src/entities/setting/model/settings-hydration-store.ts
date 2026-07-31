@@ -9,6 +9,8 @@ export type SettingsHydrationStatus =
 
 interface SettingsHydrationState {
 	error: string | null;
+	retry: () => void;
+	retryToken: number;
 	/**
 	 * Backend snapshot revision the renderer last observed. Saves send this
 	 * back for optimistic concurrency; a stale revision is rejected by the
@@ -24,6 +26,8 @@ export const useSettingsHydrationStore = create<SettingsHydrationState>(
 	(set) => ({
 		error: null,
 		revision: 0,
+		retry: () => set((state) => ({ retryToken: state.retryToken + 1 })),
+		retryToken: 0,
 		setRevision: (revision) => set({ revision }),
 		setStatus: (status, error = null) => set({ error, status }),
 		status: "idle",

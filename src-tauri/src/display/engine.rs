@@ -66,6 +66,14 @@ pub struct DisplayOutput {
     pub brightness: u32,
     pub mode: String,
     pub phase: String,
+    /// Where the day/night ramp currently sits: `1.0` = full day, `0.0` = full
+    /// night, in between = the applied output is `lerp(night, day, factor)`.
+    ///
+    /// Surfaced alongside [`Self::phase`] because "transition" alone does not
+    /// say WHICH endpoint an edit should land on. A renderer that guesses gets
+    /// it wrong for half the ramp and presents a slider that cannot move the
+    /// screen — see `scheduler::current_edit_phase`.
+    pub factor: f32,
     /// True only when Reading mode's compositor-wide grayscale matrix was
     /// successfully installed. Other Reading-mode adjustments may still be
     /// active when this is false.
@@ -79,6 +87,7 @@ impl Default for DisplayOutput {
             brightness: 100,
             mode: "pause".into(),
             phase: "day".into(),
+            factor: 1.0,
             grayscale_applied: false,
         }
     }
@@ -451,14 +460,20 @@ pub fn refresh() {
     }
     with_state(|state| {
         let phase = scheduler::current_phase();
+        let ramp = scheduler::day_factor();
         // A live preview owns the gamma output until it is cleared, but the
-        // renderer must still hear a real schedule-boundary phase change. That
-        // lets an implicit transition preview end at sunrise/sunset instead of
-        // pinning the selected endpoint forever.
+        // renderer must still hear the schedule move underneath it. That lets an
+        // implicit transition preview end at sunrise/sunset instead of pinning
+        // the selected endpoint forever — and lets a surface holding a slider
+        // notice the ramp crossing the point where the OTHER endpoint takes over
+        // as the one worth editing.
         if state.previewing {
             let phase = phase.as_str();
-            if state.last.phase != phase {
+            let moved =
+                state.last.phase != phase || (state.last.factor - ramp).abs() > f32::EPSILON;
+            if moved {
                 state.last.phase = phase.to_string();
+                state.last.factor = ramp;
                 emit_state(&state.app, &state.last);
             }
             return;
@@ -470,7 +485,7 @@ pub fn refresh() {
             .clone()
             .unwrap_or_else(|| display.mode.clone());
 
-        let factor = scheduler::day_factor() as f64;
+        let factor = f64::from(ramp);
         let monitors = monitors::enumerate();
 
         let preset = preset_for(&settings, &mode);
@@ -487,6 +502,7 @@ pub fn refresh() {
                 brightness: base_brightness.round() as u32,
                 mode,
                 phase: phase.as_str().to_string(),
+                factor: ramp,
                 grayscale_applied: false,
             };
             state.last = out.clone();
@@ -503,6 +519,7 @@ pub fn refresh() {
                 brightness: base_brightness.round() as u32,
                 mode,
                 phase: phase.as_str().to_string(),
+                factor: ramp,
                 grayscale_applied: false,
             };
             state.last = out.clone();
@@ -578,6 +595,7 @@ pub fn refresh() {
             brightness: base_brightness.round() as u32,
             mode,
             phase: phase.as_str().to_string(),
+            factor: ramp,
             grayscale_applied,
         };
         state.last = out.clone();
@@ -709,6 +727,7 @@ pub fn preview(
             brightness: (reported_brightness * 100.0).round() as u32,
             mode: state.last.mode.clone(),
             phase: state.last.phase.clone(),
+            factor: state.last.factor,
             grayscale_applied: false,
         };
         state.last = out.clone();

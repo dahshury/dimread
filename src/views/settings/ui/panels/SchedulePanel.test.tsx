@@ -1,6 +1,14 @@
-import { beforeEach, describe, expect, test } from "bun:test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+	act,
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	waitFor,
+} from "@testing-library/react";
 import { IntlProvider } from "@/app/providers/IntlProvider";
+import { commands } from "@/bindings";
 import { getSettingsStoreState, useSettingsStore } from "@/entities/setting";
 import { SchedulePanel } from "./SchedulePanel";
 
@@ -15,6 +23,8 @@ function renderPanel() {
 const segment = (name: string) => screen.getByRole("button", { name });
 const dayNight = () => useSettingsStore.getState().settings.dayNight;
 const autoDark = () => useSettingsStore.getState().settings.autoDark;
+const listTimezones = commands.daynightListTimezones;
+const locationStatus = commands.daynightLocationStatus;
 
 describe("SchedulePanel", () => {
 	beforeEach(() => {
@@ -37,10 +47,82 @@ describe("SchedulePanel", () => {
 		});
 	});
 
+	afterEach(() => {
+		cleanup();
+		commands.daynightListTimezones = listTimezones;
+		commands.daynightLocationStatus = locationStatus;
+		(
+			window as unknown as { __TAURI_INTERNALS__?: unknown }
+		).__TAURI_INTERNALS__ = undefined;
+	});
+
 	test("renders the custom sun-time inputs when not location-based", () => {
 		renderPanel();
 		expect(screen.getByText("Sunrise")).toBeDefined();
 		expect(screen.getByText("Sunset")).toBeDefined();
+		expect(screen.getByRole("group", { name: "Sunrise hours" })).toBeDefined();
+		expect(
+			screen.getByRole("group", { name: "Sunrise minutes" }),
+		).toBeDefined();
+		expect(screen.getByRole("group", { name: "Sunset hours" })).toBeDefined();
+		expect(screen.getByRole("group", { name: "Sunset minutes" })).toBeDefined();
+	});
+
+	test("explains same-day, overnight, and equal-boundary schedules", () => {
+		const { rerender } = renderPanel();
+		expect(screen.getByText("Day runs from sunrise to sunset.")).toBeDefined();
+
+		act(() => {
+			useSettingsStore.getState().updateDayNightSettings({
+				sunrise: "19:00",
+				sunset: "07:00",
+			});
+		});
+		rerender(
+			<IntlProvider>
+				<SchedulePanel />
+			</IntlProvider>,
+		);
+		expect(
+			screen.getByText(
+				"Sunrise is later than sunset, so the day period continues through midnight.",
+			),
+		).toBeDefined();
+
+		act(() => {
+			useSettingsStore.getState().updateDayNightSettings({ sunset: "19:00" });
+		});
+		rerender(
+			<IntlProvider>
+				<SchedulePanel />
+			</IntlProvider>,
+		);
+		expect(
+			screen.getByText(
+				"Matching sunrise and sunset means the schedule stays in night mode all day.",
+			),
+		).toBeDefined();
+	});
+
+	test("commits fractional transition input as an integer", () => {
+		renderPanel();
+		const transition = screen.getAllByRole("textbox").at(-1);
+		expect(transition).toBeDefined();
+		fireEvent.change(transition!, { target: { value: "12.75" } });
+		fireEvent.blur(transition!);
+		expect(dayNight().transitionMinutes).toBe(12);
+	});
+
+	test("steps transition buttons in 15-minute increments", () => {
+		renderPanel();
+		const transition = screen.getAllByRole("textbox").at(-1);
+		const increment = transition?.parentElement
+			?.querySelectorAll("button")
+			.item(1);
+		expect(increment).toBeDefined();
+		fireEvent.pointerDown(increment!);
+		fireEvent.pointerUp(increment!);
+		expect(dayNight().transitionMinutes).toBe(75);
 	});
 
 	test("automatic asks for nothing — no coordinates, no timezone picker", () => {
@@ -73,6 +155,64 @@ describe("SchedulePanel", () => {
 			locationSource: "timezone",
 			useLocation: true,
 		});
+	});
+
+	test("surfaces a timezone load error and retries", async () => {
+		let calls = 0;
+		commands.daynightListTimezones = () => {
+			calls += 1;
+			return calls === 1
+				? Promise.reject(new Error("IPC unavailable"))
+				: Promise.resolve([]);
+		};
+		commands.daynightLocationStatus = () => new Promise(() => undefined);
+		(
+			window as unknown as { __TAURI_INTERNALS__?: unknown }
+		).__TAURI_INTERNALS__ = {};
+		useSettingsStore.getState().updateDayNightSettings({
+			locationSource: "timezone",
+			useLocation: true,
+		});
+
+		renderPanel();
+		const error = await screen.findByText("Timezones could not be loaded.");
+		expect(error.closest('[role="alert"]')).not.toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+		await waitFor(() => expect(calls).toBe(2));
+		await waitFor(() =>
+			expect(screen.queryByText("Timezones could not be loaded.")).toBeNull(),
+		);
+	});
+
+	test("surfaces a location load error and retries", async () => {
+		let calls = 0;
+		commands.daynightListTimezones = () => Promise.resolve([]);
+		commands.daynightLocationStatus = () => {
+			calls += 1;
+			return calls === 1
+				? Promise.reject(new Error("IPC unavailable"))
+				: new Promise(() => undefined);
+		};
+		(
+			window as unknown as { __TAURI_INTERNALS__?: unknown }
+		).__TAURI_INTERNALS__ = {};
+		useSettingsStore.getState().updateDayNightSettings({
+			locationSource: "auto",
+			useLocation: true,
+		});
+
+		renderPanel();
+		const error = await screen.findByText(
+			"Location and sun times could not be loaded.",
+		);
+		expect(error.closest('[role="alert"]')).not.toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+		await waitFor(() => expect(calls).toBe(2));
+		await waitFor(() =>
+			expect(
+				screen.queryByText("Location and sun times could not be loaded."),
+			).toBeNull(),
+		);
 	});
 
 	test("the coordinates method swaps in latitude/longitude", () => {

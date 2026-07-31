@@ -14,6 +14,7 @@
 
 pub mod commands;
 pub mod store;
+pub mod transfer;
 
 use std::collections::HashMap;
 
@@ -45,6 +46,9 @@ impl Default for AppearanceSettings {
 pub struct GeneralSettings {
     /// Launch the app at login (wired to tauri-plugin-autostart on save).
     pub autostart: bool,
+    /// Allow privacy-scrubbed anonymous diagnostics when a reporting transport
+    /// is configured.
+    pub anonymous_reports: bool,
     /// Closing the app window hides to the tray instead of quitting.
     pub minimize_to_tray: bool,
 }
@@ -59,22 +63,9 @@ impl Default for GeneralSettings {
         // X button quit the app.
         Self {
             autostart: false,
+            anonymous_reports: false,
             minimize_to_tray: true,
         }
-    }
-}
-
-/// Downloads section — download-manager tuning.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase", default)]
-pub struct DownloadsSettings {
-    /// Parallel download worker count, clamped to `1..=4`.
-    pub concurrency: u32,
-}
-
-impl Default for DownloadsSettings {
-    fn default() -> Self {
-        Self { concurrency: 2 }
     }
 }
 
@@ -465,7 +456,6 @@ impl Default for AutoDarkSettings {
 pub struct AppSettings {
     pub appearance: AppearanceSettings,
     pub general: GeneralSettings,
-    pub downloads: DownloadsSettings,
     pub hotkeys: HotkeysSettings,
     pub display: DisplaySettings,
     pub day_night: DayNightSettings,
@@ -486,7 +476,6 @@ pub struct PartialSettings {
     #[specta(optional)]
     pub general: Option<GeneralSettings>,
     #[specta(optional)]
-    pub downloads: Option<DownloadsSettings>,
     #[specta(optional)]
     pub hotkeys: Option<HotkeysSettings>,
     #[specta(optional)]
@@ -508,7 +497,9 @@ pub struct PartialSettings {
 /// Clamp cross-field invariants after every read/merge so out-of-range
 /// persisted values can never leak into consumers.
 pub(crate) fn normalize_settings(settings: &mut AppSettings) {
-    settings.downloads.concurrency = settings.downloads.concurrency.clamp(1, 4);
+    if settings.appearance.locale != "en" {
+        settings.appearance.locale = "en".to_string();
+    }
     // Hotkeys are stored trimmed so "  " can never masquerade as a binding
     // (the registrar treats empty as "unbound").
     fn trim_in_place(field: &mut String) {
@@ -538,6 +529,35 @@ pub(crate) fn normalize_settings(settings: &mut AppSettings) {
     settings.focus_read.transparency = settings.focus_read.transparency.min(100);
     settings.focus_read.height = settings.focus_read.height.clamp(20, 4000);
     settings.focus_blur.transparency = settings.focus_blur.transparency.min(100);
+    if !DISPLAY_MODE_IDS.contains(&settings.display.mode.as_str()) {
+        settings.display.mode = "pause".to_string();
+    }
+    for (id, preset) in default_modes() {
+        settings.display.modes.entry(id).or_insert(preset);
+    }
+    let kelvin_max = if settings.display.wide_range {
+        10_000
+    } else {
+        6_500
+    };
+    let brightness_min = if settings.display.brightness_wide_range {
+        0
+    } else {
+        10
+    };
+    for preset in settings.display.modes.values_mut() {
+        preset.kelvin_day = preset.kelvin_day.clamp(1_000, kelvin_max);
+        preset.kelvin_night = preset.kelvin_night.clamp(1_000, kelvin_max);
+        preset.brightness_day = preset.brightness_day.clamp(brightness_min, 100);
+        preset.brightness_night = preset.brightness_night.clamp(brightness_min, 100);
+    }
+    for override_values in settings.display.monitor_overrides.values_mut() {
+        override_values.kelvin_day = override_values.kelvin_day.clamp(1_000, kelvin_max);
+        override_values.kelvin_night = override_values.kelvin_night.clamp(1_000, kelvin_max);
+        override_values.brightness_day = override_values.brightness_day.clamp(brightness_min, 100);
+        override_values.brightness_night =
+            override_values.brightness_night.clamp(brightness_min, 100);
+    }
     // An unrecognised location source must not silently mean "manual" — that is
     // how a settings file from a newer build would end up scheduling 0°, 0° sun
     // times. Unknown falls back to the source that needs no stored input.
@@ -547,6 +567,51 @@ pub(crate) fn normalize_settings(settings: &mut AppSettings) {
     settings.day_night.timezone = settings.day_night.timezone.trim().to_string();
     settings.day_night.latitude = settings.day_night.latitude.clamp(-90.0, 90.0);
     settings.day_night.longitude = settings.day_night.longitude.clamp(-180.0, 180.0);
+    settings.day_night.transition_minutes = settings.day_night.transition_minutes.min(240);
+    normalize_hhmm(&mut settings.day_night.sunrise, "07:00");
+    normalize_hhmm(&mut settings.day_night.sunset, "19:00");
+
+    for rule in &mut settings.rules.items {
+        if !["process", "class", "title"].contains(&rule.match_kind.as_str()) {
+            rule.match_kind = "process".to_string();
+        }
+        if !DISPLAY_MODE_IDS.contains(&rule.mode.as_str()) {
+            rule.mode = "pause".to_string();
+        }
+        rule.pattern = rule.pattern.trim().to_string();
+    }
+
+    if !["center", "left", "right"].contains(&settings.magicx.toolbar_align.as_str()) {
+        settings.magicx.toolbar_align = "center".to_string();
+    }
+    settings.magicx.toolbar_offset = settings.magicx.toolbar_offset.clamp(-200, 200);
+    settings.magicx.toolbar_delay_ms = settings.magicx.toolbar_delay_ms.min(2_000);
+
+    if !["light", "dark", "auto", "disable"].contains(&settings.auto_dark.system_theme.as_str()) {
+        settings.auto_dark.system_theme = "disable".to_string();
+    }
+    normalize_hhmm(&mut settings.auto_dark.system_sunrise, "07:00");
+    normalize_hhmm(&mut settings.auto_dark.system_sunset, "19:00");
+}
+
+fn normalize_hhmm(value: &mut String, fallback: &str) {
+    let trimmed = value.trim();
+    let bytes = trimmed.as_bytes();
+    let valid = bytes.len() == 5
+        && bytes[2] == b':'
+        && bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && bytes[3].is_ascii_digit()
+        && bytes[4].is_ascii_digit()
+        && trimmed[..2].parse::<u8>().is_ok_and(|hour| hour <= 23)
+        && trimmed[3..].parse::<u8>().is_ok_and(|minute| minute <= 59);
+    if valid {
+        if trimmed.len() != value.len() {
+            *value = trimmed.to_string();
+        }
+    } else {
+        *value = fallback.to_string();
+    }
 }
 
 /// Adopt coordinates a PRE-`location_source` settings file stored.
@@ -588,9 +653,6 @@ pub(crate) fn merge_patch(current: &AppSettings, patch: PartialSettings) -> AppS
     }
     if let Some(general) = patch.general {
         next.general = general;
-    }
-    if let Some(downloads) = patch.downloads {
-        next.downloads = downloads;
     }
     if let Some(hotkeys) = patch.hotkeys {
         next.hotkeys = hotkeys;
@@ -644,7 +706,6 @@ mod tests {
         let settings = AppSettings::default();
         assert_eq!(settings.appearance.locale, "en");
         assert!(!settings.general.autostart);
-        assert_eq!(settings.downloads.concurrency, 2);
     }
 
     #[test]
@@ -655,6 +716,7 @@ mod tests {
             PartialSettings {
                 general: Some(GeneralSettings {
                     autostart: true,
+                    anonymous_reports: false,
                     minimize_to_tray: true,
                 }),
                 ..Default::default()
@@ -662,28 +724,6 @@ mod tests {
         );
         assert!(next.general.autostart);
         assert_eq!(next.appearance, current.appearance);
-        assert_eq!(next.downloads, current.downloads);
-    }
-
-    #[test]
-    fn merge_patch_clamps_concurrency() {
-        let next = merge_patch(
-            &AppSettings::default(),
-            PartialSettings {
-                downloads: Some(DownloadsSettings { concurrency: 99 }),
-                ..Default::default()
-            },
-        );
-        assert_eq!(next.downloads.concurrency, 4);
-
-        let next = merge_patch(
-            &AppSettings::default(),
-            PartialSettings {
-                downloads: Some(DownloadsSettings { concurrency: 0 }),
-                ..Default::default()
-            },
-        );
-        assert_eq!(next.downloads.concurrency, 1);
     }
 
     #[test]
@@ -868,12 +908,100 @@ mod tests {
     }
 
     #[test]
+    fn normalize_clamps_every_display_endpoint_to_the_active_ranges() {
+        let mut settings = AppSettings::default();
+        settings.display.wide_range = true;
+        settings.display.brightness_wide_range = false;
+        settings.display.modes.insert(
+            "imported".to_string(),
+            ModePreset {
+                kelvin_day: 0,
+                kelvin_night: 20_000,
+                brightness_day: 0,
+                brightness_night: 500,
+            },
+        );
+        settings.display.monitor_overrides.insert(
+            "monitor".to_string(),
+            MonitorOverride {
+                kelvin_day: 999,
+                kelvin_night: 10_001,
+                brightness_day: 9,
+                brightness_night: 101,
+            },
+        );
+
+        normalize_settings(&mut settings);
+
+        assert_eq!(
+            settings.display.modes["imported"],
+            ModePreset {
+                kelvin_day: 1_000,
+                kelvin_night: 10_000,
+                brightness_day: 10,
+                brightness_night: 100,
+            }
+        );
+        assert_eq!(
+            settings.display.monitor_overrides["monitor"],
+            MonitorOverride {
+                kelvin_day: 1_000,
+                kelvin_night: 10_000,
+                brightness_day: 10,
+                brightness_night: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_repairs_ui_constrained_enums_ranges_and_times() {
+        let mut settings = AppSettings::default();
+        settings.appearance.locale = "unknown".to_string();
+        settings.display.mode = "future-mode".to_string();
+        settings.day_night.transition_minutes = 999;
+        settings.day_night.sunrise = "25:61".to_string();
+        settings.rules.items.push(Rule {
+            id: "rule".to_string(),
+            match_kind: "future-kind".to_string(),
+            pattern: "  app.exe  ".to_string(),
+            mode: "future-mode".to_string(),
+        });
+        settings.magicx.toolbar_align = "top".to_string();
+        settings.magicx.toolbar_offset = 999;
+        settings.magicx.toolbar_delay_ms = 9_999;
+        settings.auto_dark.system_theme = "sepia".to_string();
+        settings.auto_dark.system_sunset = " 18:30 ".to_string();
+
+        normalize_settings(&mut settings);
+
+        assert_eq!(
+            (
+                settings.appearance.locale.as_str(),
+                settings.display.mode.as_str(),
+                settings.day_night.transition_minutes,
+                settings.day_night.sunrise.as_str(),
+                settings.rules.items[0].match_kind.as_str(),
+                settings.rules.items[0].pattern.as_str(),
+                settings.rules.items[0].mode.as_str(),
+                settings.magicx.toolbar_align.as_str(),
+                settings.magicx.toolbar_offset,
+                settings.magicx.toolbar_delay_ms,
+                settings.auto_dark.system_theme.as_str(),
+                settings.auto_dark.system_sunset.as_str(),
+            ),
+            (
+                "en", "pause", 240, "07:00", "process", "app.exe", "pause", "center", 200, 2_000,
+                "disable", "18:30",
+            )
+        );
+    }
+
+    #[test]
     fn missing_fields_default_on_parse() {
         let settings: AppSettings =
             serde_json::from_value(serde_json::json!({ "general": { "autostart": true } }))
                 .unwrap();
         assert!(settings.general.autostart);
         assert_eq!(settings.appearance.locale, "en");
-        assert_eq!(settings.downloads.concurrency, 2);
     }
 }

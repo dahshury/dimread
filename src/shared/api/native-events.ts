@@ -10,6 +10,8 @@ export const NATIVE_EVENTS = {
 	OVERLAY_NOTIFY: "overlay:notify",
 	/** Early dismiss: the overlay renderer plays its exit animation now. */
 	OVERLAY_DISMISS: "overlay:dismiss",
+	/** One native log record forwarded while the About viewer is enabled. */
+	DIAGNOSTICS_LOG_LINE: "diagnostics:log-line",
 	/** Physical displays changed; payload is the freshly reconciled monitor list. */
 	DISPLAY_TOPOLOGY: "display:topology",
 	/**

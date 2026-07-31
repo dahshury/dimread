@@ -57,12 +57,15 @@ describe("findConflict", () => {
 	];
 
 	it("returns the first colliding entry", () => {
-		expect(findConflict("Ctrl+V", forbidden)?.label).toBe("Paste special");
+		expect(findConflict("shift+ctrl+v", forbidden)?.label).toBe(
+			"Paste special",
+		);
 		expect(findConflict("Alt+F4", forbidden)?.label).toBe("Quit");
 	});
 
-	it("returns null for disjoint combos or no list", () => {
+	it("returns null for distinct, subset, or absent combos", () => {
 		expect(findConflict("Ctrl+K", forbidden)).toBeNull();
+		expect(findConflict("Ctrl+V", forbidden)).toBeNull();
 		expect(findConflict("Ctrl+V", undefined)).toBeNull();
 		expect(findConflict("Ctrl+V", [])).toBeNull();
 	});

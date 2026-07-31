@@ -21,13 +21,10 @@ export const appearanceSettingsSchema = z.object({
 export const generalSettingsSchema = z.object({
 	/** Launch the app when the user logs in. */
 	autostart: z.boolean().catch(false).default(false),
+	/** Opt-in permission for anonymous crash/operational diagnostics. */
+	anonymousReports: z.boolean().catch(false).default(false),
 	/** Keep running in the tray when the app window closes. */
 	minimizeToTray: z.boolean().catch(true).default(true),
-});
-
-export const downloadsSettingsSchema = z.object({
-	/** Parallel download workers (1..4). */
-	concurrency: z.number().int().min(1).max(4).catch(2).default(2),
 });
 
 /** A single global accelerator field (Tauri token format, "" = unbound). */
@@ -330,9 +327,6 @@ export const appSettingsSchema = z.object({
 	general: generalSettingsSchema
 		.catch(() => generalSettingsSchema.parse({}))
 		.default(() => generalSettingsSchema.parse({})),
-	downloads: downloadsSettingsSchema
-		.catch(() => downloadsSettingsSchema.parse({}))
-		.default(() => downloadsSettingsSchema.parse({})),
 	hotkeys: hotkeysSettingsSchema
 		.catch(() => hotkeysSettingsSchema.parse({}))
 		.default(() => hotkeysSettingsSchema.parse({})),

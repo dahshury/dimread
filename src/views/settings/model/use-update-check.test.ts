@@ -36,7 +36,7 @@ const OK_CHECK = {
 	publishedAt: "2026-01-01T00:00:00Z",
 	releaseUrl: "https://example.test/releases/v0.1.0",
 	status: "updateAvailable",
-};
+} as const;
 
 /** `hasNativeRuntime()` is a pure read of this global — no module mock needed. */
 function setNativeRuntime(present: boolean): void {

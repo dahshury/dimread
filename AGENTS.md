@@ -4,13 +4,19 @@ Read this before changing code. It applies to human contributors and AI agents a
 
 ## What this project is
 
-A generic Tauri v2 + React 19 desktop-app starter template. It ships a design system
-(Tailwind v4 tokens + Base UI primitives), a multi-window app shell (the app window +
-detachable picker + gallery + a click-through notification overlay + the tray flyout),
-a settings pipeline with cross-window sync, a generic download manager, and
-settings-driven global hotkeys — extracted from WinSTT with all speech/AI domain logic
-removed.
-`TEMPLATE_SPEC.md` records the extraction contract; `NOTES-*.md` record build decisions.
+A Tauri v2 + React 19 screen-dimming app: a colour-temperature / brightness filter with
+a day-night schedule, per-app rules, window effects, and settings-driven global hotkeys.
+It began as a starter template extracted from WinSTT; **it is not a template any more.**
+
+That distinction is load-bearing. The template shipped a component gallery, a detachable
+picker window, a notification overlay and a download manager, none of which DimRead used
+— and the gallery imported the unused half of `shared/ui`, which made `bun run knip` see
+a consumer for every dead component and report a clean tree. All of it is gone. The rule
+now: **if nothing in the app reaches it, it does not live here.** Do not add a component,
+window, or backend module "for later", and do not add a showcase that imports code
+nothing else does — that is precisely the construct that hid ~24k dead lines.
+
+`NOTES-*.md` record build decisions.
 
 ### There is ONE top-level window
 
@@ -50,14 +56,11 @@ Imports must only point downward. `shared/` never imports from any other layer.
 
 `src-tauri/src/` is organized by infrastructure concern — keep it that way:
 
-- `windows/` — window roster (`WINDOW_SPECS`), placement, modal-child + picker-anchor logic
+- `windows/` — window roster (`WINDOW_SPECS`: `settings`, `focus-overlay`, `tray-menu`,
+  `magic-toolbar` — that is the whole roster), work-area geometry, centering
 - `settings/` — schema, atomic store, revision-checked save commands
-- `downloads/` — `transfer.rs` (generic streaming engine — treat as vendored; avoid editing),
-  `manager.rs` (worker pool), `commands.rs`
 - `hotkeys/` — global-shortcut registry (register/replace/unregister commands, settings-driven
   arming with hot-swap, the built-in `toggleMain` behavior, `hotkey:triggered` broadcast)
-- `overlay/` — the notification pill: `overlay_notify`/`overlay_dismiss`, top-center placement,
-  sequence-guarded hide timers (the `overlay` window itself lives in `WINDOW_SPECS`)
 - `tray_menu/` — the tray FLYOUT (the `tray-menu` window): tray-anchored placement,
   park-off-screen dismissal, blur-to-dismiss with a resize grace, `tray_menu_hide` /
   `tray_menu_resize`. There is deliberately no native tray menu — the flyout is a

@@ -34,6 +34,12 @@ import { useSettingsHydrationStore } from "./settings-hydration-store";
  */
 
 let saveChain: Promise<void> = Promise.resolve();
+let latestSave: Promise<void> = saveChain;
+
+/** Resolve after every save already queued by this renderer has settled. */
+export function waitForSettingsSaves(): Promise<void> {
+	return latestSave;
+}
 
 /** The section keys a built patch actually carries (non-null entries). */
 function sectionsInPatch(patch: PartialSettings): SettingsSectionKey[] {
@@ -42,9 +48,14 @@ function sectionsInPatch(patch: PartialSettings): SettingsSectionKey[] {
 	);
 }
 
-async function runSave(build: () => PartialSettings): Promise<void> {
-	if (!hasNativeRuntime()) {
+async function runSave(
+	build: () => PartialSettings,
+	useNativeRuntime: boolean,
+): Promise<void> {
+	if (!useNativeRuntime) {
 		// Browser preview: the localStorage-backed store is the only sink.
+		const patch = build();
+		settleSections(sectionsInPatch(patch), currentEditSeq());
 		return;
 	}
 	const maxAttempts = 2;
@@ -56,18 +67,16 @@ async function runSave(build: () => PartialSettings): Promise<void> {
 		const { revision } = useSettingsHydrationStore.getState();
 		const result = await commands.settingsSave(patch, revision);
 		if (result.status === "ok") {
-			// Advance the revision FIRST so the echo passes the adoption guard,
-			// settle the saved sections, then adopt the echo — the overlay keeps
-			// any section that was re-edited mid-save.
-			useSettingsHydrationStore.getState().setRevision(result.data.revision);
+			// The adopter is the ONLY revision writer. Pre-setting the response's
+			// revision can move a renderer backwards when a newer broadcast arrived
+			// while this command response was in flight.
 			settleSections(sectionsInPatch(patch), buildSeq);
 			adoptSettingsSnapshot(result.data);
 			return;
 		}
 		const conflict = result.error.includes("revision conflict");
 		if (!conflict || attempt === maxAttempts) {
-			console.error(`[settings] save failed: ${result.error}`);
-			return;
+			throw new Error(result.error);
 		}
 		// Another window advanced the revision under us. Re-read the
 		// authoritative tree (adoption overlays our pending sections), then
@@ -75,8 +84,9 @@ async function runSave(build: () => PartialSettings): Promise<void> {
 		try {
 			adoptSettingsSnapshot(await commands.settingsLoadSnapshot());
 		} catch (error) {
-			console.error("[settings] snapshot re-read failed:", error);
-			return;
+			throw new Error("Failed to refresh settings after a save conflict", {
+				cause: error,
+			});
 		}
 	}
 }
@@ -90,10 +100,24 @@ async function runSave(build: () => PartialSettings): Promise<void> {
 export function enqueueSettingsSave(
 	build: () => PartialSettings,
 ): Promise<void> {
-	saveChain = saveChain
-		.then(() => runSave(build))
-		.catch((error) => {
-			console.error("[settings] save error:", error);
-		});
-	return saveChain;
+	// Capture the execution surface when the edit is queued. Apart from making
+	// browser preview deterministic, this prevents a delayed save from being
+	// rerouted through a runtime bridge that appeared after the originating
+	// renderer made the edit.
+	const useNativeRuntime = hasNativeRuntime();
+	const queued = saveChain.then(() => runSave(build, useNativeRuntime));
+	latestSave = queued;
+	// Keep the internal tail recoverable so one failed disk write does not
+	// permanently poison every later retry. The caller still receives `queued`
+	// and therefore observes the rejection.
+	saveChain = queued.catch((error: unknown) => {
+		console.error("[settings] save error:", error);
+	});
+	return queued;
+}
+
+/** Test-only: reset the serialized coordinator after all test work settled. */
+export function resetSettingsSaverForTests(): void {
+	saveChain = Promise.resolve();
+	latestSave = saveChain;
 }

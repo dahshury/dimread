@@ -1,10 +1,7 @@
 export { commands, events } from "@/bindings";
 export type {
 	AppSettings,
-	DownloadPhase,
-	DownloadSnapshot,
 	PartialSettings,
-	PickerAnchorEvent,
 	Result,
 	SettingsSnapshot,
 } from "@/bindings";
@@ -26,7 +23,6 @@ export {
 	onTyped,
 } from "./native-boundary";
 export { NATIVE_EVENTS, type NativeEventName } from "./native-events";
-export { closePicker, openPickerAtRect } from "./picker-window";
 export {
 	subscribeNativeEvent,
 	subscribeNativeEventPair,

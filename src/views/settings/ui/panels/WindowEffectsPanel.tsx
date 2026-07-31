@@ -28,6 +28,13 @@ import { MagicWindowSection } from "./MagicWindowSection";
 const PREVIEW_BUTTON =
 	"h-9 min-w-[13rem] gap-1.5 rounded-lg bg-accent px-4 font-medium text-body text-on-accent shadow-elevated transition-colors hover:bg-accent-dim";
 
+function handleFocusReadPreview(): void {
+	if (!hasNativeRuntime()) {
+		return;
+	}
+	void commands.focusReadToggle().catch(() => undefined);
+}
+
 /** Native colour picker wrapped as a small template-styled swatch. */
 function ColorSwatch({
 	value,
@@ -85,13 +92,6 @@ export function WindowEffectsPanel() {
 	const readActive = useFocusReadActive();
 	const blurActive = useFocusBlurActive();
 
-	const handlePreview = () => {
-		if (!hasNativeRuntime()) {
-			return;
-		}
-		void commands.focusReadToggle().catch(() => undefined);
-	};
-
 	const handleBlurEnable = (next: boolean) => {
 		// Persist the preference (for the boot auto-start) and drive the running
 		// effect to match — `focus_blur_toggle` flips it, so only call it when the
@@ -103,13 +103,12 @@ export function WindowEffectsPanel() {
 	};
 
 	return (
-		<div className="mx-auto flex max-w-[520px] flex-col">
+		<div className="flex w-full flex-col">
 			<SettingSection
 				description={t("readCaption")}
-				divided
 				footer={
 					<div className="flex flex-col items-center gap-2 pt-2">
-						<Button className={PREVIEW_BUTTON} onClick={handlePreview}>
+						<Button className={PREVIEW_BUTTON} onClick={handleFocusReadPreview}>
 							{readActive ? t("stopPreview") : t("preview")}
 						</Button>
 						<span className="text-2xs text-foreground-dim uppercase tracking-[0.08em]">
@@ -122,7 +121,7 @@ export function WindowEffectsPanel() {
 			>
 				<FormControl label={t("readTransparency")}>
 					<Slider
-						aria-label={t("readTransparency")}
+						aria-label={t("readTransparencyAria")}
 						formatValue={(v) =>
 							t("readTransparencyValue", { percent: Math.round(v) })
 						}
@@ -154,6 +153,7 @@ export function WindowEffectsPanel() {
 					label={t("readHeight")}
 					labelAddon={
 						<NumberStepper
+							ariaLabel={t("readHeight")}
 							max={HEIGHT_MAX}
 							min={HEIGHT_MIN}
 							onChange={(v) =>
@@ -169,7 +169,6 @@ export function WindowEffectsPanel() {
 
 			<SettingSection
 				description={t("blurCaption")}
-				divided
 				icon={ComputerIcon}
 				title={t("subBlur")}
 			>
@@ -230,7 +229,7 @@ export function WindowEffectsPanel() {
 
 				<FormControl label={t("blurTransparency")}>
 					<Slider
-						aria-label={t("blurTransparency")}
+						aria-label={t("blurTransparencyAria")}
 						formatValue={(v) =>
 							t("blurTransparencyValue", { percent: Math.round(v) })
 						}

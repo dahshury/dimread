@@ -20,7 +20,7 @@ import { SystemThemeSection } from "./SystemThemeSection";
  */
 export function SchedulePanel() {
 	return (
-		<div className="mx-auto flex max-w-[560px] flex-col">
+		<div className="flex w-full flex-col">
 			<DayNightSection />
 			<SystemThemeSection />
 		</div>

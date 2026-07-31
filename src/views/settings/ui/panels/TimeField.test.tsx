@@ -16,8 +16,8 @@ describe("TimeField", () => {
 		expect(inputs.length).toBe(2);
 	});
 
-	test("exposes labelled hour/minute groups", () => {
-		const { getByLabelText } = render(
+	test("exposes distinctly labelled hour/minute control groups", () => {
+		const { getByRole } = render(
 			<TimeField
 				ariaHourLabel="Sunrise hours"
 				ariaMinuteLabel="Sunrise minutes"
@@ -25,7 +25,7 @@ describe("TimeField", () => {
 				value="07:30"
 			/>,
 		);
-		expect(getByLabelText("Sunrise hours")).toBeDefined();
-		expect(getByLabelText("Sunrise minutes")).toBeDefined();
+		expect(getByRole("group", { name: "Sunrise hours" })).toBeDefined();
+		expect(getByRole("group", { name: "Sunrise minutes" })).toBeDefined();
 	});
 });

@@ -1,18 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import type { DisplaySettings } from "@/bindings";
+import type { DisplayOutput, DisplaySettings } from "@/bindings";
 import {
 	ALL_MONITORS,
 	BRIGHTNESS_RANGE,
 	buildBrightnessPatch,
 	buildKelvinPatch,
 	buildMonitorEnabledPatch,
+	buildMonitorInheritPatch,
 	clampBrightness,
 	clampKelvin,
 	countEnabledMonitors,
 	defaultBrightnessFor,
 	defaultKelvinFor,
+	editPhaseFor,
 	isAllMonitors,
 	isMonitorEnabled,
+	isRampingPhase,
 	KELVIN_RANGE_DEFAULT,
 	KELVIN_RANGE_WIDE,
 	kelvinRange,
@@ -55,7 +58,7 @@ describe("kelvinRange / clampKelvin", () => {
 		expect(kelvinRange(false)).toEqual(KELVIN_RANGE_DEFAULT);
 	});
 
-	test("wide range is 0–10000 K", () => {
+	test("wide range is 1000–10000 K", () => {
 		expect(kelvinRange(true)).toEqual(KELVIN_RANGE_WIDE);
 	});
 
@@ -68,6 +71,7 @@ describe("kelvinRange / clampKelvin", () => {
 	test("clamps into the wide range", () => {
 		expect(clampKelvin(9000, true)).toBe(9000);
 		expect(clampKelvin(20_000, true)).toBe(10_000);
+		expect(clampKelvin(0, true)).toBe(1000);
 	});
 
 	test("non-finite input degrades to the range floor", () => {
@@ -138,13 +142,13 @@ describe("readTargetValues", () => {
 		});
 	});
 
-	test("uses a neutral fallback for a monitor with no override", () => {
+	test("inherits the active mode for a monitor with no override", () => {
 		const display = makeDisplay();
 		expect(readTargetPreset(display, "office", MON)).toEqual({
 			kelvinDay: 5500,
-			kelvinNight: 5500,
-			brightnessDay: 90,
-			brightnessNight: 90,
+			kelvinNight: 5000,
+			brightnessDay: 85,
+			brightnessNight: 80,
 		});
 	});
 });
@@ -217,9 +221,9 @@ describe("buildKelvinPatch", () => {
 		const patch = buildKelvinPatch(display, "office", MON, "day", 4200);
 		expect(patch.monitorOverrides?.[MON]).toEqual({
 			kelvinDay: 4200,
-			kelvinNight: 5500,
-			brightnessDay: 90,
-			brightnessNight: 90,
+			kelvinNight: 5000,
+			brightnessDay: 85,
+			brightnessNight: 80,
 		});
 		expect(patch.modes).toBeUndefined();
 	});
@@ -242,7 +246,12 @@ describe("buildBrightnessPatch", () => {
 	test("updates a monitor override's night brightness", () => {
 		const display = makeDisplay();
 		const patch = buildBrightnessPatch(display, "office", MON, "night", 45);
-		expect(patch.monitorOverrides?.[MON]?.brightnessNight).toBe(45);
+		expect(patch.monitorOverrides?.[MON]).toEqual({
+			kelvinDay: 5500,
+			kelvinNight: 5000,
+			brightnessDay: 85,
+			brightnessNight: 45,
+		});
 	});
 });
 
@@ -303,5 +312,83 @@ describe("monitor participation", () => {
 		// The id of an unplugged display stays in settings but is not counted:
 		// the roster passed in is the enumerated hardware.
 		expect(countEnabledMonitors(display, [OTHER_MON, MON])).toBe(1);
+	});
+});
+
+describe("monitor override inheritance", () => {
+	test("removes only the named override", () => {
+		const display = makeDisplay({
+			monitorOverrides: {
+				[MON]: {
+					kelvinDay: 4200,
+					kelvinNight: 3600,
+					brightnessDay: 70,
+					brightnessNight: 60,
+				},
+				[OTHER_MON]: {
+					kelvinDay: 5000,
+					kelvinNight: 4000,
+					brightnessDay: 80,
+					brightnessNight: 70,
+				},
+			},
+		});
+
+		const patch = buildMonitorInheritPatch(display, MON);
+
+		expect(patch.monitorOverrides?.[MON]).toBeUndefined();
+		expect(patch.monitorOverrides?.[OTHER_MON]).toEqual(
+			display.monitorOverrides[OTHER_MON],
+		);
+	});
+});
+
+describe("editPhaseFor", () => {
+	function output(phase: string, factor: number): DisplayOutput {
+		return {
+			kelvin: 5500,
+			brightness: 60,
+			mode: "custom",
+			phase,
+			factor,
+			grayscaleApplied: false,
+		};
+	}
+
+	test("a settled schedule edits the endpoint it settled on", () => {
+		expect(editPhaseFor(output("day", 1))).toBe("day");
+		expect(editPhaseFor(output("night", 0))).toBe("night");
+	});
+
+	test("defaults to day before the first engine state arrives", () => {
+		expect(editPhaseFor(null)).toBe("day");
+	});
+
+	test("mid-ramp it edits the endpoint that dominates the screen", () => {
+		// Regression: `transition` used to be folded into "day". Late in the
+		// evening ramp that meant editing the endpoint with almost no weight —
+		// the brightness slider moved, the screen did not, and it "fixed itself"
+		// an hour later when the ramp ended.
+		expect(editPhaseFor(output("transition", 0.95))).toBe("day");
+		expect(editPhaseFor(output("transition", 0.5))).toBe("day");
+		expect(editPhaseFor(output("transition", 0.49))).toBe("night");
+		expect(editPhaseFor(output("transition", 0.05))).toBe("night");
+	});
+
+	test("the chosen endpoint always carries at least half the applied value", () => {
+		// The property the split exists for: `applied = lerp(night, day, factor)`,
+		// so an edit reaches the screen scaled by its endpoint's weight.
+		for (let step = 0; step <= 100; step += 1) {
+			const factor = step / 100;
+			const phase = editPhaseFor(output("transition", factor));
+			const weight = phase === "day" ? factor : 1 - factor;
+			expect(weight).toBeGreaterThanOrEqual(0.5);
+		}
+	});
+
+	test("isRampingPhase reports only the blended state", () => {
+		expect(isRampingPhase(output("transition", 0.4))).toBe(true);
+		expect(isRampingPhase(output("day", 1))).toBe(false);
+		expect(isRampingPhase(null)).toBe(false);
 	});
 });

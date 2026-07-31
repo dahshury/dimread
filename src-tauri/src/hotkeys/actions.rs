@@ -5,19 +5,21 @@
 //! actions and wires to them through exactly two one-line delegations from the
 //! registry, so the behaviour is defined purely here:
 //!
-//!   * [`apply_action_hotkeys`] arms/disarms the seven accelerators from
-//!     `settings.hotkeys` — called from [`super::apply_hotkey_settings`] at boot
-//!     and on every hotkeys-section save, so a persisted binding is live from
-//!     startup (not only after the user re-records it).
+//!   * [`super::apply_hotkey_settings`] owns the complete persisted roster and
+//!     arms these action ids alongside every other shortcut at boot and save.
 //!   * [`handle_action`] runs an action's effect — called from
 //!     [`super::on_hotkey_triggered`]. Ids this module does not own (e.g.
 //!     `toggleMain`) are ignored, so the trigger path can call it blindly.
 //!
 //! ## Action ids (match the `settings.hotkeys` field names, camelCase)
-//! - `brightnessUp` / `brightnessDown` — step the active mode's current-phase
-//!   brightness by ±[`BRIGHTNESS_STEP`] %, clamped to the display range.
-//! - `tempUp` / `tempDown` — step the active mode's current-phase colour
-//!   temperature by ±[`TEMP_STEP`] K, clamped (default vs. wide range).
+//! - `brightnessUp` / `brightnessDown` — step the active mode's brightness by
+//!   ±[`BRIGHTNESS_STEP`] %, clamped to the display range.
+//! - `tempUp` / `tempDown` — step the active mode's colour temperature by
+//!   ±[`TEMP_STEP`] K, clamped (default vs. wide range).
+//!
+//! Both steppers edit the day/night endpoint that DOMINATES the current output
+//! ([`scheduler::current_edit_phase`]), not the raw phase — mid-ramp the two are
+//! different, and editing the fading one is a keypress with no visible effect.
 //! - `toggleFilter` — swap the active mode to `pause` and back (blue-light
 //!   filter off/on), remembering the previous mode.
 //! - `toggleReading` — swap Reading mode (full-screen grayscale) on/off.
@@ -30,13 +32,13 @@
 use std::sync::Mutex;
 
 use tauri::AppHandle;
-use tauri_specta::Event as _;
 
 use crate::display::engine;
 use crate::display::scheduler::{self, Phase};
-use crate::events::SettingsChangedEvent;
+use crate::display::values::{self, DisplayAxis, DisplayEdit, DisplayPhase};
+use crate::settings::AppSettings;
+use crate::settings::commands;
 use crate::settings::store;
-use crate::settings::{AppSettings, HotkeysSettings};
 
 /// Brightness step (percentage points) per press.
 const BRIGHTNESS_STEP: i64 = 5;
@@ -52,7 +54,7 @@ const BRIGHTNESS_MAX: i64 = 100;
 const TEMP_MIN: i64 = 1000;
 const TEMP_MAX: i64 = 6500;
 /// …and for the wide range (`settings.display.wide_range`, FEATURE-PARITY F1.2).
-const TEMP_MIN_WIDE: i64 = 0;
+const TEMP_MIN_WIDE: i64 = 1000;
 const TEMP_MAX_WIDE: i64 = 10000;
 
 /// The mode a toggle came from, so a second press returns to it (one slot per
@@ -63,43 +65,6 @@ static EDITING_PREV: Mutex<Option<String>> = Mutex::new(None);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// The display-action `(id, accelerator)` pairs plus the Focus-tab and MagicX
-/// toggles that arm here so their persisted bindings are live from boot, in a
-/// stable order.
-fn action_bindings(h: &HotkeysSettings) -> [(&'static str, &str); 10] {
-    [
-        ("brightnessUp", h.brightness_up.as_str()),
-        ("brightnessDown", h.brightness_down.as_str()),
-        ("tempUp", h.temp_up.as_str()),
-        ("tempDown", h.temp_down.as_str()),
-        ("toggleFilter", h.toggle_filter.as_str()),
-        ("toggleReading", h.toggle_reading.as_str()),
-        ("toggleEditing", h.toggle_editing.as_str()),
-        ("focusBlur", h.focus_blur.as_str()),
-        // magicx (F9.4) — armed here so a persisted MagicX combo is live from
-        // boot, not only after the user re-records it. Effects handled below.
-        ("magicDark", h.magic_dark.as_str()),
-        ("magicGray", h.magic_gray.as_str()),
-    ]
-}
-
-/// Arm/disarm the display + Focus action accelerators from `settings.hotkeys`,
-/// mirroring the registry's empty→unregister / else→register semantics via its
-/// crate-internal helpers. Failures are logged, never propagated (a stale
-/// persisted combo must not fail the save trying to fix it).
-pub fn apply_action_hotkeys(app: &AppHandle, hotkeys: &HotkeysSettings) {
-    for (id, accelerator) in action_bindings(hotkeys) {
-        let accelerator = accelerator.trim();
-        if accelerator.is_empty() {
-            if let Err(err) = super::unregister_hotkey_internal(app, id) {
-                log::debug!("[hotkeys] action '{id}' not disarmed: {err}");
-            }
-        } else if let Err(err) = super::register_hotkey_internal(app, id, accelerator) {
-            log::warn!("[hotkeys] failed to arm action '{id}' = '{accelerator}': {err}");
-        }
-    }
 }
 
 /// Dispatch a display hotkey action by id. Ids not owned here (e.g. `toggleMain`)
@@ -145,7 +110,10 @@ fn toggle_magic_effect(app: &AppHandle, effect: crate::magicx::Effect) {
 // ── Effects ───────────────────────────────────────────────────────────────
 
 fn adjust_brightness(app: &AppHandle, delta: i64) {
-    let phase = scheduler::current_phase();
+    // The endpoint that dominates the screen, never the raw phase: mid-ramp the
+    // output is a blend, so stepping the fading endpoint is a keypress the user
+    // cannot see (see `scheduler::current_edit_phase`).
+    let phase = scheduler::current_edit_phase();
     // Edit the mode that is actually on screen: when a rule override is active
     // the displayed mode is the override, not `settings.display.mode`, so
     // editing the latter would be invisible (the override re-applies on refresh).
@@ -154,7 +122,7 @@ fn adjust_brightness(app: &AppHandle, delta: i64) {
 }
 
 fn adjust_temperature(app: &AppHandle, delta: i64) {
-    let phase = scheduler::current_phase();
+    let phase = scheduler::current_edit_phase();
     let mode = engine::current_output().mode;
     patch_and_apply(app, move |s| {
         step_active_temperature(s, delta, phase, &mode)
@@ -180,30 +148,14 @@ fn toggle_mode(
     });
 }
 
-/// Run `mutate` on a cloned settings tree under the write lock; if it reports a
-/// change, persist it, broadcast `settings:changed` (so every window's store
-/// re-syncs), and refresh the display engine so the new values apply live.
+/// Commit one settings mutation and refresh the display as part of the SAME
+/// serialized commit. Keeping refresh inside `mutate_settings_with_effect`
+/// prevents a later write from overtaking this action between persistence,
+/// native application, and the `settings:changed` broadcast.
 fn patch_and_apply(app: &AppHandle, mutate: impl FnOnce(&mut AppSettings) -> bool) {
-    let persisted = store::with_settings_write_lock(|| {
-        let mut settings = store::read_settings(app);
-        if !mutate(&mut settings) {
-            return None;
-        }
-        match store::write_settings_value(app, &settings) {
-            Ok(()) => Some((store::settings_revision(), settings)),
-            Err(err) => {
-                log::warn!("[hotkeys] failed to persist action settings: {err}");
-                None
-            }
-        }
-    });
-    let Some((revision, settings)) = persisted else {
-        return;
-    };
-    if let Err(err) = (SettingsChangedEvent { revision, settings }).emit(app) {
-        log::warn!("[hotkeys] failed to broadcast settings:changed after action: {err}");
+    if let Err(err) = commands::mutate_settings_with_effect(app, mutate, |_| engine::refresh()) {
+        log::warn!("[hotkeys] failed to commit display action: {err}");
     }
-    engine::refresh();
 }
 
 // ── Pure helpers (unit-tested below) ────────────────────────────────────────
@@ -234,6 +186,17 @@ fn clamp_temperature(value: i64, wide: bool) -> u32 {
     value.clamp(min, max) as u32
 }
 
+fn edit_phase(phase: Phase) -> DisplayPhase {
+    match phase {
+        Phase::Night => DisplayPhase::Night,
+        _ => DisplayPhase::Day,
+    }
+}
+
+fn offset_value(value: u32, delta: i64) -> u32 {
+    (i64::from(value) + delta).clamp(0, i64::from(u32::MAX)) as u32
+}
+
 /// Step the active mode's current-phase brightness by `delta`, clamped. Returns
 /// whether the stored value actually changed (a no-op step at a bound skips the
 /// write). Pure over the settings tree so the clamp maths is unit-testable.
@@ -243,15 +206,48 @@ fn step_active_brightness(
     phase: Phase,
     mode: &str,
 ) -> bool {
-    let wide = settings.display.brightness_wide_range;
-    let Some(preset) = settings.display.modes.get_mut(mode) else {
+    let Some(preset) = settings.display.modes.get(mode) else {
         return false;
     };
+    let current = match phase {
+        Phase::Night => preset.brightness_night,
+        _ => preset.brightness_day,
+    };
+    let next = offset_value(current, delta);
+
+    // The ordinary (non-rule-override) path uses the same intent helper as the
+    // sliders and tray. Crucially, an edit while Pause is selected seeds Custom
+    // from the passthrough preset and switches to it instead of mutating the
+    // deliberately inert Pause preset.
+    if settings.display.mode == mode {
+        let before = settings.display.clone();
+        values::apply_edit_to(
+            settings,
+            &DisplayEdit {
+                axis: DisplayAxis::Brightness,
+                phase: edit_phase(phase),
+                monitor_id: None,
+                value: next,
+            },
+        );
+        return settings.display != before;
+    }
+
+    // A per-app rule can make a different mode visible without changing the
+    // persisted selected mode. Preserve that established behavior: step the
+    // visible override preset directly because DisplayEdit intentionally has no
+    // rule-override target field.
+    let wide = settings.display.brightness_wide_range;
+    let next = clamp_brightness(i64::from(current) + delta, wide);
+    let preset = settings
+        .display
+        .modes
+        .get_mut(mode)
+        .expect("the preset was checked above");
     let field = match phase {
         Phase::Night => &mut preset.brightness_night,
         _ => &mut preset.brightness_day,
     };
-    let next = clamp_brightness(i64::from(*field) + delta, wide);
     if next == *field {
         return false;
     }
@@ -267,15 +263,40 @@ fn step_active_temperature(
     phase: Phase,
     mode: &str,
 ) -> bool {
-    let wide = settings.display.wide_range;
-    let Some(preset) = settings.display.modes.get_mut(mode) else {
+    let Some(preset) = settings.display.modes.get(mode) else {
         return false;
     };
+    let current = match phase {
+        Phase::Night => preset.kelvin_night,
+        _ => preset.kelvin_day,
+    };
+    let next = offset_value(current, delta);
+
+    if settings.display.mode == mode {
+        let before = settings.display.clone();
+        values::apply_edit_to(
+            settings,
+            &DisplayEdit {
+                axis: DisplayAxis::Kelvin,
+                phase: edit_phase(phase),
+                monitor_id: None,
+                value: next,
+            },
+        );
+        return settings.display != before;
+    }
+
+    let wide = settings.display.wide_range;
+    let next = clamp_temperature(i64::from(current) + delta, wide);
+    let preset = settings
+        .display
+        .modes
+        .get_mut(mode)
+        .expect("the preset was checked above");
     let field = match phase {
         Phase::Night => &mut preset.kelvin_night,
         _ => &mut preset.kelvin_day,
     };
-    let next = clamp_temperature(i64::from(*field) + delta, wide);
     if next == *field {
         return false;
     }
@@ -325,10 +346,10 @@ mod tests {
     #[test]
     fn temperature_bounds_follow_wide_flag() {
         assert_eq!(temp_bounds(false), (1000, 6500));
-        assert_eq!(temp_bounds(true), (0, 10000));
+        assert_eq!(temp_bounds(true), (1000, 10000));
         assert_eq!(clamp_temperature(9000, false), 6500);
         assert_eq!(clamp_temperature(9000, true), 9000);
-        assert_eq!(clamp_temperature(-500, true), 0);
+        assert_eq!(clamp_temperature(-500, true), 1000);
     }
 
     #[test]
@@ -374,9 +395,22 @@ mod tests {
     #[test]
     fn step_temperature_clamps_to_default_ceiling() {
         let mut s = settings_with("pause", false);
-        // pause day kelvin defaults to 6500 (the default ceiling): +100 is a no-op.
-        assert!(!step_active_temperature(&mut s, 100, Phase::Day, "pause"));
+        // Even at the numerical ceiling, a display intent made while paused
+        // resumes filtering through Custom; the inert Pause preset stays put.
+        assert!(step_active_temperature(&mut s, 100, Phase::Day, "pause"));
         assert_eq!(s.display.modes["pause"].kelvin_day, 6500);
+        assert_eq!(s.display.mode, "custom");
+        assert_eq!(s.display.modes["custom"].kelvin_day, 6500);
+    }
+
+    #[test]
+    fn brightness_step_in_pause_uses_canonical_custom_redirect() {
+        let mut s = settings_with("pause", false);
+        assert!(step_active_brightness(&mut s, -5, Phase::Day, "pause"));
+        assert_eq!(s.display.mode, "custom");
+        assert_eq!(s.display.modes["custom"].brightness_day, 95);
+        assert_eq!(s.display.modes["custom"].kelvin_day, 6500);
+        assert_eq!(s.display.modes["pause"].brightness_day, 100);
     }
 
     #[test]
@@ -395,31 +429,5 @@ mod tests {
         let (next, remember) = next_toggle_mode("pause", "pause", None, "health");
         assert_eq!(next, "health");
         assert_eq!(remember, None);
-    }
-
-    #[test]
-    fn action_bindings_map_ids_to_fields() {
-        let h = HotkeysSettings {
-            brightness_up: "F2".into(),
-            toggle_reading: "Ctrl+Alt+R".into(),
-            ..Default::default()
-        };
-        let bindings = action_bindings(&h);
-        assert_eq!(bindings[0], ("brightnessUp", "F2"));
-        assert_eq!(bindings[5], ("toggleReading", "Ctrl+Alt+R"));
-    }
-
-    #[test]
-    fn action_bindings_include_magicx_toggles() {
-        // MagicX per-window toggles must be armed here so a persisted combo is
-        // live from boot (FEATURE-PARITY F9.4).
-        let h = HotkeysSettings {
-            magic_dark: "Ctrl+D".into(),
-            magic_gray: "Ctrl+G".into(),
-            ..Default::default()
-        };
-        let bindings = action_bindings(&h);
-        assert!(bindings.contains(&("magicDark", "Ctrl+D")));
-        assert!(bindings.contains(&("magicGray", "Ctrl+G")));
     }
 }

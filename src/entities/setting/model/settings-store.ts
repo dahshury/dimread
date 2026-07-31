@@ -4,6 +4,7 @@ import {
 	type AppSettingsOutput,
 	appSettingsSchema,
 } from "@/shared/config/settings-schema";
+import { clearPendingEdits, markSectionChanges } from "./pending-edits";
 
 const DEFAULTS: AppSettingsOutput = appSettingsSchema.parse({});
 
@@ -12,8 +13,34 @@ const DEFAULTS: AppSettingsOutput = appSettingsSchema.parse({});
  * default when a persisted/broadcast payload is partially invalid.
  */
 export function normalizeSettings(input: unknown): AppSettingsOutput {
-	const result = appSettingsSchema.safeParse(input ?? {});
+	const result = appSettingsSchema.safeParse(migrateSettingsInput(input));
 	return result.success ? result.data : DEFAULTS;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Mirror the backend's pre-locationSource migration for the local cache. */
+function migrateSettingsInput(input: unknown): unknown {
+	if (!(isRecord(input) && isRecord(input["dayNight"]))) {
+		return input ?? {};
+	}
+	const dayNight = input["dayNight"];
+	if (Object.hasOwn(dayNight, "locationSource")) {
+		return input;
+	}
+	const latitude =
+		typeof dayNight["latitude"] === "number" ? dayNight["latitude"] : 0;
+	const longitude =
+		typeof dayNight["longitude"] === "number" ? dayNight["longitude"] : 0;
+	if (dayNight["useLocation"] !== true || (latitude === 0 && longitude === 0)) {
+		return input;
+	}
+	return {
+		...input,
+		dayNight: { ...dayNight, locationSource: "manual" },
+	};
 }
 
 /**
@@ -27,10 +54,21 @@ function patchSection<K extends SectionKey>(
 	key: K,
 	patch: Partial<AppSettingsOutput[K]>,
 ): AppSettingsOutput {
+	const nextSection = { ...settings[key], ...patch };
+	markSectionChanges(key, settings[key], nextSection);
 	return {
 		...settings,
-		[key]: { ...settings[key], ...patch },
+		[key]: nextSection,
 	};
+}
+
+function persistedSettingsFrom(state: unknown): unknown {
+	if (isRecord(state) && Object.hasOwn(state, "settings")) {
+		return state["settings"];
+	}
+	// Legacy caches stored the settings tree directly instead of under the
+	// Zustand `state.settings` key.
+	return state;
 }
 
 interface SettingsState {
@@ -61,9 +99,6 @@ interface SettingsState {
 		patch: Partial<AppSettingsOutput["focusRead"]>,
 	) => void;
 	updateMagicxSettings: (patch: Partial<AppSettingsOutput["magicx"]>) => void;
-	updateDownloadsSettings: (
-		patch: Partial<AppSettingsOutput["downloads"]>,
-	) => void;
 	updateGeneralSettings: (patch: Partial<AppSettingsOutput["general"]>) => void;
 	updateHotkeysSettings: (patch: Partial<AppSettingsOutput["hotkeys"]>) => void;
 	updateRulesSettings: (patch: Partial<AppSettingsOutput["rules"]>) => void;
@@ -82,10 +117,6 @@ export const useSettingsStore = create<SettingsState>()(
 			updateGeneralSettings: (patch) =>
 				set((state) => ({
 					settings: patchSection(state.settings, "general", patch),
-				})),
-			updateDownloadsSettings: (patch) =>
-				set((state) => ({
-					settings: patchSection(state.settings, "downloads", patch),
 				})),
 			updateHotkeysSettings: (patch) =>
 				set((state) => ({
@@ -119,11 +150,18 @@ export const useSettingsStore = create<SettingsState>()(
 				set((state) => ({
 					settings: patchSection(state.settings, "autoDark", patch),
 				})),
-			resetSettings: () => set({ settings: DEFAULTS }),
+			resetSettings: () => {
+				clearPendingEdits();
+				set({ settings: DEFAULTS });
+			},
 			setLoaded: (loaded) => set({ isLoaded: loaded }),
 		}),
 		{
 			name: "dimread-settings",
+			merge: (persistedState, currentState) => ({
+				...currentState,
+				settings: normalizeSettings(persistedSettingsFrom(persistedState)),
+			}),
 			partialize: (state) => ({ settings: state.settings }),
 		},
 	),

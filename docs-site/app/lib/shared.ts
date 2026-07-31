@@ -18,7 +18,7 @@ export const issuesUrl = `${repoUrl}/issues`;
  * produces 404 download links. It is checked against the repo's
  * `src-tauri/tauri.conf.json` by `scripts/link-audit.mjs`.
  */
-export const latestVersion = "0.0.3-alpha";
+export const latestVersion = "0.0.4-alpha";
 export const latestTag = `v${latestVersion}`;
 
 /** Prefix a path in `public/` with the site's base, for GitHub Pages sub-paths. */

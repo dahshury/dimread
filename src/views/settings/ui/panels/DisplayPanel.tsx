@@ -39,12 +39,12 @@ export function DisplayPanel() {
 				icon={SlidersHorizontalIcon}
 				title={tDisplay("quickControlsSectionTitle")}
 			>
-				<div className="pt-2">
+				<div className="py-2">
 					<QuickControls />
 				</div>
 			</SettingSection>
 
-			<SettingSection divided icon={Sun03Icon} title={t("displaySectionTitle")}>
+			<SettingSection icon={Sun03Icon} title={t("displaySectionTitle")}>
 				<FormControl
 					caption={t("smoothTransitionCaption")}
 					label={t("smoothTransition")}

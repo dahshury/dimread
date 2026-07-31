@@ -6,7 +6,7 @@ export interface ElevatedSurfaceProps {
 	/**
 	 * Drop the painted surface (bg + ring + shadow) but keep the padding + the
 	 * lifted surface context. For a control/list that already sits INSIDE a
-	 * `boxed` section card — the card is the single surface, so a second painted
+	 * `SettingSection` card — the card is the single surface, so a second painted
 	 * fill would double up. Nested plates still elevate from the re-provided
 	 * level.
 	 */

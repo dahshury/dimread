@@ -1,13 +1,12 @@
 ---
-title: Tray and overlay
-description: Read the tray icon's state glyph and tooltip, drive the filter from the right-click flyout, and understand the notification pill that drops from the top of the screen.
+title: Tray and flyout
+description: Read the tray icon's state glyph and tooltip, and drive the filter from the right-click flyout.
 ---
 
 DimRead is a tray app, so on most days you never open the settings window at all.
-Three surfaces do the work: the **tray icon**, which encodes what the filter is
-currently doing; the **tray flyout**, a right-click popup with real sliders and
-the eight modes; and the **notification pill**, a click-through island that
-appears at the top of the screen.
+Two surfaces do the work: the **tray icon**, which encodes what the filter is
+currently doing, and the **tray flyout**, a right-click popup with real sliders
+and the eight modes.
 
 The flyout writes the same settings the [Display](/docs/display) tab does — it's
 a shortcut into that tab, not a parallel copy.
@@ -150,55 +149,6 @@ buttons shaped like one. So the flyout is a transparent, undecorated webview
 rendering the *same* gradient sliders the settings window uses, and its two
 footer rows cover what a native menu would have carried. That's a deliberate
 decision, not a missing feature.
-
-## The notification pill
-
-<Screenshot
-	alt="The DimRead notification pill: a rounded dark island hanging from the top edge of the screen with a green check icon, the bold title Reading, and the line 5500 K · 85% below it."
-	caption="The pill docks at the top of the monitor holding the settings window and fades out on its own."
-	src="overlay-pill.webp"
-	width={560}
-/>
-
-### What triggers it
-
-In the shipped app the **download manager** is the only producer: a transfer that
-reaches Completed shows *Download complete* with the file name in the success
-tone, a failure shows *Download failed* in the error tone. Nothing in the tray,
-the display engine, or the hotkey path raises a pill today. Both titles are
-hard-coded English.
-
-### What it shows and where
-
-A rounded island 360 px wide, hanging flat from the top edge of the screen: a
-tone icon, an optional bold title on one line, and a message clamped to three
-lines. The four tones are **neutral** (muted info icon), **success** (green
-check), **warning** (amber alert) and **error** (red alert).
-
-It's centred horizontally on the monitor holding the settings window, flush with
-that monitor's top edge — the placement reads the full monitor rectangle, not the
-OS work area, so a taskbar docked along the top is covered rather than avoided. If
-the window is gone it uses the primary display.
-
-### How it behaves
-
-- **It stays for 4 s by default.** A caller can ask for anything from 1.2 s to
-  30 s; values outside that are clamped.
-- **It's click-through and never takes focus.** Mouse input passes straight to
-  whatever's underneath, so you can't click it away — it goes when its timer
-  expires, and it won't interrupt typing.
-- **Last one wins.** A new notification replaces the current one immediately.
-  There is no queue and no stacking.
-- **It respects reduced motion.** The 240 ms open / 160 ms close reveal is
-  removed entirely under `prefers-reduced-motion`.
-
-Nothing about the pill is configurable — no settings key, no duration or position
-control. Every value is decided per call.
-
-<Callout type="info">
-Always-on-top works on Windows and X11. On macOS the pill sits at a floating
-window level that is **below the Dock**; on Wayland always-on-top no-ops.
-</Callout>
 
 ## Where to go next
 

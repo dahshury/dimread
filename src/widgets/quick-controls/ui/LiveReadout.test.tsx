@@ -13,6 +13,7 @@ describe("LiveReadout", () => {
 						brightness: 85,
 						mode: "office",
 						phase: "day",
+						factor: 1,
 						grayscaleApplied: false,
 					}}
 				/>

@@ -51,7 +51,7 @@ export function RuleDialog({
 }: RuleDialogProps) {
 	const t = useTranslations("rulesTab");
 	const { matchKindOptions, modeOptions } = useRuleLabels();
-	const { windows, loading, refresh } = useOpenWindows(open);
+	const { error, windows, loading, refresh } = useOpenWindows(open);
 
 	const [draft, setDraft] = useState<RuleDraft>(initialDraft ?? DEFAULT_DRAFT);
 	// The picked window's stable id (its HWND). Keyed by id, not process, so two
@@ -137,6 +137,7 @@ export function RuleDialog({
 					</FormControl>
 					<FormControl
 						caption={pickCaption}
+						error={error ? t("windowListError", { reason: error }) : undefined}
 						label={t("finderTool")}
 						labelTrailing={
 							<IconButton
@@ -149,6 +150,7 @@ export function RuleDialog({
 						}
 					>
 						<SearchableSelect
+							ariaLabel={t("finderTool")}
 							onChange={handlePickWindow}
 							options={windowOptions}
 							placeholder={t("pickWindowPlaceholder")}
@@ -157,6 +159,7 @@ export function RuleDialog({
 					</FormControl>
 					<FormControl label={t("pattern")}>
 						<TextField
+							aria-label={t("pattern")}
 							onChange={handlePatternChange}
 							placeholder={t("patternPlaceholder")}
 							value={draft.pattern}

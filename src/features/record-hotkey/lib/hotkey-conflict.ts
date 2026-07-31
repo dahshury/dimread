@@ -3,10 +3,10 @@
  * `"Ctrl+Shift+V"`). Ported from WinSTT's hotkey-conflict module, trimmed to
  * the pairwise classifier (the starter has no multi-binding resolver).
  *
- * Two bindings collide whenever one's key set is equal to, a subset of, or a
- * superset of the other's — pressing the larger combo satisfies both, so the
- * smaller one fires "by accident". They are DISJOINT (safe) only when each
- * has at least one token the other lacks.
+ * The classifier retains subset/superset information for diagnostics, but the
+ * native global-shortcut backend matches complete accelerators. Only equal
+ * normalized chords conflict; `Ctrl+V` and `Ctrl+Shift+V` are distinct live
+ * registrations and must both remain configurable.
  *
  * Order- and case-insensitive: tokens are normalized via trim+lowercase, and
  * whitespace-only tokens are dropped, so hand-edited settings that drift on
@@ -55,7 +55,7 @@ export function compareHotkeys(a: string, b: string): HotkeyRelation {
 	return allIn(sb, sa) ? "superset" : "disjoint";
 }
 
-/** True when the relation is anything other than "disjoint". */
+/** True only when both normalized accelerators are the same chord. */
 export function isHotkeyConflict(rel: HotkeyRelation): boolean {
-	return rel !== "disjoint";
+	return rel === "equal";
 }

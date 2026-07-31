@@ -10,12 +10,15 @@ import {
 	buildBrightnessPatch,
 	buildKelvinPatch,
 	buildMonitorEnabledPatch,
+	buildMonitorInheritPatch,
 	clampBrightness,
 	clampKelvin,
 	defaultBrightnessFor,
 	defaultKelvinFor,
 	type EditPhase,
+	editPhaseFor,
 	isAllMonitors,
+	isRampingPhase,
 	KELVIN_STEP,
 	kelvinRange,
 	type MonitorSelection,
@@ -62,20 +65,25 @@ export function QuickControls() {
 	const wideRange = display.wideRange;
 	const brightnessWideRange = display.brightnessWideRange;
 
-	// Which phase the sliders edit: the engine's live phase by default, or the
-	// user's Day/Night override (which also previews that phase's values).
-	const livePhase: EditPhase = state?.phase === "night" ? "night" : "day";
+	// Which phase the sliders edit: the endpoint that dominates the engine's live
+	// output by default, or the user's Day/Night override (which also previews
+	// that phase's values). `transition` is NOT an editable endpoint, and it is
+	// not "day" either — see `editPhaseFor`.
+	const livePhase: EditPhase = editPhaseFor(state);
 	const [phaseOverride, setPhaseOverride] = useState<EditPhase | null>(null);
-	const effectivePhase = dayNight.enabled
-		? livePhase
-		: (phaseOverride ?? livePhase);
-	// `transition` is not an editable endpoint. The segmented control necessarily
-	// shows Day or Night, so preview that endpoint raw instead of presenting a
-	// slider whose 0% can only move the blended output to (for example) 97%.
-	// An explicit Day/Night choice is also a deliberate profile preview, even
-	// when it happens to match the scheduler's current endpoint.
-	const previewSelectedEndpoint =
-		phaseOverride !== null || state?.phase === "transition";
+	// Mid-ramp the schedule owns neither endpoint outright, so the user is
+	// allowed to say which profile they are authoring even with auto on. Once the
+	// ramp settles the schedule owns the phase again and a leftover override is
+	// simply ignored — derived, so nothing has to remember to clear it.
+	const ramping = isRampingPhase(state);
+	const canChoosePhase = !dayNight.enabled || ramping;
+	const effectivePhase = canChoosePhase
+		? (phaseOverride ?? livePhase)
+		: livePhase;
+	// Only an explicit Day/Night choice requests an idle endpoint preview.
+	// Merely opening this tab midway through a ramp must not snap to (and pin)
+	// whichever endpoint the segmented control happens to display.
+	const previewSelectedEndpoint = canChoosePhase && phaseOverride !== null;
 
 	// Monitor-roster selection derived from `syncMonitors` (the source of truth for
 	// "all vs one monitor") plus a local pointer to the last-chosen monitor, so the
@@ -114,6 +122,9 @@ export function QuickControls() {
 		mode,
 		phase: effectivePhase,
 		previewWhenIdle: previewSelectedEndpoint,
+		// Mid-ramp a blended drag preview compresses the slider's travel into a
+		// fraction of the screen's range; show the endpoint being authored.
+		rawEndpointPreview: ramping,
 		selection,
 	});
 
@@ -178,6 +189,10 @@ export function QuickControls() {
 			}),
 		);
 	};
+	const handleUseModeValues = (monitorId: string) =>
+		runSettled(() =>
+			patchDisplaySettings(buildMonitorInheritPatch(display, monitorId)),
+		);
 
 	return (
 		<div className="flex flex-col gap-3">
@@ -188,6 +203,8 @@ export function QuickControls() {
 				onSetEnabled={(id, enabled) =>
 					void handleSetMonitorEnabled(id, enabled)
 				}
+				onUseModeValues={(id) => void handleUseModeValues(id)}
+				overridden={Object.keys(display.monitorOverrides)}
 				selection={selection}
 			/>
 
@@ -243,10 +260,12 @@ export function QuickControls() {
 				</div>
 				<div aria-hidden="true" className="h-px bg-divider" />
 				<DayNightRow
+					canChoosePhase={canChoosePhase}
 					enabled={dayNight.enabled}
 					onPhaseChange={setPhaseOverride}
 					onToggleEnabled={(enabled) => void handleToggleAutoDayNight(enabled)}
 					phase={effectivePhase}
+					ramping={ramping}
 				/>
 			</div>
 

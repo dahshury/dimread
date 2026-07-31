@@ -7,11 +7,13 @@ import {
 	asLocationSource,
 	type LocationSourceId,
 } from "@/shared/config/settings-schema";
+import { Button } from "@/shared/ui/button";
 import { FormControl } from "@/shared/ui/form-control";
 import { NumberStepper } from "@/shared/ui/number-stepper";
 import { SearchableSelect } from "@/shared/ui/searchable-select";
 import { Switcher } from "@/shared/ui/switcher";
 import { TimeField } from "./TimeField";
+import { manualScheduleKind, normalizeTransitionMinutes } from "./hm-time";
 import {
 	buildTimezoneGroups,
 	formatMinutesOfDay,
@@ -59,9 +61,17 @@ function methodOf(locationSource: string): LocationMethod {
 
 export function DayNightSection() {
 	const t = useTranslations("displayTab");
+	const common = useTranslations("common");
 	const dayNight = useSettingsStore((s) => s.settings.dayNight);
 	const locale = useSettingsStore((s) => s.settings.appearance.locale);
-	const { status, timezones } = useDayNightLocation();
+	const {
+		locationLoadError,
+		retryLocation,
+		retryTimezones,
+		status,
+		timezones,
+		timezonesLoadError,
+	} = useDayNightLocation();
 
 	const source: TimeSource = dayNight.useLocation
 		? asLocationSource(dayNight.locationSource) === "auto"
@@ -97,6 +107,7 @@ export function DayNightSection() {
 			}),
 		[locale, t, timezones],
 	);
+	const scheduleKind = manualScheduleKind(dayNight.sunrise, dayNight.sunset);
 
 	const selectSource = (next: TimeSource) => {
 		if (next === "custom") {
@@ -112,7 +123,7 @@ export function DayNightSection() {
 	};
 
 	return (
-		<SettingSection divided icon={SunriseIcon} title={t("dayNightSettings")}>
+		<SettingSection icon={SunriseIcon} title={t("dayNightSettings")}>
 			<FormControl
 				caption={t("timeSourceCaption")}
 				label={t("timeSource")}
@@ -159,13 +170,24 @@ export function DayNightSection() {
 					    FormControl's `aria-labelledby`, so it must NOT read the same as
 					    the Location switcher's "Timezone" segment right above it —
 					    two controls answering to one name is a screen-reader trap. */}
-					<SearchableSelect
-						className="w-64"
-						groups={timezoneGroups}
-						onChange={(next) => void patchDayNightSettings({ timezone: next })}
-						placeholder={t("timezonePlaceholder")}
-						value={dayNight.timezone}
-					/>
+					{timezonesLoadError ? (
+						<LoadError
+							message={t("timezoneLoadFailed")}
+							onRetry={retryTimezones}
+							retryLabel={common("retry")}
+						/>
+					) : (
+						<SearchableSelect
+							ariaLabel={t("timezone")}
+							className="w-64"
+							groups={timezoneGroups}
+							onChange={(next) =>
+								void patchDayNightSettings({ timezone: next })
+							}
+							placeholder={t("timezonePlaceholder")}
+							value={dayNight.timezone}
+						/>
+					)}
 				</FormControl>
 			) : null}
 
@@ -173,6 +195,7 @@ export function DayNightSection() {
 				<>
 					<FormControl label={t("latitude")} layout="row">
 						<NumberStepper
+							ariaLabel={t("latitude")}
 							max={90}
 							min={-90}
 							onChange={(next) => patchDayNightSettings({ latitude: next })}
@@ -182,6 +205,7 @@ export function DayNightSection() {
 					</FormControl>
 					<FormControl label={t("longitude")} layout="row">
 						<NumberStepper
+							ariaLabel={t("longitude")}
 							max={180}
 							min={-180}
 							onChange={(next) => patchDayNightSettings({ longitude: next })}
@@ -196,21 +220,36 @@ export function DayNightSection() {
 				<>
 					<FormControl label={t("sunrise")} layout="row">
 						<TimeField
-							ariaHourLabel={t("sunrise")}
-							ariaMinuteLabel={t("sunrise")}
+							ariaHourLabel={t("sunriseHours")}
+							ariaMinuteLabel={t("sunriseMinutes")}
 							onChange={(next) => patchDayNightSettings({ sunrise: next })}
 							value={dayNight.sunrise}
 						/>
 					</FormControl>
 					<FormControl label={t("sunset")} layout="row">
 						<TimeField
-							ariaHourLabel={t("sunset")}
-							ariaMinuteLabel={t("sunset")}
+							ariaHourLabel={t("sunsetHours")}
+							ariaMinuteLabel={t("sunsetMinutes")}
 							onChange={(next) => patchDayNightSettings({ sunset: next })}
 							value={dayNight.sunset}
 						/>
 					</FormControl>
+					<p className="text-right text-body-sm text-foreground-muted">
+						{scheduleKind === "equal"
+							? t("scheduleEqual")
+							: scheduleKind === "overnight"
+								? t("scheduleOvernight")
+								: t("scheduleSameDay")}
+					</p>
 				</>
+			) : locationLoadError ? (
+				<FormControl label={t("detectedLocation")} layout="row">
+					<LoadError
+						message={t("locationLoadFailed")}
+						onRetry={retryLocation}
+						retryLabel={common("retry")}
+					/>
+				</FormControl>
 			) : (
 				<LocationReadout status={status} />
 			)}
@@ -222,10 +261,13 @@ export function DayNightSection() {
 			>
 				<div className="flex items-center gap-2">
 					<NumberStepper
+						ariaLabel={t("transition")}
 						max={240}
 						min={0}
 						onChange={(next) =>
-							patchDayNightSettings({ transitionMinutes: next })
+							patchDayNightSettings({
+								transitionMinutes: normalizeTransitionMinutes(next),
+							})
 						}
 						step={15}
 						value={dayNight.transitionMinutes}
@@ -236,6 +278,31 @@ export function DayNightSection() {
 				</div>
 			</FormControl>
 		</SettingSection>
+	);
+}
+
+function LoadError({
+	message,
+	onRetry,
+	retryLabel,
+}: {
+	message: string;
+	onRetry: () => void;
+	retryLabel: string;
+}) {
+	return (
+		<div
+			className="flex max-w-72 items-center justify-end gap-2 text-right"
+			role="alert"
+		>
+			<span className="text-body-sm text-error">{message}</span>
+			<Button
+				className="h-8 rounded-lg px-3 text-body-sm text-foreground-secondary hover:bg-surface-hover"
+				onClick={onRetry}
+			>
+				{retryLabel}
+			</Button>
+		</div>
 	);
 }
 

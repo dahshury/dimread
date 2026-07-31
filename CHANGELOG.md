@@ -7,6 +7,93 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.0.4-alpha] - 2026-07-31
+
+### Added
+
+- **Settings backup.** The About tab can export every setting to a readable,
+  versioned JSON file and restore one, plus reset everything to defaults. The
+  import replaces the whole tree through the same revision-checked commit path a
+  normal save uses, so every open window converges on the result.
+- **Diagnostics, on the same tab.** Open the rolling log folder, save a support
+  bundle (logs, system information, recent failures) as a ZIP, review the recent
+  operational issues DimRead recorded locally, and stream live debug lines while
+  the page is open. Streaming is off until started and stops when you leave.
+- **Anonymous reporting is now an explicit opt-in**, off by default, and does
+  nothing unless a reporting service is configured.
+- **Hotkeys distinguish "saved" from "actually active".** A shortcut another
+  application already owns is now reported as unavailable with the reason
+  instead of sitting in the list looking bound and doing nothing. The roster is
+  also validated as a desired end state before anything touches the OS, so
+  swapping two shortcuts works and an exact duplicate disables both rows rather
+  than half-applying.
+- **"Use mode values" per monitor** — drop a per-monitor override and return
+  that display to the active mode's preset, without clearing the others.
+- **Focus Blur survives a restart.** Its enabled state is persisted and restored
+  once the overlay renderer is ready, and reconciliation is edge-driven so an
+  unrelated settings save cannot undo a runtime toggle made by the hotkey.
+- The day/night scheduler caps its next wake at the next timezone offset change,
+  so a DST boundary is re-evaluated when it happens rather than at the following
+  schedule deadline.
+
+### Changed
+
+- **Start on login moved from General to About**, next to the privacy switch it
+  belongs with.
+
+### Fixed
+
+- **The brightness and temperature sliders no longer stall during a day/night
+  transition.** While the schedule ramps, the engine applies a blend of the day
+  and night endpoints — but every surface (the Display tab, the tray flyout, and
+  the ± hotkeys) treated "transition" as *day* and edited the day endpoint. Late
+  in an evening ramp that endpoint carries almost none of the applied value, so
+  dragging brightness to its 10 % floor moved the screen by a few percent and
+  the control looked stuck well above its own minimum — then "fixed itself" an
+  hour later when the ramp ended. Manual edits now land on the endpoint that
+  dominates what is on screen, which bounds any edit's authority at half the
+  slider's travel; a drag mid-ramp previews that endpoint directly instead of
+  through the blend; a release commits to the endpoint the drag started on even
+  if the ramp crosses over mid-gesture; and the Day/Night control unlocks
+  mid-ramp with a line saying the screen is between the two profiles.
+
+### Removed
+
+DimRead began as a starter template extracted from WinSTT. It is not one any
+more, and the scaffolding that served that role is gone — **236 files and about
+33,000 lines, roughly half the renderer.** None of it was reachable from the
+running app.
+
+- **The component gallery** (window, entry, and view) and the 21 `shared/ui`
+  components nothing else consumed: the data grid, calendar heatmap, charts,
+  thinking indicator, toast, modal, sortable list, file drop zone, multi
+  combobox, pending badge, pulse dot, scrolling text, stagger reveal, mode
+  switch, item card, kbd, media seek bar, opt-in dialog, creatable combobox and
+  editable-list combobox. The gallery had no way to open it from anywhere in the
+  UI, yet it was pre-created at every launch.
+- **The picker and overlay windows**, end to end. Nothing imported the picker's
+  open/close API, and the notification pill's only producer in the entire
+  codebase was the download manager.
+- **The download manager** — the frontend feature, the progress UI, the Rust
+  module and its seven commands, the `downloads` settings section on both sides,
+  and the General tab's parallel-downloads control, which tuned an engine that
+  nothing invoked.
+- 14 unused `shared/lib` helpers, 465 message keys across 14 namespaces, and 11
+  npm dependencies (`@dnd-kit/*`, `@tanstack/react-table`,
+  `@tanstack/react-virtual`, `cmdk`, `virtua`, `class-variance-authority`,
+  `double-metaphone`, `@tauri-apps/plugin-dialog`).
+- `Select`'s drag-to-sort rows, which no caller enabled and which were the last
+  thing importing the data grid's primitives.
+
+The window roster went from seven to four — `settings`, `focus-overlay`,
+`tray-menu`, `magic-toolbar` — which is four fewer WebView2 renderer processes
+resident for the life of the app.
+
+Worth recording *why* this went unnoticed: the gallery imported the unused half
+of the design system, so `bun run check:deadcode` saw a real consumer for every
+dead component and reported a clean tree. A showcase that imports otherwise
+unreferenced code defeats dead-code detection.
+
 ## [0.0.3-alpha] - 2026-07-28
 
 ### Added
@@ -152,3 +239,4 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 [0.0.2-alpha]: https://github.com/dahshury/dimread/compare/v0.0.1-alpha...v0.0.2-alpha
 [0.0.3-alpha]: https://github.com/dahshury/dimread/compare/v0.0.2-alpha...v0.0.3-alpha
+[0.0.4-alpha]: https://github.com/dahshury/dimread/compare/v0.0.3-alpha...v0.0.4-alpha

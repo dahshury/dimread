@@ -5,10 +5,6 @@
       "reason": "The live display controls (monitor strip, K/% readout, temperature + brightness sliders, auto day/night, the eight preset modes) kept standalone: Settings → Display is its only consumer today, but this block IS the removed main window, and the tray flyout renders the same controls off the same features/display seam — a reusable composite, not a page detail."
     },
     {
-      "subject": "features/download-manager",
-      "reason": "Generic download feature (listener + aggregate hooks) kept standalone: currently only the settings window consumes it, but it is a reusable slice the gallery demo and future windows wire independently — not folded into one page."
-    },
-    {
       "subject": "features/rules",
       "reason": "Per-app rules feature (pure rule-model, running-window picker, add/edit dialog, i18n labels) kept standalone: the settings window's Rules panel is its only consumer today, but it is a self-contained slice reusable by any window and independently unit-tested — not folded into the page."
     },
@@ -25,8 +21,8 @@
       "reason": "Auto Dark feature (autoDark settings persistence through the shared serialized save coordinator) kept standalone: the settings window's Auto Dark panel is its only consumer today, but it is a reusable slice owning the frontend save path for the magicx::theme backend scheduler (Windows app/system theme + taskbar transparency) — paralleling features/display, not folded into the page."
     },
     {
-      "subject": "entities/picker-selection",
-      "reason": "Picker-window selection entity (selection model + IPC api) kept standalone: the detachable picker view is its only consumer today, but it is a self-contained entity wired through the picker window's own IPC seam and independently reusable — not folded into the page."
+      "subject": "features/record-hotkey",
+      "reason": "Global-shortcut recorder (key capture, conflict detection, the recorder UI) kept standalone: the settings window's Hotkeys panel is its only consumer here, but this slice is shared verbatim across DimRead, the starter template and WinSTT — folding it into the page would fork the one implementation the three repos replicate fixes between."
     }
   ]
 }

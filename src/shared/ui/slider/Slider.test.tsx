@@ -158,12 +158,18 @@ describe("Slider", () => {
 		expect(screen.getByText("Warm")).toBeDefined();
 		expect(screen.getByText("Cool")).toBeDefined();
 		expect(screen.getByText("5500K")).toBeDefined();
-		// The spectrum track is masked from the value position rightward, so only
-		// the filled portion shows colour.
-		const mask = document.querySelector('[data-slot="elastic-slider-mask"]');
-		expect(mask).not.toBeNull();
-		expect((mask as HTMLElement).style.left).toBe(
-			`${((5500 - 1000) / (6500 - 1000)) * 100}%`,
+		// The spectrum track is covered from the value position rightward by a
+		// neutral rail, so only the filled portion shows colour. The rail is a
+		// background LAYER on the track (not an overlaid child), so its width is
+		// the first `background-size` entry — see the corner-hairline note in
+		// Slider.tsx.
+		const track = document.querySelector(
+			'[data-slot="elastic-slider-track"]',
+		) as HTMLElement;
+		expect(track).not.toBeNull();
+		const filledPct = ((5500 - 1000) / (6500 - 1000)) * 100;
+		expect(track.style.backgroundSize).toBe(
+			`${100 - filledPct}% 100%, 100% 100%`,
 		);
 	});
 

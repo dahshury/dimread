@@ -5,10 +5,12 @@ import { DayNightRow } from "./DayNightRow";
 
 function renderRow(overrides: Partial<Parameters<typeof DayNightRow>[0]> = {}) {
 	const props = {
+		canChoosePhase: false,
 		enabled: true,
 		onPhaseChange: () => undefined,
 		onToggleEnabled: () => undefined,
 		phase: "day" as const,
+		ramping: false,
 		...overrides,
 	};
 	return render(
@@ -44,13 +46,31 @@ describe("DayNightRow", () => {
 
 	test("choosing a phase reports it upward", () => {
 		const onPhaseChange = mock((_phase: string) => undefined);
-		renderRow({ enabled: false, onPhaseChange });
+		renderRow({ canChoosePhase: true, enabled: false, onPhaseChange });
 		fireEvent.click(screen.getByRole("button", { name: "Night" }));
 		expect(onPhaseChange).toHaveBeenCalledTimes(1);
 		expect(
 			(onPhaseChange as unknown as { mock: { calls: unknown[][] } }).mock
 				.calls[0]?.[0],
 		).toBe("night");
+	});
+
+	test("mid-ramp the endpoint choice comes back, with an explanation", () => {
+		// Regression: with auto on, a ramp used to present a locked "Day" while
+		// the sliders edited an endpoint that barely reached the screen — read as
+		// a brightness slider with a floor it does not have.
+		const onPhaseChange = mock((_phase: string) => undefined);
+		renderRow({ canChoosePhase: true, onPhaseChange, ramping: true });
+		expect(
+			(screen.getByRole("button", { name: "Night" }) as HTMLButtonElement)
+				.disabled,
+		).toBe(false);
+		expect(screen.getByText(/Fading between day and night/)).toBeDefined();
+	});
+
+	test("a settled auto phase stays the clock's to choose", () => {
+		renderRow({ ramping: false });
+		expect(screen.queryByText(/Fading between day and night/)).toBeNull();
 	});
 
 	test("toggling the switch reports the inverted enabled state", () => {

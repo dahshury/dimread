@@ -33,6 +33,8 @@ import "./searchable-select.css";
 export type { SelectOptionGroup } from "@/shared/ui/select";
 
 export interface SearchableSelectProps {
+	/** Accessible name for the editable combobox input and its popup trigger. */
+	ariaLabel?: string;
 	/** Width / state classes for the trigger (e.g. `w-52`). The control is
 	 *  self-contained (no wrapping `ElevatedSurface`), so pass width here. */
 	className?: string | undefined;
@@ -277,6 +279,7 @@ function Row({
 }
 
 export function SearchableSelect({
+	ariaLabel,
 	options,
 	groups,
 	value,
@@ -387,6 +390,7 @@ export function SearchableSelect({
 						</span>
 					) : null}
 					<Combobox.Input
+						aria-label={ariaLabel}
 						className={cn(
 							"flex w-full cursor-pointer items-center rounded-lg font-inherit text-foreground leading-normal outline-none focus:cursor-text focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-surface-1 disabled:cursor-not-allowed disabled:opacity-40",
 							surfaceClasses(inputLevel),
@@ -407,7 +411,9 @@ export function SearchableSelect({
 						</StopBubble>
 					) : null}
 					<Combobox.Trigger
-						aria-label="Open popup"
+						aria-label={
+							ariaLabel ? `${ariaLabel}: ${t("openPicker")}` : t("openPicker")
+						}
 						className={cn(
 							"absolute top-1/2 flex shrink-0 -translate-y-1/2 cursor-pointer items-center justify-center rounded-xs border-none bg-transparent p-0 text-foreground-dim",
 							isSm ? "right-1 size-4" : "right-1.5 size-5",

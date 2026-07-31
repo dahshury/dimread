@@ -1,60 +1,101 @@
 import { useEffect } from "react";
-import { commands, events } from "@/bindings";
-import { hasNativeRuntime, subscribeNativeEvent } from "@/shared/api";
+import { commands, events, type SettingsSnapshot } from "@/bindings";
+import { hasNativeRuntime } from "@/shared/api";
 import { adoptSettingsSnapshot } from "./adopt-settings-snapshot";
 import { useSettingsHydrationStore } from "./settings-hydration-store";
 
-/**
- * Window-root settings bootstrap: hydrate the local store from the backend
- * snapshot (backend wins over the localStorage cache) and keep it in sync via
- * the `settings:changed` broadcast so every window converges on one tree.
- *
- * Both paths go through {@link adoptSettingsSnapshot}, which drops a snapshot
- * older than what the store already holds. That guard is what makes the window
- * safe to interact with WHILE the boot snapshot is still in flight: an edit
- * committed in that gap advances the revision, so the arriving snapshot is
- * recognised as stale instead of reverting it.
- *
- * Mount ONCE per window (RootLayout does).
- */
-export function useSettingsSync(): void {
-	const setStatus = useSettingsHydrationStore((s) => s.setStatus);
+interface SettingsEvent {
+	payload: SettingsSnapshot;
+}
 
-	useEffect(() => {
-		if (!hasNativeRuntime()) {
-			// Browser preview: the localStorage cache is all we have.
-			setStatus("unavailable");
-			return;
+interface SettingsEventSource {
+	listen: (handler: (event: SettingsEvent) => void) => Promise<() => void>;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Install the live stream before loading a snapshot, closing the classic
+ * load-then-listen gap where a save could land between those two operations
+ * and never reach this renderer. Kept as a small injectable unit so the
+ * ordering and recovery contract can be tested without a Tauri runtime.
+ */
+export function startSettingsSync(
+	source: SettingsEventSource = events.settingsChanged,
+	loadSnapshot: () => Promise<SettingsSnapshot> = () =>
+		commands.settingsLoadSnapshot(),
+): () => void {
+	let disposed = false;
+	let hasAuthoritativeSnapshot = false;
+	let unlisten: (() => void) | null = null;
+	const { setStatus } = useSettingsHydrationStore.getState();
+	setStatus("loading");
+
+	const handleSnapshot = (snapshot: SettingsSnapshot): boolean => {
+		if (disposed || !adoptSettingsSnapshot(snapshot)) {
+			return false;
 		}
-		let disposed = false;
-		setStatus("loading");
-		commands
-			.settingsLoadSnapshot()
-			.then((snapshot) => {
+		hasAuthoritativeSnapshot = true;
+		setStatus("ready");
+		return true;
+	};
+
+	void source
+		.listen((event) => {
+			handleSnapshot(event.payload);
+		})
+		.then(async (stop) => {
+			if (disposed) {
+				stop();
+				return;
+			}
+			unlisten = stop;
+			try {
+				const snapshot = await loadSnapshot();
 				if (disposed) {
 					return;
 				}
-				// Superseded by an edit made during boot is still "hydrated".
-				adoptSettingsSnapshot(snapshot);
+				// A false return means a newer event/save already won. Either way,
+				// a successful load proves the renderer has an authoritative base.
+				handleSnapshot(snapshot);
+				hasAuthoritativeSnapshot = true;
 				setStatus("ready");
-			})
-			.catch((error: unknown) => {
-				if (!disposed) {
-					setStatus(
-						"error",
-						error instanceof Error ? error.message : String(error),
-					);
+			} catch (error: unknown) {
+				// Keep listening after a transient load error. The next live snapshot
+				// heals the window and moves the status back to ready.
+				if (!(disposed || hasAuthoritativeSnapshot)) {
+					setStatus("error", errorMessage(error));
 				}
-			});
-		const unsubscribe = subscribeNativeEvent(
-			events.settingsChanged,
-			(event) => {
-				adoptSettingsSnapshot(event.payload);
-			},
-		);
-		return () => {
-			disposed = true;
-			unsubscribe();
-		};
-	}, [setStatus]);
+			}
+		})
+		.catch((error: unknown) => {
+			if (!disposed) {
+				setStatus("error", errorMessage(error));
+			}
+		});
+
+	return () => {
+		disposed = true;
+		unlisten?.();
+		unlisten = null;
+	};
+}
+
+/**
+ * Window-root settings bootstrap: hydrate from the backend and keep this
+ * renderer converged through `settings:changed`. Pending local field edits are
+ * rebased by {@link adoptSettingsSnapshot}, including edits made while the
+ * initial snapshot is in flight.
+ */
+export function useSettingsSync(): void {
+	const retryToken = useSettingsHydrationStore((state) => state.retryToken);
+	useEffect(() => {
+		if (!hasNativeRuntime()) {
+			useSettingsHydrationStore.getState().setStatus("unavailable");
+			return;
+		}
+		return startSettingsSync();
+	}, [retryToken]);
 }

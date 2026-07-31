@@ -1,7 +1,7 @@
 //! Specta-typed events the backend emits. Each derives `specta::Type` (for the
 //! generated TypeScript payload type) and implements `tauri_specta::Event`
 //! MANUALLY so the wire name can carry the `scope:action` convention
-//! (`settings:changed`, `download:update`, …) — the `#[derive(Event)]` macro
+//! (`settings:changed`, `display:state`, …) — the `#[derive(Event)]` macro
 //! always kebab-cases the struct name and offers no rename attribute.
 //!
 //! Every event here must be registered in `commands_registry::make_specta_builder`'s
@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use crate::display::{MonitorInfo, engine::DisplayOutput};
-use crate::downloads::DownloadSnapshot;
 use crate::focus::FocusState;
-use crate::overlay::OverlayNotification;
 use crate::settings::AppSettings;
 
 /// `settings:changed` — broadcast to ALL windows after every durable settings
@@ -30,40 +28,6 @@ impl tauri_specta::Event for SettingsChangedEvent {
     const NAME: &'static str = "settings:changed";
 }
 
-/// `download:update` — one download's full snapshot, emitted on every state
-/// change plus throttled (~10 Hz) progress while downloading.
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
-pub struct DownloadUpdateEvent(pub DownloadSnapshot);
-
-impl tauri_specta::Event for DownloadUpdateEvent {
-    const NAME: &'static str = "download:update";
-}
-
-/// `picker:anchor` — the WINDOW-LOCAL rect of the visible picker panel inside
-/// the full-work-area transparent backdrop window. The picker renderer stays
-/// invisible until this lands, then draws the panel at the given rect.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct PickerAnchorEvent {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl tauri_specta::Event for PickerAnchorEvent {
-    const NAME: &'static str = "picker:anchor";
-}
-
-/// `picker:closing` — the close animation is starting; the renderer plays its
-/// fade-out and acknowledges its actual completion (see `windows::placement`).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Type)]
-pub struct PickerClosingEvent {}
-
-impl tauri_specta::Event for PickerClosingEvent {
-    const NAME: &'static str = "picker:closing";
-}
-
 /// `hotkey:triggered` — a registered global hotkey fired (key-down edge).
 /// Built-in behaviors (e.g. `toggleMain`) run Rust-side BEFORE this broadcast;
 /// renderers subscribe for app-level reactions (demos, toasts, custom ids).
@@ -78,27 +42,6 @@ pub struct HotkeyTriggeredEvent {
 
 impl tauri_specta::Event for HotkeyTriggeredEvent {
     const NAME: &'static str = "hotkey:triggered";
-}
-
-/// `overlay:notify` — show a notification in the overlay pill window. The
-/// payload is the RESOLVED notification (tone/duration defaults filled in).
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
-pub struct OverlayNotifyEvent(pub OverlayNotification);
-
-impl tauri_specta::Event for OverlayNotifyEvent {
-    const NAME: &'static str = "overlay:notify";
-}
-
-/// `overlay:dismiss` — the overlay is being dismissed; the renderer plays its
-/// exit animation and acknowledges its real completion to the backend.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct OverlayDismissEvent {
-    pub sequence: u64,
-}
-
-impl tauri_specta::Event for OverlayDismissEvent {
-    const NAME: &'static str = "overlay:dismiss";
 }
 
 /// `display:state` — the display engine's current output (Kelvin / brightness% /
@@ -233,4 +176,19 @@ pub struct AutoDarkChangedEvent {
 
 impl tauri_specta::Event for AutoDarkChangedEvent {
     const NAME: &'static str = "autodark:changed";
+}
+
+/// `diagnostics:log-line` — one Rust log record forwarded only while the
+/// Settings > About live viewer is explicitly enabled.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsLogLineEvent {
+    pub level: String,
+    pub message: String,
+    pub target: String,
+    pub timestamp_ms: u64,
+}
+
+impl tauri_specta::Event for DiagnosticsLogLineEvent {
+    const NAME: &'static str = "diagnostics:log-line";
 }

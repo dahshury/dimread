@@ -11,7 +11,13 @@ import {
 	SunriseIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
 import { useTranslations } from "use-intl";
 import { commands } from "@/bindings";
 import {
@@ -28,6 +34,7 @@ import {
 	useTransparentBody,
 } from "@/shared/lib/window-effects";
 import { ScrollArea } from "@/shared/ui/scroll-area";
+import { Button } from "@/shared/ui/button";
 import { useAppWindowReveal } from "../model/use-app-window-reveal";
 import {
 	useSettingsWindowMotion,
@@ -65,9 +72,11 @@ function SettingsPanelContent({ tab }: { tab: string }): ReactNode {
 
 function SettingsHydrationPanel({
 	error,
+	onRetry,
 	status,
 }: {
 	error: string | null;
+	onRetry: () => void;
 	status: SettingsHydrationStatus;
 }) {
 	const common = useTranslations("common");
@@ -84,6 +93,9 @@ function SettingsHydrationPanel({
 			<HugeiconsIcon icon={InformationCircleIcon} size={22} />
 			<div className="font-medium text-foreground">{settings("title")}</div>
 			<div className="max-w-md text-sm leading-6">{message}</div>
+			{status === "error" ? (
+				<Button onClick={onRetry}>{common("retry")}</Button>
+			) : null}
 		</div>
 	);
 }
@@ -156,14 +168,14 @@ function useSettingsSidebarLinks(): SidebarLink[] {
 			label: t("general"),
 			icon: Settings01Icon,
 			tooltip: t("generalTooltip"),
-			keywords: `${t("generalAutostart")} ${t("generalMinimizeToTray")} ${t("appearance")} ${t("appearanceLocale")} ${t("appearanceReducedMotion")}`,
+			keywords: `${t("generalMinimizeToTray")} ${t("appearance")} ${t("appearanceLocale")} ${t("appearanceReducedMotion")}`,
 		},
 		{
 			key: "about",
 			label: t("about"),
 			icon: InformationCircleIcon,
 			tooltip: t("aboutTooltip"),
-			keywords: `${t("aboutVersion")} ${t("aboutLinks")} ${t("aboutCredits")} ${t("aboutUpdates")}`,
+			keywords: `${t("aboutVersion")} ${t("aboutLinks")} ${t("aboutCredits")} ${t("aboutUpdates")} ${t("aboutStartupTitle")} ${t("aboutSettingsTransferTitle")} ${t("aboutDiagnosticsTitle")} ${t("aboutResetTitle")}`,
 		},
 	];
 }
@@ -175,9 +187,13 @@ function useSettingsSidebarLinks(): SidebarLink[] {
  *  screen" gesture that must ALWAYS just hide to the tray — Escape taking the
  *  whole app down (and with it the user's display filters) would be a trap. */
 function runExit(intent: WindowExitIntent): void {
-	void (intent === "dismiss"
-		? commands.hideAppWindow()
-		: commands.closeSelfWindow());
+	void (
+		intent === "dismiss" ? commands.hideAppWindow() : commands.closeSelfWindow()
+	).then((result) => {
+		if (result && result.status === "error") {
+			console.error("settings window exit failed", result.error);
+		}
+	});
 }
 
 /** Landing tab. Opening the app shows the live controls, not a preferences
@@ -206,11 +222,15 @@ export function SettingsPage() {
 	const isLoaded = useSettingsStore((s) => s.isLoaded);
 	const hydrationStatus = useSettingsHydrationStore((s) => s.status);
 	const hydrationError = useSettingsHydrationStore((s) => s.error);
+	const retrySettingsSync = useSettingsHydrationStore((s) => s.retry);
 	const canRenderSettings =
 		isLoaded &&
 		(hydrationStatus === "ready" || hydrationStatus === "unavailable");
 	const t = useTranslations("settings");
 	const [activeTab, setActiveTab] = useState(INITIAL_TAB);
+	const [exitError, setExitError] = useState<string | null>(null);
+	const [exitSaving, setExitSaving] = useState(false);
+	const exitPendingRef = useRef(false);
 	const contentViewportRef = useRef<HTMLDivElement>(null);
 	// Reset the shared ScrollArea to the top on each tab switch.
 	useEffect(() => {
@@ -224,7 +244,9 @@ export function SettingsPage() {
 	useEffect(() => {
 		const onVisibilityChange = () => {
 			if (document.visibilityState === "hidden") {
-				flushPendingSettings();
+				void flushPendingSettings().catch((error: unknown) => {
+					console.error("settings flush while hiding failed", error);
+				});
 			}
 		};
 		document.addEventListener("visibilitychange", onVisibilityChange);
@@ -245,8 +267,44 @@ export function SettingsPage() {
 		requestDismiss,
 		shellRef,
 	} = useSettingsWindowMotion(runExit, contentReady);
-	const closeActivation = useTouchActivation(requestClose);
-	useEscapeToClose(requestDismiss);
+	const requestSafeExit = useCallback(
+		(intent: WindowExitIntent) => {
+			if (exitPendingRef.current) {
+				return;
+			}
+			exitPendingRef.current = true;
+			setExitSaving(true);
+			setExitError(null);
+			void flushPendingSettings()
+				.then(() => {
+					if (intent === "dismiss") {
+						requestDismiss();
+					} else {
+						requestClose();
+					}
+				})
+				.catch((error: unknown) => {
+					setExitError(error instanceof Error ? error.message : String(error));
+				})
+				.finally(() => {
+					exitPendingRef.current = false;
+					setExitSaving(false);
+				});
+		},
+		[requestClose, requestDismiss],
+	);
+	const requestSafeClose = useCallback(
+		() => requestSafeExit("close"),
+		[requestSafeExit],
+	);
+	const requestSafeDismiss = useCallback(
+		() => requestSafeExit("dismiss"),
+		[requestSafeExit],
+	);
+	const closeActivation = useTouchActivation(requestSafeClose, {
+		disabled: exitSaving,
+	});
+	useEscapeToClose(requestSafeDismiss);
 
 	const links = useSettingsSidebarLinks();
 	const contentLink = links.find((l) => l.key === activeTab) ?? links[0];
@@ -317,12 +375,18 @@ export function SettingsPage() {
 											) : null}
 										</header>
 									) : null}
+									{exitError ? (
+										<p className="mt-3 text-body-sm text-error" role="alert">
+											{t("saveBeforeCloseFailed", { reason: exitError })}
+										</p>
+									) : null}
 									<Tabs.Panel className="outline-none" value={activeTab}>
 										{canRenderSettings ? (
 											<SettingsPanelContent tab={activeTab} />
 										) : (
 											<SettingsHydrationPanel
 												error={hydrationError}
+												onRetry={retrySettingsSync}
 												status={hydrationStatus}
 											/>
 										)}

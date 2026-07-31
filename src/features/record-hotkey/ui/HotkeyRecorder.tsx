@@ -1,7 +1,7 @@
 import { PlayIcon, StopCircleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { AnimatePresence, m as motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "use-intl";
 import { commands } from "@/bindings";
 import { hasNativeRuntime } from "@/shared/api";
@@ -27,8 +27,8 @@ import { useKeyRecorder } from "../model/use-key-recorder";
 export interface HotkeyRecorderProps {
 	currentKey: string;
 	/**
-	 * Combos this recorder must NOT collide with (equal / subset / superset all
-	 * count). Conflicts are rejected with an inline error naming the other
+	 * Combos this recorder must NOT duplicate. Exact normalized chords are
+	 * rejected with an inline error naming the other
 	 * binding; empty / undefined disables the cross-hotkey check.
 	 */
 	forbiddenCombos?: readonly ForbiddenCombo[];
@@ -41,6 +41,8 @@ export interface HotkeyRecorderProps {
 	 * restored.
 	 */
 	hotkeyId?: string;
+	/** Human-readable row label used to disambiguate repeated controls. */
+	label: string;
 	onKeyRecorded: (key: string) => void;
 }
 
@@ -183,22 +185,76 @@ function ErrorMessage({ message }: { message: string }) {
 	);
 }
 
-/** Fire-and-forget backend registration used by the suspend/restore paths. */
-function restoreBinding(hotkeyId: string | undefined, combo: string): void {
+function asErrorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Restore a suspended binding and preserve typed command errors. */
+async function restoreBinding(
+	hotkeyId: string | undefined,
+	combo: string,
+): Promise<void> {
 	if (!(hotkeyId && hasNativeRuntime()) || combo.trim().length === 0) {
 		return;
 	}
-	void commands.hotkeyRegister(hotkeyId, combo).catch(() => undefined);
+	const result = await commands.hotkeyRegister(hotkeyId, combo);
+	if (result.status === "error") {
+		throw new Error(result.error);
+	}
 }
 
 export function HotkeyRecorder({
 	currentKey,
 	forbiddenCombos,
 	hotkeyId,
+	label,
 	onKeyRecorded,
 }: HotkeyRecorderProps) {
 	const t = useTranslations("hotkeys");
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
+	const [suspending, setSuspending] = useState(false);
+	const mountedRef = useRef(true);
+	useEffect(
+		() => () => {
+			mountedRef.current = false;
+		},
+		[],
+	);
+
+	const reportRestoreFailure = (error: unknown): void => {
+		if (mountedRef.current) {
+			setErrorMessage(asErrorMessage(error));
+		} else {
+			console.error("hotkey binding restoration failed", error);
+		}
+	};
+
+	const commitNativeCombo = async (combo: string): Promise<void> => {
+		if (!hotkeyId) {
+			return;
+		}
+		try {
+			const result = await commands.hotkeyRegister(hotkeyId, combo);
+			if (result.status === "error") {
+				setErrorMessage(result.error);
+				try {
+					await restoreBinding(hotkeyId, currentKey);
+				} catch (error: unknown) {
+					reportRestoreFailure(error);
+				}
+				return;
+			}
+			setErrorMessage(null);
+			onKeyRecorded(combo);
+		} catch (error: unknown) {
+			setErrorMessage(asErrorMessage(error));
+			try {
+				await restoreBinding(hotkeyId, currentKey);
+			} catch (restoreError: unknown) {
+				reportRestoreFailure(restoreError);
+			}
+		}
+	};
 
 	// Gate the final commit: cross-hotkey conflicts are rejected locally, then
 	// the backend validates + arms the combo (duplicate/invalid → typed error
@@ -212,27 +268,11 @@ export function HotkeyRecorder({
 					combo: formatCombo(conflict.combo),
 				}),
 			);
-			restoreBinding(hotkeyId, currentKey);
+			void restoreBinding(hotkeyId, currentKey).catch(reportRestoreFailure);
 			return;
 		}
 		if (hotkeyId && hasNativeRuntime()) {
-			void commands
-				.hotkeyRegister(hotkeyId, combo)
-				.then((result) => {
-					if (result.status === "error") {
-						setErrorMessage(result.error);
-						restoreBinding(hotkeyId, currentKey);
-						return;
-					}
-					setErrorMessage(null);
-					onKeyRecorded(combo);
-				})
-				.catch((error: unknown) => {
-					setErrorMessage(
-						error instanceof Error ? error.message : String(error),
-					);
-					restoreBinding(hotkeyId, currentKey);
-				});
+			void commitNativeCombo(combo);
 			return;
 		}
 		setErrorMessage(null);
@@ -250,12 +290,8 @@ export function HotkeyRecorder({
 		if (!(hotkeyId && hasNativeRuntime())) {
 			return;
 		}
-		if (nowRecording) {
-			void commands.hotkeyUnregister(hotkeyId).catch(() => undefined);
-			return;
-		}
-		if (committedCombo === null) {
-			restoreBinding(hotkeyId, currentKey);
+		if (!nowRecording && committedCombo === null) {
+			void restoreBinding(hotkeyId, currentKey).catch(reportRestoreFailure);
 		}
 	};
 
@@ -279,14 +315,33 @@ export function HotkeyRecorder({
 			stopRecording();
 			return;
 		}
+		if (suspending) {
+			return;
+		}
 		// Clearing the error on a fresh attempt prevents stale "conflicts with
 		// X" text from outliving the next successful recording.
 		setErrorMessage(null);
+		if (hotkeyId && hasNativeRuntime()) {
+			setSuspending(true);
+			void commands
+				.hotkeyUnregister(hotkeyId)
+				.then((result) => {
+					if (result.status === "error") {
+						throw new Error(result.error);
+					}
+					startRecording();
+				})
+				.catch((error: unknown) => setErrorMessage(asErrorMessage(error)))
+				.finally(() => setSuspending(false));
+			return;
+		}
 		startRecording();
 	};
 	const showError = !recording && errorMessage !== null;
 	const tone = recording || showError ? "danger" : "default";
-	const toggleLabel = recording ? t("stop") : t("record");
+	const toggleLabel = recording
+		? t("stopFor", { label })
+		: t("recordFor", { label });
 
 	return (
 		<div className="w-full min-w-[260px] max-w-[420px]">
@@ -311,6 +366,8 @@ export function HotkeyRecorder({
 					>
 						<InputGroupButton
 							aria-label={toggleLabel}
+							aria-busy={suspending}
+							disabled={suspending}
 							onClick={onToggle}
 							// Idle stays transparent so shortcut rows don't show a column
 							// of filled play disks; recording keeps the red active tone.

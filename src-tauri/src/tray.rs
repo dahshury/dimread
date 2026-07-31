@@ -392,6 +392,7 @@ mod tests {
             brightness: 100,
             mode: "pause".into(),
             phase: "day".into(),
+            factor: 1.0,
             grayscale_applied: false,
         };
         assert_eq!(tray_tooltip_text(&paused), "DimRead — Paused");
@@ -401,6 +402,7 @@ mod tests {
             brightness: 85,
             mode: "health".into(),
             phase: "night".into(),
+            factor: 0.0,
             grayscale_applied: false,
         };
         assert_eq!(tray_tooltip_text(&active), "DimRead — 5000K · 85%");

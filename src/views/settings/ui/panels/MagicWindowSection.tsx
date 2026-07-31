@@ -51,10 +51,19 @@ export function MagicWindowSection() {
 	// prop-mirroring effect (which would cascade renders).
 	const [dragOffset, setDragOffset] = useState<number | null>(null);
 	const offsetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const pendingOffset = useRef<number | null>(null);
 	useEffect(
 		() => () => {
 			if (offsetTimer.current) {
 				clearTimeout(offsetTimer.current);
+			}
+			offsetTimer.current = null;
+			const pending = pendingOffset.current;
+			pendingOffset.current = null;
+			// Switching settings tabs unmounts this section. A trailing debounce must
+			// commit its last value during cleanup or the final drag step disappears.
+			if (pending !== null) {
+				void patchMagicxSettings({ toolbarOffset: pending });
 			}
 		},
 		[],
@@ -63,25 +72,27 @@ export function MagicWindowSection() {
 	const handleOffsetChange = (value: number) => {
 		const next = clampOffset(value);
 		setDragOffset(next);
+		pendingOffset.current = next;
 		if (offsetTimer.current) {
 			clearTimeout(offsetTimer.current);
 		}
 		offsetTimer.current = setTimeout(() => {
+			offsetTimer.current = null;
+			pendingOffset.current = null;
 			void patchMagicxSettings({ toolbarOffset: next });
 			setDragOffset(null);
 		}, 150);
 	};
 
 	const alignOptions: SwitcherOption<ToolbarAlignment>[] = [
-		{ value: "center", label: t("alignCenter") },
-		{ value: "left", label: t("alignLeft") },
-		{ value: "right", label: t("alignRight") },
+		{ value: "center", label: t("alignCenter"), disabled: toolbarDisabled },
+		{ value: "left", label: t("alignLeft"), disabled: toolbarDisabled },
+		{ value: "right", label: t("alignRight"), disabled: toolbarDisabled },
 	];
 
 	return (
 		<SettingSection
 			description={t("magicWindowCaption")}
-			divided
 			icon={MagicWand01Icon}
 			title={t("subMagicWindow")}
 		>
@@ -171,6 +182,7 @@ export function MagicWindowSection() {
 				labelAddon={
 					<div className="flex items-center gap-2">
 						<NumberStepper
+							ariaLabel={t("toolbarDelay")}
 							disabled={toolbarDisabled}
 							max={TOOLBAR_DELAY_MAX}
 							min={TOOLBAR_DELAY_MIN}

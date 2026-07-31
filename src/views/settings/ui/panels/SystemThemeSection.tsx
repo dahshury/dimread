@@ -47,7 +47,6 @@ export function SystemThemeSection() {
 	return (
 		<SettingSection
 			description={t("themeNote")}
-			divided
 			icon={Moon02Icon}
 			title={t("subAutoDark")}
 		>
@@ -84,8 +83,8 @@ export function SystemThemeSection() {
 				<>
 					<FormControl label={t("systemSunrise")} layout="row">
 						<TimeField
-							ariaHourLabel={t("systemSunrise")}
-							ariaMinuteLabel={t("systemSunrise")}
+							ariaHourLabel={t("systemSunriseHours")}
+							ariaMinuteLabel={t("systemSunriseMinutes")}
 							onChange={(next) =>
 								void patchAutoDarkSettings({ systemSunrise: next })
 							}
@@ -94,8 +93,8 @@ export function SystemThemeSection() {
 					</FormControl>
 					<FormControl label={t("systemSunset")} layout="row">
 						<TimeField
-							ariaHourLabel={t("systemSunset")}
-							ariaMinuteLabel={t("systemSunset")}
+							ariaHourLabel={t("systemSunsetHours")}
+							ariaMinuteLabel={t("systemSunsetMinutes")}
 							onChange={(next) =>
 								void patchAutoDarkSettings({ systemSunset: next })
 							}

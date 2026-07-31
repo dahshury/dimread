@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-dimread-audit="settings">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<style>
+		html,
+		body,
+		#root {
+			width: 100%;
+			height: 100%;
+			margin: 0;
+			overflow: hidden;
+			background: transparent !important;
+		}
+		</style>
+		<title>DimRead settings audit</title>
+	</head>
+	<body>
+		<script id="dimread-audit-state" type="application/json">
+		{}
+		</script>
+		<div id="root">
+			<div
+				aria-hidden="true"
+				data-startup-shell
+				style="min-height: 100%; pointer-events: none; background: inherit"
+			></div>
+		</div>
+		<script type="module" src="/tools/e2e/settings-audit.ts"></script>
+	</body>
+</html>

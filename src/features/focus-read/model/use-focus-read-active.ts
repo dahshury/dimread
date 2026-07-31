@@ -14,22 +14,20 @@ export function useFocusReadActive(): boolean {
 		if (!hasNativeRuntime()) {
 			return;
 		}
-		let disposed = false;
-		void commands
-			.focusActiveState()
-			.then((state) => {
-				if (!disposed) {
+		let eventReceived = false;
+		return subscribeNativeEvent(
+			events.focusState,
+			(event) => {
+				eventReceived = true;
+				setActive(event.payload.read);
+			},
+			async (isDisposed) => {
+				const state = await commands.focusActiveState();
+				if (!(isDisposed() || eventReceived)) {
 					setActive(state.read);
 				}
-			})
-			.catch(() => undefined);
-		const unsubscribe = subscribeNativeEvent(events.focusState, (event) => {
-			setActive(event.payload.read);
-		});
-		return () => {
-			disposed = true;
-			unsubscribe();
-		};
+			},
+		);
 	}, []);
 
 	return active;

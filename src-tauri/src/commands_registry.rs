@@ -12,8 +12,8 @@ use tauri::AppHandle;
 use tauri_specta::{Builder, collect_commands, collect_events};
 
 use crate::{
-    display, downloads, events, focus, hotkeys, magicx, overlay, rules, settings, tray_menu,
-    update, windows,
+    diagnostics, display, events, focus, hotkeys, magicx, rules, settings, tray_menu, update,
+    windows,
 };
 
 /// `show_app_window` — surface + focus the app's one top-level window (the
@@ -53,10 +53,6 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         windows::open_window,
         windows::close_window,
         windows::close_self_window,
-        windows::placement::picker_anchor_snapshot,
-        windows::placement::picker_compositor_warmup_start,
-        windows::placement::picker_compositor_warmup_complete,
-        windows::placement::picker_hide_complete,
         show_app_window,
         hide_app_window,
         app_quit,
@@ -66,23 +62,19 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         // ── settings ──
         settings::commands::settings_load_snapshot,
         settings::commands::settings_save,
-        // ── downloads ──
-        downloads::commands::download_start,
-        downloads::commands::download_pause,
-        downloads::commands::download_resume,
-        downloads::commands::download_cancel,
-        downloads::commands::download_remove,
-        downloads::commands::download_list,
-        downloads::commands::open_downloads_dir,
+        settings::transfer::settings_export_backup,
+        settings::transfer::settings_import_backup,
+        settings::transfer::settings_reset_defaults,
+        // ── diagnostics ──
+        diagnostics::diagnostics_open_logs_folder,
+        diagnostics::diagnostics_save_bundle,
+        diagnostics::diagnostics_recent_issues,
+        diagnostics::diagnostics_clear_issues,
+        diagnostics::diagnostics_set_log_streaming,
         // ── hotkeys ──
         hotkeys::hotkey_register,
         hotkeys::hotkey_unregister,
         hotkeys::hotkey_list,
-        // ── overlay ──
-        overlay::overlay_notify,
-        overlay::overlay_dismiss,
-        overlay::overlay_snapshot,
-        overlay::overlay_hide_complete,
         // ── display ──
         display::engine::display_list_monitors,
         display::engine::display_current,
@@ -109,12 +101,7 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
 
     builder.events(collect_events![
         events::SettingsChangedEvent,
-        events::DownloadUpdateEvent,
-        events::PickerAnchorEvent,
-        events::PickerClosingEvent,
         events::HotkeyTriggeredEvent,
-        events::OverlayNotifyEvent,
-        events::OverlayDismissEvent,
         events::DisplayStateEvent,
         events::DisplayTopologyEvent,
         events::FocusStateEvent,
@@ -123,5 +110,6 @@ pub fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         events::MagicToolbarShowEvent,
         events::MagicToolbarHideEvent,
         events::AutoDarkChangedEvent,
+        events::DiagnosticsLogLineEvent,
     ])
 }
