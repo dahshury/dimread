@@ -1,19 +1,22 @@
 ---
 title: General and file locations
-description: Set DimRead to start at login, decide what the close button does, pick language and motion, and find every file the app writes on Windows, macOS and Linux.
+description: Decide what the close button does, pick language and motion, and find every file DimRead writes on Windows, macOS and Linux.
+icon: general
 ---
 
 **Settings → General** is the tab about the app rather than about your screen.
-It's short on purpose: two sections, four rows — how DimRead starts, what the
-close button does, which language it speaks, and whether it animates. Nothing
-here needs a restart.
+It's short on purpose: two sections, three rows — what the close button does,
+which language it speaks, and whether it animates. Nothing here needs a restart.
+
+Launching at login is **not** here: it moved to
+[About → Startup & privacy](/docs/about#startup-privacy).
 
 This page is also where the docs keep the canonical file paths. If another page
 tells you to open a log or delete a settings file, the exact location is in
 [Where DimRead keeps its files](#where-dimread-keeps-its-files) below.
 
 <Screenshot
-	alt="The DimRead settings window on the General tab, showing the Startup & tray section with Start at login and Minimize to tray toggles, and the Appearance section with a Language select set to English and a Reduce motion toggle."
+	alt="The DimRead settings window on the General tab, showing the Startup & tray section with a Minimize to tray toggle, and the Appearance section with a Language select set to English and a Reduce motion toggle."
 	caption="Settings → General. Two sections — Startup & tray, and Appearance."
 	priority
 	src="settings-general.webp"
@@ -21,24 +24,9 @@ tells you to open a log or delete a settings file, the exact location is in
 
 ## Startup & tray
 
-### Start at login
-
-Registers DimRead with your OS's launch-at-login mechanism so the filter and its
-schedule are running before you open anything. **Default: off.**
-
-Each platform gets a different entry, all named `DimRead`:
-
-| OS | Where the entry lands |
-| --- | --- |
-| Windows | `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` |
-| macOS | `~/Library/LaunchAgents/DimRead.plist` — it shows up under *Allow in the Background*, not *Open at Login* |
-| Linux | `~/.config/autostart/DimRead.desktop` — the path is hard-coded, so `$XDG_CONFIG_HOME` is ignored |
-
-DimRead reconciles the toggle with the OS after the save lands **and again at
-every startup**, so an entry another tool wiped comes back on its own.
-
-**Note:** on Linux, compositors that don't run XDG autostart entries — sway,
-Hyprland, river — ignore the desktop file, and the toggle has no effect there.
+One row. The section keeps its name from when **Start on login** sat beside
+this toggle; that control now lives on
+[About → Startup & privacy](/docs/about#startup-privacy).
 
 ### Minimize to tray
 
@@ -98,7 +86,7 @@ uninstaller. `DimRead-portable.zip` ships the same marker already in place.
 
 <Callout type="info">
 **"No registry writes" describes the install, not the running app.** Turning on
-**Start at login** still writes the `Run` value described above, and
+[Start on login](/docs/about#start-on-login) still writes an `HKCU` `Run` value, and
 [System theme](/docs/schedule#system-theme) writes the Windows theme keys while
 it is set to anything but **Disable**. Crash reports always go to
 `%TEMP%\dimread-crash-<timestamp>.log` regardless of portable mode. The tray
@@ -202,7 +190,7 @@ Quit DimRead from the tray, then delete the install folder. That takes the
 binary, the `portable` marker and all of `Data\` with it. Two things survive,
 because a portable install has no uninstaller to clean them up:
 
-- the `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` value named `DimRead`, if you ever turned on **Start at login**
+- the `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` value named `DimRead`, if you ever turned on **Start on login**
 - any `%TEMP%\dimread-crash-*.log` files
 
 ### Windows — normal install
@@ -219,7 +207,7 @@ The uninstaller removes the shortcuts, the Add/Remove Programs entry and the
 
 Quit DimRead, drag `DimRead.app` to the Trash, then delete
 `~/Library/Application Support/com.dahshury.dimread`,
-`~/Library/Logs/com.dahshury.dimread` and — if you used **Start at login** —
+`~/Library/Logs/com.dahshury.dimread` and — if you used **Start on login** —
 `~/Library/LaunchAgents/DimRead.plist`.
 
 ### Linux
@@ -228,16 +216,51 @@ Remove the package (`sudo apt remove …` / `sudo dnf remove …`), or delete th
 AppImage file. The Debian and RPM package names are lowercase and differ from
 the download file name, so confirm yours with `dpkg -l | grep -i dimread` or
 `rpm -qa | grep -i dimread` first. Then remove
-`~/.local/share/com.dahshury.dimread` and, if you used **Start at login**,
+`~/.local/share/com.dahshury.dimread` and, if you used **Start on login**,
 `~/.config/autostart/DimRead.desktop`.
 
 ## Where to go next
 
-- **[Diagnostics](/docs/diagnostics)** — reading `dimread.log` and what the app
-  records when something misbehaves.
-- **[About](/docs/about)** — version, the manual update check, and what DimRead
-  does and doesn't send anywhere.
-- **[Tray and flyout](/docs/tray-and-overlay)** — the surface you'll actually
-  use once **Minimize to tray** is doing its job.
-- **[Troubleshooting](/docs/troubleshooting)** — start here if the screen isn't
-  changing.
+<Cards>
+
+	<Card
+		href="/docs/diagnostics"
+		icon={<PageIcon name="diagnostics" />}
+		title="Diagnostics"
+	>
+
+Reading `dimread.log` and what the app records when something misbehaves.
+
+	</Card>
+
+	<Card
+		href="/docs/about"
+		icon={<PageIcon name="about" />}
+		title="About"
+	>
+
+Version, the manual update check, and what DimRead does and doesn't send anywhere.
+
+	</Card>
+
+	<Card
+		href="/docs/tray-and-overlay"
+		icon={<PageIcon name="tray" />}
+		title="Tray and flyout"
+	>
+
+The surface you'll actually use once **Minimize to tray** is doing its job.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Start here if the screen isn't changing.
+
+	</Card>
+
+</Cards>

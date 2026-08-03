@@ -1,20 +1,29 @@
-# DimRead
+<p align="center">
+  <img src="src-tauri/icons/512x512.png" alt="DimRead" width="112" height="112">
+</p>
 
-DimRead is a cross-platform **blue-light filter and screen dimmer** for Windows,
-macOS, and Linux. Lower your display's color temperature and brightness with
-per-monitor control, automatic day/night scheduling, one-click presets, and
-settings-driven global hotkeys — so long reading and late-night sessions stay
-easy on the eyes.
-
-It is built on **Tauri v2 + React 19**: a small, native binary (no Electron)
-with a design-system UI, a multi-window shell, and a system-tray flyout with
-live sliders.
-
-**Documentation:** <https://dahshury.github.io/dimread/docs> ·
-**Latest alpha:** [GitHub Releases](https://github.com/dahshury/dimread/releases)
+<h1 align="center">DimRead</h1>
 
 <p align="center">
-  <img src="src-tauri/icons/512x512.png" alt="DimRead" width="120">
+  <b>A warmer screen, from sunset to sunrise.</b>
+</p>
+
+<p align="center">
+  <sub>v0.0.4-alpha · Windows, macOS and Linux</sub>
+</p>
+
+<p align="center">
+  DimRead is a tray app that controls your display's colour temperature and
+  brightness in software — per monitor, on a schedule, and below the floor your
+  monitor's own controls will go.
+</p>
+
+<p align="center">
+  <a href="https://dahshury.github.io/dimread/docs"><b>Get started</b></a>
+  ·
+  <a href="https://github.com/dahshury/dimread/releases">Releases</a>
+  ·
+  <a href="#build-from-source">Build from source</a>
 </p>
 
 ## Download
@@ -42,15 +51,13 @@ One click, straight to the file — no scrolling through the releases page.
 > writes. The portable `.zip` needs the Microsoft Edge **WebView2** runtime,
 > which ships with Windows 11 and most Windows 10 installs.
 >
-> This is a **0.0.3 alpha** pre-release. Builds are unsigned, so the OS may warn
+> This is a **0.0.4-alpha** pre-release. Builds are unsigned, so the OS may warn
 > on first launch — see [First-run notes](#first-run-notes) below.
-
-## What it looks like
 
 <!-- SCREENSHOTS:START -->
 
 <p align="center">
-  <img alt="The DimRead settings window on its Display tab: a two-monitor list, colour temperature and brightness sliders reading 5500K and 85%, and the eight preset modes with Reading selected." src="docs-site/public/screenshots/settings-display.webp" width="760">
+  <img alt="The DimRead settings window on its Display tab: a two-monitor list, colour temperature and brightness sliders reading 5500K and 85%, and the eight preset modes with Reading selected." src="docs-site/public/screenshots/settings-display.webp" width="820">
 </p>
 
 <p align="center">
@@ -59,27 +66,57 @@ One click, straight to the file — no scrolling through the releases page.
 
 <p align="center">
   <sub>Every image is captured from the real renderer by
-  <code>bun run docs:shots</code> — see <a href="#documentation">Documentation</a>.</sub>
+  <code>bun run docs:shots</code> — none are mock-ups.</sub>
 </p>
 
 <!-- SCREENSHOTS:END -->
 
-## Features
+<table align="center">
+  <tr>
+    <td align="center"><b>1000–6500 K</b><br><sub>colour temperature</sub></td>
+    <td align="center"><b>8</b><br><sub>preset modes</sub></td>
+    <td align="center"><b>12</b><br><sub>global hotkeys</sub></td>
+    <td align="center"><b>418</b><br><sub>time zones, offline</sub></td>
+  </tr>
+</table>
 
-- **Color temperature + brightness** — warm the display (reduce blue light) and
-  dim it in software, from a single compact panel.
-- **Per-monitor control** — adjust every display together or pick one; the panel
-  follows your monitor layout.
-- **Automatic day/night** — smooth scheduled transitions between a day and a
-  night profile, re-applied as the clock advances and after wake.
-- **One-click presets** — Health, Reading, Office, Editing, Game, Movie, Custom,
-  and Pause, each a tuned temperature/brightness pair.
-- **Focus tools** — Focus Blur and Magic Window for distraction-free reading.
-- **System-tray flyout** — real sliders in a tray-anchored popup, plus a
-  top-center notification overlay for hotkey feedback.
-- **Global hotkeys** — settings-driven shortcuts, hot-swapped without a restart.
-- **Native and light** — a Tauri v2 binary with a Base UI + Tailwind v4 design
-  system; no Electron, small downloads.
+## The filter
+
+### 1000 K to 6500 K, in 50 K steps
+
+One slider spans candle-warm to unfiltered daylight in 50 K steps, and a second
+takes brightness from 100 % down to 10 %. Both are software gamma, applied at
+scan-out — which is why a screenshot of a dimmed screen comes out clean.
+
+## What it does
+
+### Six surfaces, one seam
+
+Eight editable presets, a scheduler that interpolates between a day and a night
+endpoint on every axis, and a set of overlays for the times a whole-screen filter
+is the wrong tool.
+
+| | |
+| --- | --- |
+| **[Per-monitor targeting](https://dahshury.github.io/dimread/docs/display)** | Every display shares one setting, or each one carries its own override. Switch a monitor off entirely and it keeps the original ramp it booted with. |
+| **[Sunrise to sunset](https://dahshury.github.io/dimread/docs/schedule)** | Sun times are computed offline from a 418-zone table compiled into the app. No location prompt, no geolocation API, no network request. |
+| **[Rules per app](https://dahshury.github.io/dimread/docs/app-rules)** | Match on process name, window class or title and switch modes when that window takes the foreground. Full-screen games drop the filter automatically. |
+| **[Window effects](https://dahshury.github.io/dimread/docs/window-effects)** | A clear band that follows your reading, a spotlight that dims every other window, and per-window invert or grayscale on top of the global filter. |
+| **[Twelve hotkeys](https://dahshury.github.io/dimread/docs/hotkeys)** | Step temperature and brightness, toggle the filter, Reading, Editing and every window effect. Bindings arm on save — nothing needs a restart. |
+| **[It lives in the tray](https://dahshury.github.io/dimread/docs/tray-and-overlay)** | Right-click gets you the flyout: the same two sliders and all eight modes, without opening a window. The icon itself reports the active mode and phase. |
+
+## Support
+
+### Where it runs, honestly
+
+DimRead is alpha, and the three platforms are not at the same place. This is what
+actually works on each one today.
+
+| Platform | Version | State |
+| --- | --- | --- |
+| **Windows** | 10 and 11 | Everything works here. The default install is portable: settings and logs sit beside the app, with no Add/Remove entry and no shortcuts. |
+| **macOS** | 10.15 and later | Temperature and brightness apply through public CoreGraphics calls, with no permission prompts at all. *Per-app rules and the window effects are not wired up yet.* |
+| **Linux** | X11 and wlroots | X11 goes through RandR 1.2. On Wayland, sway, Hyprland, river and labwc expose the gamma protocol DimRead needs. *GNOME and KDE do not expose it, so the filter has no effect there.* |
 
 ## First-run notes
 
@@ -132,6 +169,9 @@ must stay in lockstep across `package.json`, `src-tauri/tauri.conf.json`, and
 
 ## Architecture
 
+DimRead is a **Tauri v2 + React 19** binary — native, no Electron. Its only
+visible surface is the settings window; the tray flyout drives the same values.
+
 The frontend follows **[Feature-Sliced Design](https://feature-sliced.design/)
 (FSD v2.1)** (`app → views → widgets → features → entities → shared`, imports
 pointing strictly downward), enforced by a deterministic checker:
@@ -141,13 +181,17 @@ bun run check:fsd
 ```
 
 The Rust backend is organized by infrastructure concern (`windows/`, `settings/`,
-`display/`, `hotkeys/`, `focus/`, `magicx/`, `rules/`, `tray_menu/`, `bootstrap/`), with typed IPC
-generated by tauri-specta — after changing commands or events, regenerate
-`src/bindings.ts` with `cd src-tauri && cargo test export_bindings`.
+`display/`, `hotkeys/`, `focus/`, `magicx/`, `rules/`, `tray_menu/`, `bootstrap/`),
+with typed IPC generated by tauri-specta — after changing commands or events,
+regenerate `src/bindings.ts` with `cd src-tauri && cargo test export_bindings`.
+
+The brand mark is **code**, not a raster export: `tools/assets/dimread_mark.py`
+draws one geometry that renders into the app icons and the tray's 32-PNG state
+family (8 modes × day/night × light/dark taskbar). Regenerate with
+`python tools/assets/generate-icons.py`; never hand-edit `src-tauri/icons/`.
 
 Re-skinning happens in the `@theme` blocks of `src/app/styles/globals.css`. See
-[`AGENTS.md`](AGENTS.md) for the full contributor/agent guide (architecture
-boundaries, verification gates, and the template rename checklist).
+[`AGENTS.md`](AGENTS.md) for the full contributor/agent guide.
 
 ## Documentation
 
@@ -162,10 +206,10 @@ bun run docs:build    # static output → docs-site/build/client
 ```
 
 Every screenshot on that site (and in this README) is a capture of the **real
-renderer**, not a mock-up. `tools/docs/capture-screenshots.mjs` injects a small
-mock of the Tauri IPC bridge, drives the actual windows with Playwright, and
-reads the settings defaults straight from the app's own zod schema — so the
-values in the pictures cannot drift from the values in the code:
+renderer**. `tools/docs/capture-screenshots.mjs` injects a small mock of the
+Tauri IPC bridge, drives the actual windows with Playwright, and reads the
+settings defaults straight from the app's own zod schema — so the values in the
+pictures cannot drift from the values in the code:
 
 ```sh
 bun run dev:vite      # in one terminal
@@ -190,6 +234,10 @@ The docs site has its own gates, run by the Docs workflow:
 ```sh
 cd docs-site && bun run typecheck && bun run build && bun run check:links
 ```
+
+## Changelog
+
+Release notes live in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

@@ -1,6 +1,7 @@
 ---
 title: Schedule
 description: Set when night starts — sunrise and sunset from your timezone, a chosen city or exact coordinates, the fade width, and the Windows theme that follows it.
+icon: schedule
 ---
 
 **Settings → Schedule** answers one question — *when is it night?* — then lists what
@@ -13,7 +14,7 @@ The on/off switch is not here. **Auto day/night** sits at the top of
 tab holds the schedule behind it.
 
 <Screenshot
-	alt="The DimRead settings window on the Schedule tab, showing Day and night settings with Time source set to Custom time, Sunrise 7:00, Sunset 19:00, Transition 60 min, and a Windows theme section with System theme set to Disable."
+	alt="The DimRead settings window on the Schedule tab, showing Day and night settings with Time source set to Automatic, a detected location read out as From your system timezone, London, with today's sunrise 05:12 and sunset 20:47, Transition 60 min, and a Windows theme section with System theme set to Disable."
 	caption="Settings → Schedule. Day and night settings on top, the Windows theme that follows them below."
 	priority
 	src="settings-schedule.webp"
@@ -43,7 +44,8 @@ output to the **day** profile, not to whatever was last on screen.
 
 Three segments: **Automatic** (coordinates from your system timezone), **Manual**
 (you say where you are), **Custom time** (fixed clock hours, no astronomy). A fresh
-install starts on **Custom time** with 07:00 and 19:00.
+install starts on **Automatic**, so the schedule follows real sun times for wherever
+your machine says it is without you entering anything.
 
 Picking **Custom time** leaves your location choice untouched, so coming back to a
 sun-based schedule restores the way you had it set up.
@@ -177,9 +179,15 @@ theme change.
   profile at every minute of the day — that ramp has no midnight-wrapping branch and
   the UI does not stop you. The Windows theme schedule *does* wrap, so the two
   visibly disagree there.
-- **Hotkeys edit the day endpoint mid-fade.** *Transition* is not an editable
-  endpoint, so the brightness and temperature hotkeys — and the tray flyout — fall
-  back to the **day** value while the screen shows a blend.
+- **Mid-fade edits land on whichever endpoint dominates.** *Transition* is not an
+  editable endpoint, so while the screen is showing a blend the hotkeys and the
+  tray flyout write to the **day** value once the ramp is at least halfway to day
+  (factor ≥ 0.5) and to the **night** value below that. Ties go to day. This is
+  deliberate: editing the endpoint that is fading *out* would barely move the
+  screen — at factor 0.05 a full-range brightness drag changes the output by 5 % —
+  so an edit always has at least half the authority over what you can see. The
+  consequence is that one hotkey press early in the evening ramp and another late
+  in it can write to two different stored values.
 - **No clock-change notification off Windows.** Change the system clock on macOS or
   Linux with no DimRead window focused and no resume happening, and the schedule
   catches up only at its next deadline, computed against the old clock.
@@ -190,8 +198,36 @@ Every edit here saves immediately — no Save button, no restart.
 
 ## Where to go next
 
-- **[Display](/docs/display)** — the sliders, the eight modes and their day/night
-  endpoint pairs, per-monitor overrides.
-- **[Hotkeys](/docs/hotkeys)** — the steppers that write the current phase's endpoint.
-- **[Troubleshooting](/docs/troubleshooting)** — if the schedule fires at the wrong
-  time or the screen never warms.
+<Cards>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+The sliders, the eight modes and their day/night endpoint pairs, per-monitor overrides.
+
+	</Card>
+
+	<Card
+		href="/docs/hotkeys"
+		icon={<PageIcon name="hotkeys" />}
+		title="Hotkeys"
+	>
+
+The steppers that write the current phase's endpoint.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+If the schedule fires at the wrong time or the screen never warms.
+
+	</Card>
+
+</Cards>

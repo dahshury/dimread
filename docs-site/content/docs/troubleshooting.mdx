@@ -1,6 +1,7 @@
 ---
 title: Troubleshooting
 description: Find the log, work through the symptoms other people hit first, and check the honest per-platform support matrix before filing a bug.
+icon: trouble
 ---
 
 Most DimRead problems are one of three things: a Wayland session, a Windows-only
@@ -60,7 +61,7 @@ The sliders move, the readout changes, and the screen does not.
   paused moves you to **Custom** by design — that is expected.)
 - Brightness stops at **10%** in the default range. Turn on Settings → Display →
   **Wide brightness range** to reach 0%; the temperature equivalent is **Wide
-  colour range** (0–10000 K instead of 1000–6500 K).
+  colour range** (1000–10000 K instead of 1000–6500 K).
 - DimRead dims in software by scaling the GPU gamma ramp. There is no DDC/CI and no
   backlight control in it at all, so it goes darker than your monitor's own minimum
   but can never make the panel brighter than its current backlight.
@@ -299,11 +300,46 @@ Linux, the monitor list from Settings → Display, and the relevant `[display]` 
 
 ## Where to go next
 
-- **[Diagnostics](/docs/diagnostics)** — every file DimRead writes, and how to read
-  the log.
-- **[Display](/docs/display)** — monitor targeting, the wide ranges, and what each
-  mode applies.
-- **[Hotkeys](/docs/hotkeys)** — the twelve bindable actions and the recorder's
-  rules.
-- **[FAQ](/docs/faq)** — short answers to the questions this page does not treat as
-  faults.
+<Cards>
+
+	<Card
+		href="/docs/diagnostics"
+		icon={<PageIcon name="diagnostics" />}
+		title="Diagnostics"
+	>
+
+Every file DimRead writes, and how to read the log.
+
+	</Card>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+Monitor targeting, the wide ranges, and what each mode applies.
+
+	</Card>
+
+	<Card
+		href="/docs/hotkeys"
+		icon={<PageIcon name="hotkeys" />}
+		title="Hotkeys"
+	>
+
+The twelve bindable actions and the recorder's rules.
+
+	</Card>
+
+	<Card
+		href="/docs/faq"
+		icon={<PageIcon name="faq" />}
+		title="FAQ"
+	>
+
+Short answers to the questions this page does not treat as faults.
+
+	</Card>
+
+</Cards>

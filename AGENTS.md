@@ -82,12 +82,26 @@ light/dark taskbar — which `tray.rs` embeds with `include_bytes!`.
 python tools/assets/generate-icons.py     # or: uv run --with pillow ...
 ```
 
-Adding a display mode therefore means adding its glyph to `MODE_GLYPHS`, its id to
+The mark is **"the Dial"**: one invariant circular silhouette cut by straight seams into
+a body colour (identity) and an accent region (the light being emitted). Mode changes only
+the accent's topology, phase only its hue, taskbar theme only the palette. Three rules make
+it survive the tray, and all three are load-bearing:
+
+1. **The outline never changes.** The alpha channel is byte-identical across all 32 states.
+   A previous mark encoded state partly in the silhouette and lost a corner against a dark
+   taskbar — the icon appeared to change shape between day and night.
+2. **Nothing approaches the taskbar's luminance.** On-dark stays above ~100, on-light below
+   ~160. The on-light palette separates body from accent by HUE at matched luminance, which
+   is why it cannot dissolve into either background.
+3. **No badges, glyphs or interior detail.** Windows scales the single 64 px asset down to
+   16 px itself, so there is no opportunity to swap in simpler artwork at small sizes.
+
+Adding a display mode therefore means adding its spec to `MODE_GLYPHS`, its id to
 `DISPLAY_MODE_IDS` (`settings/mod.rs`) and to `TRAY_ICON_VARIANTS` (`tray.rs`), then
 re-running the generator. Rust tests fail if those rosters drift, if any of the 32 files
 is missing or undecodable, or if two states share artwork. Never hand-edit a file under
 `src-tauri/icons/`, and always eyeball
-`tools/assets/icon-preview/contact-sheet.png` after a glyph change — a tray icon is
+`tools/assets/icon-preview/contact-sheet.png` after a change — a tray icon is
 judged at 16 px, not at 512.
 
 ### Docs live in `docs-site/`, and its screenshots are generated
@@ -99,6 +113,22 @@ judged at 16 px, not at 512.
 the product. Content is MDX under `docs-site/content/docs/`; the sidebar order is
 `content/docs/meta.json`; the palette is the app's own tokens, re-declared in
 `docs-site/app/app.css`.
+
+That stylesheet is the docs' **whole** design system — tokens, the Fumadocs shell
+re-skin, prose rhythm and the landing-page primitives — and it carries its own
+"RE-SKIN HERE" block, same as the app's `globals.css`. Three things about it are
+easy to break:
+
+- **Geist is vendored, not linked.** `docs-site/app/assets/fonts/` holds a copy of
+  the same `.woff2` files as the app's `public/fonts/`, referenced by *relative*
+  URL so Vite fingerprints them and they survive the `/dimread/` sub-path. A
+  root-relative `/fonts/…` would 404 in production.
+- **`meta.json` uses Fumadocs separators** (`"---The filter---"`) for the sidebar
+  section labels, and frontmatter `icon:` names a glyph in `app/lib/page-icons.tsx`.
+  An icon name with no entry there silently renders nothing.
+- **Page primitives are per-layout.** The site uses the *notebook* `DocsLayout`, so
+  `DocsPage`/`DocsBody`/`DocsTitle` must come from `fumadocs-ui/layouts/notebook/page`.
+  Importing them from `…/docs/page` throws at render time, not at build time.
 
 Its screenshots are **build output, not artwork**. `tools/docs/capture-screenshots.mjs`
 mocks the Tauri IPC bridge, drives the real renderer with Playwright, and takes the

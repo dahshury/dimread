@@ -1,6 +1,7 @@
 ---
 title: App rules
 description: Switch display modes automatically from the foreground app, pause the filter for full-screen games, and understand exactly which rule wins.
+icon: rules
 ---
 
 A rule says "when this app is in front, use that mode". A colour-critical editor
@@ -157,11 +158,46 @@ so it is Windows-only too, despite defaulting to on.
 
 ## Where to go next
 
-- **[Display](/docs/display)** — the eight modes a rule can force, and what each
-  preset applies.
-- **[Schedule](/docs/schedule)** — how day/night picks the endpoint of whichever
-  mode a rule chose.
-- **[Hotkeys](/docs/hotkeys)** — which hotkeys edit the overridden mode and which
-  don't.
-- **[Troubleshooting](/docs/troubleshooting)** — start here if a rule never
-  fires.
+<Cards>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+The eight modes a rule can force, and what each preset applies.
+
+	</Card>
+
+	<Card
+		href="/docs/schedule"
+		icon={<PageIcon name="schedule" />}
+		title="Schedule"
+	>
+
+How day/night picks the endpoint of whichever mode a rule chose.
+
+	</Card>
+
+	<Card
+		href="/docs/hotkeys"
+		icon={<PageIcon name="hotkeys" />}
+		title="Hotkeys"
+	>
+
+Which hotkeys edit the overridden mode and which don't.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Start here if a rule never fires.
+
+	</Card>
+
+</Cards>

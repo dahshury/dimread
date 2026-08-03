@@ -2,14 +2,18 @@
   "title": "DimRead docs",
   "pages": [
     "index",
+    "---The filter---",
     "display",
     "schedule",
     "app-rules",
     "window-effects",
+    "---Control---",
     "hotkeys",
     "tray-and-overlay",
+    "---The app---",
     "general",
     "diagnostics",
+    "---Help---",
     "troubleshooting",
     "faq",
     "about"

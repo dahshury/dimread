@@ -1,6 +1,7 @@
 ---
 title: FAQ
 description: Short answers on privacy, colour accuracy, HDR, sleep and Remote Desktop, hotkeys, and the per-platform gaps, each pointing at the page that owns the detail.
+icon: faq
 ---
 
 Every answer below is one or two sentences and a link to the page that covers the
@@ -161,7 +162,7 @@ administrator can't be detected, so they won't be highlighted."
 No to both. The installer runs per-user with no elevation prompt and installs
 portable by default, into `Desktop\DimRead` unless you pick another folder,
 keeping settings, logs and window state in a `Data\` folder beside the
-executable. Two opt-in features do write under `HKCU`: **Start at login** adds a
+executable. Two opt-in features do write under `HKCU`: **Start on login** adds a
 `Run` value named `DimRead`, and **System theme** on Settings → Schedule sets
 `Themes\Personalize\SystemUsesLightTheme`. A portable install has no uninstaller,
 so remove that `Run` value by hand if you delete the folder.
@@ -199,10 +200,46 @@ visible surface never appears.
 
 ## Where to go next
 
-- **[Troubleshooting](/docs/troubleshooting)** — symptom-shaped fixes, including
-  the platform gaps named above.
-- **[Diagnostics](/docs/diagnostics)** — where the log, the settings file and the
-  recovery journal live.
-- **[Display](/docs/display)** — the sliders, the eight modes, and per-monitor
-  targeting.
-- **[About](/docs/about)** — version, update checks, licence and credits.
+<Cards>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Symptom-shaped fixes, including the platform gaps named above.
+
+	</Card>
+
+	<Card
+		href="/docs/diagnostics"
+		icon={<PageIcon name="diagnostics" />}
+		title="Diagnostics"
+	>
+
+Where the log, the settings file and the recovery journal live.
+
+	</Card>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+The sliders, the eight modes, and per-monitor targeting.
+
+	</Card>
+
+	<Card
+		href="/docs/about"
+		icon={<PageIcon name="about" />}
+		title="About"
+	>
+
+Version, update checks, licence and credits.
+
+	</Card>
+
+</Cards>

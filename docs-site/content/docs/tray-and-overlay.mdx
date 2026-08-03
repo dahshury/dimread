@@ -1,6 +1,7 @@
 ---
 title: Tray and flyout
 description: Read the tray icon's state glyph and tooltip, and drive the filter from the right-click flyout.
+icon: tray
 ---
 
 DimRead is a tray app, so on most days you never open the settings window at all.
@@ -45,18 +46,26 @@ while you drag a slider.
 **Note:** the tooltip is hard-coded English. It doesn't follow the app's language
 setting.
 
-### Reading the glyph
+### Reading the mark
 
-The icon is a family of **32 renderings**, picked on three axes:
+The icon is one disc — the same closed circle in every state — cut by straight
+seams into two flat colours. The **body** is DimRead's identity violet; the
+**accent** is the light currently being emitted. It is a family of **32
+renderings**, picked on three axes:
 
-- **Display mode** — one glyph each for Pause, Health, Game, Movie, Office,
-  Editing, Reading and Custom, so you can tell at a glance whether anything is
-  being applied.
-- **Day / night phase** — the same mark tinted cool for day and warm for night,
-  following the scheduler. There is no third artwork: a `transition` phase renders
-  as **day**, and the tooltip carries the exact numbers.
-- **Taskbar theme** — an on-dark and an on-light rendering, so the mark stays
-  legible either way.
+- **Display mode** — the shape of the accent region. Pause is the only state with
+  no seam at all: the whole disc is accent, so "nothing is being applied" reads
+  instantly. The others split the disc — a warm bottom (Health), top (Reading),
+  left (Movie) or right (Editing) half, or a band through the centre running
+  vertically (Game), horizontally (Office) or on the diagonal (Custom).
+- **Day / night phase** — only the accent's hue changes, cool for day and warm
+  for night, following the scheduler. There is no third artwork: a `transition`
+  phase renders as **day**, and the tooltip carries the exact numbers.
+- **Taskbar theme** — an on-dark and an on-light palette, so the mark stays
+  legible either way. Nothing in it ever approaches the taskbar's own luminance.
+
+The outline never changes — only the colours inside it do. That is what keeps
+the icon readable when Windows scales the single asset down to 16 px.
 
 That's 8 × 2 × 2. All of them are generated from one base mark by
 `tools/assets/generate-icons.py` and compiled into the binary — build output,
@@ -91,7 +100,7 @@ Top to bottom, in a 284 px-wide panel:
   engine has reported state, which is why the panel's height varies.
 - **Brightness** — 10–100 % in 1 % steps, or 0–100 % if you've turned on the wide
   brightness range on the [Display](/docs/display) tab.
-- **Colour temperature** — 1000–6500 K in 50 K steps, or 0–10000 K with the wide
+- **Colour temperature** — 1000–6500 K in 50 K steps, or 1000–10000 K with the wide
   range on.
 - **The mode grid** — all eight presets, four across and two down; hovering one
   shows its description. Picking a mode **keeps the flyout open**, so you can try
@@ -105,9 +114,11 @@ There's no "Show" row — Settings *is* the app window, and a left click on the
 tray icon already surfaces it.
 
 Two rules make the flyout different from the Display tab: it always edits the
-**live phase** (during a day↔night transition your edit lands on the **day**
-values) and it always edits **all monitors**. Per-monitor overrides and explicit
-day/night editing live in Settings → Display.
+**live phase** — and during a day↔night transition, the endpoint that dominates
+the screen at that moment rather than a fixed one (see
+[Limitations](/docs/schedule#limitations)) — and it always edits **all
+monitors**. Per-monitor overrides and explicit day/night editing live in
+Settings → Display.
 
 Slider values stream to the screen as a preview while you drag and are only saved
 when you release. Dragging while the mode is Pause moves you to **Custom**, seeded
@@ -152,11 +163,46 @@ decision, not a missing feature.
 
 ## Where to go next
 
-- **[Display](/docs/display)** — the full sliders, the eight modes, and the
-  per-monitor targeting the flyout deliberately skips.
-- **[Hotkeys](/docs/hotkeys)** — bind **Show / hide DimRead** and skip the tray
-  entirely.
-- **[General](/docs/general)** — **Minimize to tray** is on by default, which is
-  why closing the window doesn't quit.
-- **[Troubleshooting](/docs/troubleshooting)** — no tray icon, or a flyout that
-  opens in the wrong place.
+<Cards>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+The full sliders, the eight modes, and the per-monitor targeting the flyout deliberately skips.
+
+	</Card>
+
+	<Card
+		href="/docs/hotkeys"
+		icon={<PageIcon name="hotkeys" />}
+		title="Hotkeys"
+	>
+
+Bind **Show / hide DimRead** and skip the tray entirely.
+
+	</Card>
+
+	<Card
+		href="/docs/general"
+		icon={<PageIcon name="general" />}
+		title="General"
+	>
+
+**Minimize to tray** is on by default, which is why closing the window doesn't quit.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+No tray icon, or a flyout that opens in the wrong place.
+
+	</Card>
+
+</Cards>

@@ -8,6 +8,21 @@ is needed.
 Reference sheet: `competitor-marks.png` — 10 shipping marks in this category, each at
 128 px and at 16 px on a dark taskbar strip.
 
+> **The shipped mark is now "the Dial" — a seam system, not a glyph system.** One
+> invariant disc, cut by straight full-width seams into a body colour and an accent
+> region; mode changes the accent's topology, phase its hue, theme the palette. The
+> per-mode pictograms this document spends section 1 dissecting (the heart, the play
+> triangle, the bookmark, the briefcase) are **gone**, along with the exploration
+> boards that produced them. Section 1's *rules* still hold and are still binding —
+> especially rule 6 — but do not reconstruct the glyph roster from them.
+>
+> Two failures are worth not repeating. A knocked-through glyph puts state into the
+> ALPHA channel, and a gradient mark whose dark end nears the taskbar's own luminance
+> loses part of its silhouette — in both cases the icon appears to change *shape*
+> between states. The Dial answers both: the alpha channel is byte-identical across
+> all 32 states, and the on-light palette separates body from accent by hue at matched
+> luminance rather than by lightness.
+
 ---
 
 ## 1. What the category actually looks like

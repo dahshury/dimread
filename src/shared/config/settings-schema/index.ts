@@ -207,8 +207,10 @@ export function asLocationSource(value: string): LocationSourceId {
 export const dayNightSettingsSchema = z.object({
 	enabled: z.boolean().catch(true).default(true),
 	/** Compute sun times from a location instead of manual strings. WHICH
-	 *  location is `locationSource`'s job. */
-	useLocation: z.boolean().catch(false).default(false),
+	 *  location is `locationSource`'s job. On by default because the default
+	 *  source (`"auto"`) needs nothing entered — must stay in lockstep with
+	 *  `DayNightSettings::default()` in `src-tauri/src/settings/mod.rs`. */
+	useLocation: z.boolean().catch(true).default(true),
 	/**
 	 * Where the coordinates come from — one of {@link LOCATION_SOURCE_IDS}.
 	 * Typed as a plain string (not a Zod enum) so this section stays structurally

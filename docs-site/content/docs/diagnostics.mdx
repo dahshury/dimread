@@ -1,6 +1,7 @@
 ---
 title: Diagnostics
 description: Find DimRead's log file, read what the display engine wrote, check whether your session can do gamma control at all, and file a bug report someone can act on.
+icon: diagnostics
 ---
 
 Most people never need this page. It exists for the case where the screen will not
@@ -188,7 +189,7 @@ readout moved while the screen did not.
 </Steps>
 
 <Screenshot
-	alt="The DimRead settings window on the About tab, showing Name DimRead, Version 0.0.4-alpha and Tauri 2.11.2, plus Check for updates and links to GitHub, Docs and Releases."
+	alt="The DimRead settings window on the About tab, showing Name DimRead, Version 0.0.4-alpha and Tauri 2.11.5, plus Check for updates and links to GitHub, Docs and Releases."
 	caption="Settings → About. The version string here is the first thing a bug report needs."
 	src="settings-about.webp"
 	width={780}
@@ -196,9 +197,36 @@ readout moved while the screen did not.
 
 ## Where to go next
 
-- **[Troubleshooting](/docs/troubleshooting)** — symptom-shaped fixes; start there
-  before you read a log.
-- **[General](/docs/general)** — portable mode, where settings live, and the startup
-  options.
-- **[About](/docs/about)** — version, update checks, and what DimRead does and does not
-  send.
+<Cards>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Symptom-shaped fixes; start there before you read a log.
+
+	</Card>
+
+	<Card
+		href="/docs/general"
+		icon={<PageIcon name="general" />}
+		title="General"
+	>
+
+Portable mode, where settings live, and the startup options.
+
+	</Card>
+
+	<Card
+		href="/docs/about"
+		icon={<PageIcon name="about" />}
+		title="About"
+	>
+
+Version, update checks, and what DimRead does and does not send.
+
+	</Card>
+
+</Cards>

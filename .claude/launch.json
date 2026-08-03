@@ -12,6 +12,12 @@
 			"runtimeExecutable": "bun",
 			"runtimeArgs": ["run", "dev:vite", "--", "--port", "1440", "--strictPort"],
 			"port": 1440
+		},
+		{
+			"name": "dimread-docs",
+			"runtimeExecutable": "bun",
+			"runtimeArgs": ["run", "docs:dev"],
+			"port": 5173
 		}
 	]
 }

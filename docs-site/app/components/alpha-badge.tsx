@@ -7,7 +7,8 @@
  */
 export function AlphaBadge() {
 	return (
-		<span className="rounded-full bg-fd-primary px-2 py-0.5 font-semibold text-fd-primary-foreground text-xs uppercase tracking-wide">
+		<span className="inline-flex items-center gap-1.5 rounded-full border border-fd-primary/40 bg-fd-primary/10 px-2.5 py-0.5 font-semibold text-[0.6875rem] text-fd-primary uppercase tracking-[0.08em]">
+			<span className="size-1.5 rounded-full bg-fd-primary" />
 			Alpha
 		</span>
 	);

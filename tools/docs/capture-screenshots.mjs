@@ -44,6 +44,18 @@ const APP_VERSION = JSON.parse(
 	readFileSync(path.join(repoRoot, "src-tauri", "tauri.conf.json"), "utf8"),
 ).version;
 
+/**
+ * The Tauri runtime the About tab reports, taken from the RESOLVED version in
+ * Cargo.lock rather than the caret range in Cargo.toml — those differ (the
+ * manifest asks for 2.11.2 and the lock pins 2.11.5), and the app reports what
+ * it actually links against. Hard-coding it here is what let the About
+ * screenshot drift a patch release behind the page describing it.
+ */
+const TAURI_VERSION =
+	/^name = "tauri"\r?\nversion = "([^"]+)"/m.exec(
+		readFileSync(path.join(repoRoot, "src-tauri", "Cargo.lock"), "utf8"),
+	)?.[1] ?? "2";
+
 function readFlag(name, fallback) {
 	const index = process.argv.indexOf(`--${name}`);
 	return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
@@ -159,6 +171,7 @@ const TIMEZONES = [
  */
 function installMockBridge({
 	appVersion,
+	tauriVersion,
 	display,
 	label,
 	monitors,
@@ -212,7 +225,7 @@ function installMockBridge({
 		"plugin:os|locale": () => "en-US",
 		"plugin:app|version": () => appVersion,
 		"plugin:app|name": () => "DimRead",
-		"plugin:app|tauri_version": () => "2.11.2",
+		"plugin:app|tauri_version": () => tauriVersion,
 	};
 
 	let nextCallback = 1;
@@ -356,6 +369,7 @@ async function capture(browser, shot) {
 	const settings = settingsFixture();
 	await page.addInitScript(installMockBridge, {
 		appVersion: APP_VERSION,
+		tauriVersion: TAURI_VERSION,
 		display: {
 			kelvin: 5500,
 			brightness: 85,

@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "react-router dev",
     "build": "react-router build",
-    "preview": "serve ./build/client --config ./serve.json",
+    "preview": "DOCS_BASE=/ react-router build && serve ./build/client",
     "typecheck": "react-router typegen && fumadocs-mdx && tsc --noEmit",
     "check:links": "node scripts/link-audit.mjs"
   },

@@ -527,7 +527,9 @@ export type DisplaySettings = {
  */
 mode: string;
 /**
- * Widen the temperature range to 0..=10000 K (default 1000..=6500 K).
+ * Widen the temperature range to 1000..=10000 K (default 1000..=6500 K).
+ * Only the ceiling moves — see `KELVIN_RANGE_WIDE` in `display::values`,
+ * which is what actually clamps.
  */
 wideRange: boolean;
 /**

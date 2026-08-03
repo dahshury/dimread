@@ -1,6 +1,7 @@
 ---
 title: Display
 description: Target one monitor or all of them, set colour temperature and brightness, and learn what each of the eight preset modes actually applies.
+icon: display
 ---
 
 **Settings → Display** is the tab you will live in. Its top half, **Quick
@@ -147,7 +148,7 @@ pointer by about a tenth of a second. Off, every change is written immediately.
 
 ### Wide colour range
 
-Off by default. Extends the temperature range to **0–10000 K**. The app's own
+Off by default. Extends the temperature range to **1000–10000 K**. The app's own
 tooltip is the caveat: temperatures above 6500 K increase blue-light exposure and
 are not recommended.
 
@@ -204,11 +205,46 @@ all trigger a re-apply.
 
 ## Where to go next
 
-- **[Schedule](/docs/schedule)** — sunrise/sunset, transition length, and the
-  day/night endpoints these presets interpolate between.
-- **[App rules](/docs/app-rules)** — per-app mode switching and full-screen
-  detection.
-- **[Hotkeys](/docs/hotkeys)** — step temperature and brightness, and toggle
-  Reading, Editing or the filter without opening the window.
-- **[Troubleshooting](/docs/troubleshooting)** — start here if the sliders move
-  and the screen does not.
+<Cards>
+
+	<Card
+		href="/docs/schedule"
+		icon={<PageIcon name="schedule" />}
+		title="Schedule"
+	>
+
+Sunrise/sunset, transition length, and the day/night endpoints these presets interpolate between.
+
+	</Card>
+
+	<Card
+		href="/docs/app-rules"
+		icon={<PageIcon name="rules" />}
+		title="App rules"
+	>
+
+Per-app mode switching and full-screen detection.
+
+	</Card>
+
+	<Card
+		href="/docs/hotkeys"
+		icon={<PageIcon name="hotkeys" />}
+		title="Hotkeys"
+	>
+
+Step temperature and brightness, and toggle Reading, Editing or the filter without opening the window.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Start here if the sliders move and the screen does not.
+
+	</Card>
+
+</Cards>

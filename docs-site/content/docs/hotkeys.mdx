@@ -1,6 +1,7 @@
 ---
 title: Hotkeys
 description: Bind global shortcuts for brightness, colour temperature, the display modes, the app window, Focus Read/Blur and MagicX — and learn which combinations each OS will actually deliver.
+icon: hotkeys
 ---
 
 **Settings → Hotkeys** is the one place any global shortcut is bound. Twelve
@@ -26,7 +27,7 @@ moment you record it; no restart is ever required.
 | --- | --- | --- |
 | Increase brightness | Steps brightness up 5 percentage points. Clamped to 10–100%, or 0–100% with wide brightness range on. | Not set |
 | Decrease brightness | The same step downward. | Not set |
-| Increase colour temperature | Steps colour temperature up 55 K. Clamped to 1000–6500 K, or 0–10000 K with wide colour range on. | Not set |
+| Increase colour temperature | Steps colour temperature up 55 K. Clamped to 1000–6500 K, or 1000–10000 K with wide colour range on. | Not set |
 | Decrease colour temperature | The same step downward. | Not set |
 | Toggle blue-light filter | Switches the mode to Pause and back. A second press returns to the mode you came from, or Health if nothing is remembered. | Not set |
 | Toggle Reading mode | Switches to Reading and back; falls back to Pause. | Not set |
@@ -39,8 +40,14 @@ moment you record it; no restart is ever required.
 
 The four step actions edit the mode **currently on screen** — if a per-app rule
 has overridden your mode, the step lands on the override's preset, not on the
-mode picked in Quick controls — and they edit the **current phase's** endpoint,
-so a night-time press leaves your day value alone.
+mode picked in Quick controls — and they edit the endpoint that **dominates the
+screen right now**, so a night-time press leaves your day value alone.
+
+In full day or full night that is simply the phase you are in. Mid-fade there is
+no *Transition* endpoint to write to, so the press goes to day while the ramp is
+at least halfway to day and to night below that — see
+[Limitations](/docs/schedule#limitations) on Schedule for why, and for the one
+case where it surprises you.
 
 **Note:** the settings file still calls the window toggle `hotkeys.toggleMain`.
 The name predates the removal of a second window and is kept so existing
@@ -206,11 +213,46 @@ stop it from anywhere — unless something else already owns Escape.
 
 ## Where to go next
 
-- **[Display](/docs/display)** — the modes and ranges the step actions and mode
-  toggles operate on.
-- **[Window effects](/docs/window-effects)** — Focus Read, Focus Blur and the
-  MagicX toolbar these bindings drive.
-- **[Tray and flyout](/docs/tray-and-overlay)** — the tray icon that confirms a
-  mode toggle, and the flyout's own sliders.
-- **[Troubleshooting](/docs/troubleshooting)** — start here if a shortcut binds
-  and nothing happens.
+<Cards>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+The modes and ranges the step actions and mode toggles operate on.
+
+	</Card>
+
+	<Card
+		href="/docs/window-effects"
+		icon={<PageIcon name="effects" />}
+		title="Window effects"
+	>
+
+Focus Read, Focus Blur and the MagicX toolbar these bindings drive.
+
+	</Card>
+
+	<Card
+		href="/docs/tray-and-overlay"
+		icon={<PageIcon name="tray" />}
+		title="Tray and flyout"
+	>
+
+The tray icon that confirms a mode toggle, and the flyout's own sliders.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Start here if a shortcut binds and nothing happens.
+
+	</Card>
+
+</Cards>

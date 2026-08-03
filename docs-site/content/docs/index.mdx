@@ -1,6 +1,7 @@
 ---
 title: Getting Started
 description: Download DimRead, get past the first-launch warning, and put a warm, dimmed screen behind your first evening of reading.
+icon: start
 ---
 
 DimRead is a tray app. It warms your display's colour temperature and dims it in
@@ -25,17 +26,23 @@ shows a one-time "unknown developer" prompt on first launch. See
 
 <Tab value="Windows">
 
-`DimRead.exe` is portable: put it wherever you like and run it. It keeps its
-settings and logs in a `Data/` folder next to the executable and writes nothing
-to the registry.
+`DimRead.exe` is an installer that pre-selects **Portable Installation
+(recommended)** and puts the app in `%USERPROFILE%\Desktop\DimRead`. A portable
+install keeps its settings and logs in a `Data/` folder next to the executable,
+and writes no Add/Remove Programs entry, no shortcuts and no uninstaller. See
+[Portable mode](/docs/general#portable-mode) for the details and for how to
+move an existing install.
 
 1. SmartScreen says *"Windows protected your PC."* Click **More info → Run
    anyway**.
-2. DimRead starts minimized to the tray. Look for its icon in the notification
-   area — you may need to expand the overflow chevron and drag it onto the
-   taskbar.
-3. **Left-click** the tray icon to open the settings window; **right-click** it
-   for the flyout, which carries the same sliders and modes.
+2. **The settings window opens on its own**, on the **Display** tab. DimRead
+   creates that window hidden and reveals it as soon as the interface has
+   painted, so there is no flash of an empty rectangle — and no setting to
+   start without it.
+3. Closing the window does not quit: it hides DimRead to the tray. Look for the
+   icon in the notification area — you may need to expand the overflow chevron
+   and drag it onto the taskbar. **Left-click** it to bring the window back;
+   **right-click** it for the flyout, which carries the same sliders and modes.
 
 The zipped build needs the Microsoft Edge **WebView2** runtime, which ships with
 Windows 11 and with most Windows 10 installs.
@@ -52,7 +59,8 @@ Windows 11 and with most Windows 10 installs.
    xattr -dr com.apple.quarantine /Applications/DimRead.app
    ```
 
-3. DimRead appears in the menu bar, not the Dock.
+3. The settings window opens on its own. DimRead lives in the menu bar rather
+   than the Dock, so closing that window leaves the app running there.
 
 <Callout type="warn">
 The macOS display backend is **alpha**. Colour temperature and brightness apply,
@@ -98,9 +106,9 @@ not change. See
 
 <Step>
 
-**Open the window.** Left-click the tray icon. It opens on the **Display** tab.
-(Right-click gets you the flyout instead — the same controls, without the
-window.)
+**Find the window.** It is already open on the **Display** tab after a fresh
+launch. If you closed it, left-click the tray icon to bring it back —
+right-click gets you the flyout instead, the same controls without the window.
 
 </Step>
 
@@ -120,9 +128,12 @@ the sliders shows the exact Kelvin and percentage being applied.
 
 <Step>
 
-**Turn on the schedule.** Flip **Auto day/night**. DimRead now applies your day
-profile between sunrise and sunset and your night profile after it, working the
-sun times out from your system timezone with no location permission prompt.
+**Check the schedule.** **Auto day/night** is already on, and the time source
+already defaults to **Automatic** — DimRead works your sunrise and sunset out
+from the system timezone, offline, with no location permission prompt. Open the
+[Schedule](/docs/schedule) tab and read the **Detected location** line to see
+which city it settled on and what times it derived. Everything from here is
+correcting that guess, not switching the feature on.
 
 </Step>
 
@@ -145,10 +156,46 @@ immediately — no restart.
 
 ## Where to go next
 
-- **[Display](/docs/display)** — the sliders, multi-monitor targeting, and what
-  each of the eight modes actually applies.
-- **[Schedule](/docs/schedule)** — sunrise/sunset, fixed times, and how DimRead
-  finds your location offline.
-- **[Hotkeys](/docs/hotkeys)** — every bindable action and the per-OS caveats.
-- **[Troubleshooting](/docs/troubleshooting)** — start here if the screen does
-  not change.
+<Cards>
+
+	<Card
+		href="/docs/display"
+		icon={<PageIcon name="display" />}
+		title="Display"
+	>
+
+The sliders, multi-monitor targeting, and what each of the eight modes actually applies.
+
+	</Card>
+
+	<Card
+		href="/docs/schedule"
+		icon={<PageIcon name="schedule" />}
+		title="Schedule"
+	>
+
+Sunrise/sunset, fixed times, and how DimRead finds your location offline.
+
+	</Card>
+
+	<Card
+		href="/docs/hotkeys"
+		icon={<PageIcon name="hotkeys" />}
+		title="Hotkeys"
+	>
+
+Every bindable action and the per-OS caveats.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+Start here if the screen does not change.
+
+	</Card>
+
+</Cards>

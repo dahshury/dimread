@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- **The day/night schedule now uses real sun times out of the box.** A fresh
+  install defaults to location-based scheduling with the source set to automatic
+  detection, so sunrise and sunset are resolved from the system timezone without
+  entering anything. Previously the schedule defaulted to fixed 07:00/19:00 clock
+  times, and the only way to say "here" was a coordinate pair — so switching to
+  location mode on an untouched install landed on 0°, 0° (the Gulf of Guinea) and
+  scheduled an equatorial day. The Rust default and the zod schema move together;
+  a test asserts they cannot drift apart.
+- **New brand mark — "the Dial".** The app and tray icons are redrawn from one
+  invariant disc cut by straight seams into an identity body colour and an accent
+  region showing the light being emitted. The display mode changes the accent's
+  shape, the day/night phase changes only its hue, and the taskbar theme selects
+  the palette. Pause is the only state with no seam, so "nothing is being applied"
+  reads at a glance.
+
+  The outline is now byte-identical across all 32 tray states, and no part of the
+  mark comes near the taskbar's own luminance in either theme — the on-light
+  palette separates body from accent by hue at matched lightness rather than by
+  contrast. Both properties are asserted by the generator, because the previous
+  mark encoded part of its state in the silhouette and could appear to change
+  *shape* between day and night on a dark taskbar.
+
+- The widened temperature range is documented accurately as 1000–10000 K: only
+  the ceiling moves, the floor stays at 1000 K.
+
+### Documentation
+
+- The docs site gets a rebuilt landing page — hero, stat row, feature grid, an
+  interactive Kelvin spectrum, a screenshot gallery and an honest per-platform
+  support table — plus a vendored copy of Geist so the fonts survive the
+  `/dimread/` sub-path, and section separators and per-page icons in the sidebar.
+- `README.md` is rebuilt to mirror that landing page, with the mark at the top.
+- The tray documentation now describes how to read the new mark.
+
 ## [0.0.4-alpha] - 2026-07-31
 
 ### Added

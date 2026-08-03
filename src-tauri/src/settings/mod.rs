@@ -192,7 +192,9 @@ pub struct DisplaySettings {
     /// Active mode id: `pause`|`health`|`game`|`movie`|`office`|`editing`|
     /// `reading`|`custom`.
     pub mode: String,
-    /// Widen the temperature range to 0..=10000 K (default 1000..=6500 K).
+    /// Widen the temperature range to 1000..=10000 K (default 1000..=6500 K).
+    /// Only the ceiling moves — see `KELVIN_RANGE_WIDE` in `display::values`,
+    /// which is what actually clamps.
     pub wide_range: bool,
     /// Extend the brightness range down to 0 % (default floor 10 %), letting the
     /// screen dim to fully black (FEATURE-PARITY F2.2).
@@ -271,11 +273,13 @@ impl Default for DayNightSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            use_location: false,
-            // Auto, so selecting "time based on location" is immediately
-            // correct: 0°, 0° is the Gulf of Guinea, and a fresh install that
-            // silently scheduled an equatorial 06:00/18:00 day was the whole
-            // reason the location mode looked broken.
+            // Location-based, because `location_source: "auto"` below now makes
+            // that work with nothing entered. It used to default off: the only
+            // way to say "here" was a coordinate pair, so an untouched install
+            // sat at 0°, 0° (the Gulf of Guinea) and scheduled an equatorial
+            // 06:00/18:00 day. Real sun times for the system timezone beat a
+            // guessed 07:00/19:00 for every user who never opens this panel.
+            use_location: true,
             location_source: "auto".to_string(),
             timezone: String::new(),
             latitude: 0.0,
@@ -775,13 +779,15 @@ mod tests {
     fn day_night_and_rules_defaults() {
         let settings = AppSettings::default();
         assert!(settings.day_night.enabled);
-        assert!(!settings.day_night.use_location);
         assert_eq!(settings.day_night.sunrise, "07:00");
         assert_eq!(settings.day_night.transition_minutes, 60);
         assert!(!settings.rules.enabled);
         assert!(settings.rules.items.is_empty());
-        // Detection, not the 0°, 0° sentinel — a fresh install that switches to
-        // location-based times must get real sun times without typing anything.
+        // Real sun times out of the box: location-based, resolved by DETECTION
+        // rather than the 0°, 0° sentinel. These two must move together — a
+        // location schedule defaulted to manual coordinates would put every
+        // untouched install on the equator.
+        assert!(settings.day_night.use_location);
         assert_eq!(settings.day_night.location_source, "auto");
         assert!(settings.day_night.timezone.is_empty());
     }

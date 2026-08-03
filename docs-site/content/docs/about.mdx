@@ -1,17 +1,20 @@
 ---
 title: About
 description: Read the version DimRead is actually running, check GitHub for a newer release, and find the licence, the privacy position, and how to build from source.
+icon: about
 ---
 
-**Settings → About** is the last tab in the sidebar's *App* group. It answers three
-questions: what exactly am I running, is anything newer published, and who made
-this.
+**Settings → About** is the last tab in the sidebar's *App* group, and it has
+grown past its name: as well as answering *what am I running, is anything newer
+published, and who made this*, it now carries the app's startup, backup,
+logging and reset controls.
 
-Nothing on this tab touches your screen, and nothing on it is a setting — the
-values are read live from the running bundle every time you open it.
+Nothing on this tab touches your screen. Eight sections, in order:
+**Application**, **Updates**, **Startup & privacy**, **Settings backup**,
+**Live debug logs**, **Reset**, **Links** and **Credits**.
 
 <Screenshot
-	alt="The DimRead settings window on the About tab, showing the Application section with Name, Version and Tauri rows, an Updates section with a Check for updates button, a row of GitHub / Docs / Releases link buttons, and the credits paragraph."
+	alt="The DimRead settings window on the About tab, showing the Application section with Name 0.0.4-alpha and Tauri 2.11.5, an Updates section with a Check for updates button, and a Startup & privacy section with Start on login and Send anonymous reports toggles."
 	caption="Settings → About. The only button here that reaches the network is Check for updates."
 	priority
 	src="settings-about.webp"
@@ -31,9 +34,53 @@ The **Application** section is three read-only rows:
   Useful when reporting a bug that looks like a webview or window-manager
   problem rather than a DimRead one.
 
-The **Links** section below the update controls has three buttons that open your
-browser: **GitHub** (the source), **Docs** (this site), and **Releases** (every
-published build and its assets).
+The **Links** section near the bottom has three buttons that open your browser:
+**GitHub** (the source), **Docs** (this site), and **Releases** (every published
+build and its assets).
+
+## Startup & privacy
+
+Two toggles, both **off by default**.
+
+### Start on login
+
+Registers DimRead with your OS's launch-at-login mechanism so the filter and its
+schedule are running before you open anything.
+
+Each platform gets a different entry, all named `DimRead`:
+
+| OS | Where the entry lands |
+| --- | --- |
+| Windows | `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` |
+| macOS | `~/Library/LaunchAgents/DimRead.plist` — it shows up under *Allow in the Background*, not *Open at Login* |
+| Linux | `~/.config/autostart/DimRead.desktop` — the path is hard-coded, so `$XDG_CONFIG_HOME` is ignored |
+
+DimRead reconciles the toggle with the OS after the save lands **and again at
+every startup**, so an entry another tool wiped comes back on its own.
+
+**Note:** on Linux, compositors that don't run XDG autostart entries — sway,
+Hyprland, river — ignore the desktop file, and the toggle has no effect there.
+
+### Send anonymous reports
+
+Allows privacy-scrubbed crash and operational diagnostics *when a reporting
+service is configured*. No service is configured in the builds published today,
+so leaving it on changes nothing — see [Privacy](#privacy).
+
+## Settings backup, logs and reset
+
+Three sections that exist for getting out of trouble:
+
+- **Settings backup** exports the whole settings file to a location you pick,
+  and imports one back. The import asks for confirmation first, because it
+  replaces every value at once.
+- **Live debug logs** streams the log this build is writing into a panel in the
+  window, so you can watch the engine react while you move a slider instead of
+  opening a file afterwards. The file itself is still the record —
+  [Diagnostics](/docs/diagnostics) has its path on each OS.
+- **Reset** restores every setting to its shipped default, behind a
+  confirmation. It does not uninstall anything or touch your monitors' stored
+  originals.
 
 ## Checking for updates
 
@@ -145,9 +192,36 @@ repository root. Bug reports and feature requests go to
 
 ## Where to go next
 
-- **[General](/docs/general)** — start at login, minimize to tray, language and
-  reduced motion, plus every file DimRead writes on each OS.
-- **[Diagnostics](/docs/diagnostics)** — the log file, what the display engine
-  writes into it, crash reports, and how to file a bug report.
-- **[Troubleshooting](/docs/troubleshooting)** — what is implemented on which
-  platform, and what to do when the screen does not change.
+<Cards>
+
+	<Card
+		href="/docs/general"
+		icon={<PageIcon name="general" />}
+		title="General"
+	>
+
+Minimize to tray, language and reduced motion, plus every file DimRead writes on each OS.
+
+	</Card>
+
+	<Card
+		href="/docs/diagnostics"
+		icon={<PageIcon name="diagnostics" />}
+		title="Diagnostics"
+	>
+
+The log file, what the display engine writes into it, crash reports, and how to file a bug report.
+
+	</Card>
+
+	<Card
+		href="/docs/troubleshooting"
+		icon={<PageIcon name="trouble" />}
+		title="Troubleshooting"
+	>
+
+What is implemented on which platform, and what to do when the screen does not change.
+
+	</Card>
+
+</Cards>
